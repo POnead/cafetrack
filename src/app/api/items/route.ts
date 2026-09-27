@@ -8,6 +8,8 @@ import {
   requireQuantity,
   parseThreshold,
   parseExpiryDate,
+  parsePhysicalForm,
+  assertRefExists,
 } from "@/lib/item-validation";
 
 export const runtime = "nodejs";
@@ -69,10 +71,40 @@ export const POST = handler(async (req: Request) => {
   let quantity: number;
   let lowStock: number;
   let expiry: string | null;
+  let physicalForm: string;
   try {
     quantity = requireQuantity(body.quantity, "Quantity");
     lowStock = parseThreshold(body.low_stock_threshold ?? 5, "Low-stock threshold");
     expiry = parseExpiryDate(body.expiration_date);
+    physicalForm = parsePhysicalForm(body.physical_form);
+  } catch (e: any) {
+    if (e instanceof FieldError) return fail(e.message);
+    throw e;
+  }
+
+  // Resolve the reference ids before anything is written. The columns have
+  // foreign keys, so Postgres would reject an unknown id — but by throwing,
+  // which the caller would see as a 500. This keeps it a 400 with a message a
+  // person can act on.
+  let categoryId: string | null;
+  let locationId: string | null;
+  try {
+    categoryId = await assertRefExists(body.category_id, "Category", async (id) => {
+      const { data } = await db()
+        .from("categories")
+        .select("id")
+        .eq("id", id)
+        .maybeSingle();
+      return Boolean(data);
+    });
+    locationId = await assertRefExists(body.location_id, "Location", async (id) => {
+      const { data } = await db()
+        .from("locations")
+        .select("id")
+        .eq("id", id)
+        .maybeSingle();
+      return Boolean(data);
+    });
   } catch (e: any) {
     if (e instanceof FieldError) return fail(e.message);
     throw e;
@@ -80,11 +112,11 @@ export const POST = handler(async (req: Request) => {
 
   // SKU generation: CT-<CATEGORY>-<RANDOM4>
   let categoryLabel = "GEN";
-  if (body.category_id) {
+  if (categoryId) {
     const { data: cat } = await db()
       .from("categories")
       .select("name")
-      .eq("id", body.category_id)
+      .eq("id", categoryId)
       .maybeSingle();
     if (cat?.name) {
       categoryLabel = cat.name.replace(/[^A-Za-z]/g, "").slice(0, 3).toUpperCase() || "GEN";
@@ -111,9 +143,9 @@ export const POST = handler(async (req: Request) => {
     .insert({
       sku,
       name,
-      category_id: body.category_id || null,
-      location_id: body.location_id || null,
-      physical_form: body.physical_form || "solid",
+      category_id: categoryId,
+      location_id: locationId,
+      physical_form: physicalForm,
       unit: body.unit || "pcs",
       quantity,
       low_stock_threshold: lowStock,

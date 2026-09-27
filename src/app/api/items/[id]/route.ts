@@ -7,6 +7,8 @@ import {
   requireQuantity,
   parseThreshold,
   parseExpiryDate,
+  parsePhysicalForm,
+  assertRefExists,
 } from "@/lib/item-validation";
 
 export const runtime = "nodejs";
@@ -59,10 +61,59 @@ export const PATCH = handler(
     };
 
     if (body.name !== undefined) patch.name = String(body.name).trim();
-    if (body.category_id !== undefined) patch.category_id = body.category_id || null;
-    if (body.location_id !== undefined) patch.location_id = body.location_id || null;
-    if (body.physical_form !== undefined) patch.physical_form = body.physical_form;
     if (body.unit !== undefined) patch.unit = body.unit;
+
+    // physical_form is a check constraint, so an unknown value would come back
+    // from Postgres as a thrown error and surface as a 500. Reject it here.
+    if (body.physical_form !== undefined) {
+      try {
+        patch.physical_form = parsePhysicalForm(body.physical_form);
+      } catch (e: any) {
+        if (e instanceof FieldError) return fail(e.message);
+        throw e;
+      }
+    }
+
+    // A reference id that is present must be well-formed. The columns have
+    // foreign keys, so Postgres would reject an unknown id by throwing — which
+    // the caller would see as a 500 rather than a 400.
+    try {
+      if (body.category_id !== undefined) {
+        patch.category_id = await assertRefExists(
+          body.category_id,
+          "Category",
+          async (id) =>
+            Boolean(
+              (
+                await db()
+                  .from("categories")
+                  .select("id")
+                  .eq("id", id)
+                  .maybeSingle()
+              ).data
+            )
+        );
+      }
+      if (body.location_id !== undefined) {
+        patch.location_id = await assertRefExists(
+          body.location_id,
+          "Location",
+          async (id) =>
+            Boolean(
+              (
+                await db()
+                  .from("locations")
+                  .select("id")
+                  .eq("id", id)
+                  .maybeSingle()
+              ).data
+            )
+        );
+      }
+    } catch (e: any) {
+      if (e instanceof FieldError) return fail(e.message);
+      throw e;
+    }
 
     // A rejected field answers 400 rather than letting the database error
     // surface as a 500 from what is really a malformed request.
