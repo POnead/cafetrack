@@ -1,0 +1,128 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #fdf3e3;
+  --peach: #f5d5a8;
+  --cocoa: #5e3a1f;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: #3d2b1f;
+  font-family: var(--font-nunito), system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+@layer components {
+  /* ---------------------------------------------------------------
+     Brand typography — matches the wireframe's script + deco styles
+     --------------------------------------------------------------- */
+
+  .script-logo {
+    font-family: var(--font-pacifico), cursive;
+    color: #fdf3e3;
+    text-shadow: 0 2px 0 rgba(93, 58, 31, 0.22);
+    line-height: 1.15;
+  }
+
+  .script-logo-dark {
+    font-family: var(--font-pacifico), cursive;
+    color: #e8b563;
+    line-height: 1.15;
+  }
+
+  .deco-title {
+    font-family: var(--font-baloo), system-ui, sans-serif;
+    font-weight: 800;
+    color: #f0c582;
+    -webkit-text-stroke: 1.5px #ffffff;
+    text-shadow: 2px 3px 0 rgba(93, 58, 31, 0.2);
+    letter-spacing: 0.01em;
+  }
+
+  /* ---------------------------------------------------------------
+     Surfaces
+     --------------------------------------------------------------- */
+
+  .card {
+    @apply rounded-2xl border border-cream-200 bg-white shadow-warm;
+  }
+
+  /* ---------------------------------------------------------------
+     Buttons — pill shaped, peach fill
+     --------------------------------------------------------------- */
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 bg-cream-500 text-cocoa-900 hover:bg-cream-600;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 border border-cream-300 bg-white text-cocoa-700 hover:bg-cream-100;
+  }
+
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 border border-red-200 bg-white text-red-600 hover:bg-red-50;
+  }
+
+  /* ---------------------------------------------------------------
+     Forms
+     --------------------------------------------------------------- */
+
+  .input {
+    @apply w-full rounded-xl border border-cream-300 bg-white px-3.5 py-2.5 text-sm text-cocoa-900 outline-none transition placeholder:text-cocoa-300 focus:border-cream-500 focus:ring-2 focus:ring-cream-200;
+  }
+
+  .label {
+    @apply mb-1.5 block text-xs font-bold text-cocoa-500;
+  }
+
+  /* ---------------------------------------------------------------
+     Tables
+     --------------------------------------------------------------- */
+
+  .th {
+    @apply px-3 py-2.5 text-left text-[11px] font-bold uppercase tracking-wide text-cocoa-500;
+  }
+
+  .td {
+    @apply border-t border-cream-100 px-3 py-2.5 text-sm text-cocoa-700;
+  }
+
+  /* ---------------------------------------------------------------
+     Misc
+     --------------------------------------------------------------- */
+
+  .badge {
+    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold;
+  }
+}
+
+/* Custom scrollbar so the warm theme carries into scroll areas */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #f0c582;
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #d99b3f;
+  background-clip: content-box;
+}

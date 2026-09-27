@@ -1,0 +1,224 @@
+
+> cafetrack@0.1.0 dev
+> next dev
+
+  ▲ Next.js 14.2.15
+  - Local:        http://localhost:3000
+  - Environments: .env.local
+
+ ✓ Starting...
+ ✓ Ready in 3.1s
+ ○ Compiling /src/middleware ...
+ ✓ Compiled /src/middleware in 1703ms (152 modules)
+ ○ Compiling /api/auth/login ...
+ ✓ Compiled /api/auth/login in 2.2s (203 modules)
+CafeTrack: local PGlite database ready at C:\Users\PrinceDeano\Downloads\cafetrack\.pglite
+ POST /api/auth/login 200 in 6559ms
+ ○ Compiling /api/auth/me ...
+ ✓ Compiled /api/auth/me in 3.7s (205 modules)
+ GET /api/auth/me 200 in 3862ms
+ ✓ Compiled /api/refs/categories in 144ms (207 modules)
+ GET /api/refs/categories 200 in 327ms
+ ✓ Compiled /api/refs/locations in 181ms (209 modules)
+ GET /api/refs/locations 200 in 293ms
+ ✓ Compiled /api/items in 157ms (211 modules)
+ GET /api/items 200 in 316ms
+ ✓ Compiled /api/items/lookup in 189ms (213 modules)
+ GET /api/items/lookup?code=CT-OZP-B5E5 200 in 331ms
+ POST /api/items 201 in 111ms
+ ✓ Compiled /api/items/[id] in 193ms (215 modules)
+ PATCH /api/items/33abf348-a25a-4b2c-b0ec-04bfd7832d92 200 in 1216ms
+ ✓ Compiled /api/transactions in 183ms (217 modules)
+ POST /api/transactions 201 in 448ms
+ POST /api/transactions 401 in 174ms
+ POST /api/transactions 409 in 118ms
+ POST /api/transactions 201 in 142ms
+ GET /api/transactions?limit=5 200 in 33ms
+ ✓ Compiled /api/alerts in 189ms (219 modules)
+ POST /api/alerts 200 in 320ms
+ GET /api/alerts?status=open 200 in 28ms
+ ✓ Compiled /api/alerts/[id] in 141ms (221 modules)
+ PATCH /api/alerts/51b64c51-ade7-4b78-8358-195020d06d76 200 in 865ms
+ ✓ Compiled /api/audit in 259ms (223 modules)
+ GET /api/audit?limit=100 200 in 361ms
+ ✓ Compiled /api/audit/verify in 215ms (225 modules)
+ GET /api/audit/verify 200 in 315ms
+ ✓ Compiled /api/users in 230ms (227 modules)
+ GET /api/users 200 in 343ms
+ POST /api/users 201 in 120ms
+ ✓ Compiled /api/auth/staff in 199ms (229 modules)
+ POST /api/auth/staff 200 in 416ms
+ GET /api/users 403 in 29ms
+ GET /api/items 200 in 38ms
+ GET /api/auth/me 200 in 28ms
+ DELETE /api/items/33abf348-a25a-4b2c-b0ec-04bfd7832d92 200 in 69ms
+ ✓ Compiled /api/users/[id] in 237ms (231 modules)
+ PATCH /api/users/b578fefd-906e-4119-ae87-51fe860ca094 200 in 1188ms
+ GET /api/items/lookup?code=CT-GEN-4BE0 404 in 32ms
+ ✓ Compiled /api/auth/logout in 208ms (233 modules)
+ POST /api/auth/logout 200 in 355ms
+ ○ Compiling /login ...
+ ✓ Compiled /login in 5.6s (704 modules)
+ GET /login 200 in 5814ms
+ POST /api/auth/login 200 in 137ms
+ GET /api/users 200 in 26ms
+ GET /login 200 in 137ms
+ POST /api/auth/login 200 in 122ms
+ ○ Compiling /dashboard ...
+ ✓ Compiled /dashboard in 1671ms (720 modules)
+ GET /api/auth/me 200 in 60ms
+ GET /api/auth/me 200 in 30ms
+ GET /api/items 200 in 104ms
+ ✓ Compiled /api/transactions in 477ms (449 modules)
+ GET /api/transactions?limit=200 200 in 672ms
+ GET /api/auth/me 200 in 48ms
+ GET /api/transactions?limit=200 200 in 50ms
+ GET /api/items 200 in 113ms
+ ○ Compiling /reports ...
+ ✓ Compiled /reports in 1199ms (704 modules)
+ GET /reports 200 in 1480ms
+ GET /api/auth/me 200 in 45ms
+ GET /api/auth/me 200 in 29ms
+ GET /api/items 200 in 73ms
+ GET /api/transactions?limit=200 200 in 98ms
+ GET /api/auth/me 200 in 34ms
+ ○ Compiling /audit ...
+ ✓ Compiled /audit in 882ms (710 modules)
+ ✓ Compiled /api/audit in 412ms (449 modules)
+ GET /api/audit?limit=200 200 in 1027ms
+ GET /api/auth/me 200 in 1008ms
+ GET /api/auth/me 200 in 35ms
+ ○ Compiling /checkout ...
+ ✓ Compiled /checkout in 811ms (720 modules)
+ GET /api/auth/me 200 in 24ms
+ GET /api/auth/me 200 in 15ms
+ ○ Compiling /items ...
+ ✓ Compiled /items in 2.7s (818 modules)
+ ○ Compiling /api/refs/locations ...
+ ✓ Compiled /api/refs/locations in 586ms (523 modules)
+ ✓ Compiled (525 modules)
+ GET /api/auth/me 200 in 1584ms
+ GET /api/items 200 in 1599ms
+ GET /api/refs/locations 200 in 1635ms
+ GET /api/refs/categories 200 in 1662ms
+ GET /api/auth/me 200 in 34ms
+ GET /api/items 200 in 56ms
+ GET /api/refs/categories 200 in 115ms
+ GET /api/refs/locations 200 in 134ms
+ ✓ Compiled /api/items/[id] in 481ms (527 modules)
+ DELETE /api/items/8360c125-9890-41ba-8af8-316666dc7ac6 200 in 655ms
+ GET /api/items 200 in 65ms
+ GET /api/refs/locations 200 in 89ms
+ GET /api/refs/categories 200 in 109ms
+ GET /api/items 200 in 68ms
+ GET /api/refs/categories 200 in 89ms
+ GET /api/refs/locations 200 in 105ms
+ GET /api/items 200 in 114ms
+ GET /api/auth/me 200 in 163ms
+ GET /api/transactions?limit=200 200 in 180ms
+ GET /api/auth/me 200 in 31ms
+ GET /api/audit?limit=200 200 in 64ms
+ GET /api/auth/me 200 in 115ms
+ GET /api/auth/me 200 in 38ms
+ ○ Compiling /users ...
+ ✓ Compiled /users in 1136ms (824 modules)
+ GET /api/auth/me 200 in 65ms
+ ○ Compiling /api/users ...
+ ✓ Compiled /api/users in 569ms (527 modules)
+ GET /api/auth/me 200 in 1299ms
+ GET /api/users 200 in 1353ms
+ GET /api/auth/me 200 in 36ms
+ ○ Compiling /api/auth/logout ...
+ ✓ Compiled /api/auth/logout in 642ms (525 modules)
+ POST /api/auth/logout 200 in 777ms
+ ○ Compiling /login ...
+ ✓ Compiled /login in 896ms (529 modules)
+ ○ Compiling /api/auth/staff ...
+ ✓ Compiled /api/auth/staff in 1073ms (531 modules)
+ POST /api/auth/staff 401 in 1241ms
+ ○ Compiling /api/auth/login ...
+ ✓ Compiled /api/auth/login in 765ms (533 modules)
+ POST /api/auth/login 200 in 1112ms
+ ○ Compiling /dashboard ...
+ ✓ Compiled /dashboard in 728ms (537 modules)
+ GET /api/auth/me 200 in 121ms
+ GET /api/auth/me 200 in 56ms
+ GET /api/items 200 in 89ms
+ GET /api/transactions?limit=200 200 in 124ms
+ GET /api/auth/me 200 in 33ms
+ GET /api/auth/me 200 in 33ms
+ GET /api/auth/me 200 in 43ms
+ GET /api/users 200 in 77ms
+ GET /api/auth/me 200 in 37ms
+ GET /login 200 in 398ms
+ POST /api/auth/login 200 in 193ms
+ GET /api/auth/me 200 in 42ms
+ GET /api/auth/me 200 in 33ms
+ GET /api/items 200 in 75ms
+ GET /api/transactions?limit=200 200 in 102ms
+ GET /api/auth/me 200 in 36ms
+ GET /api/auth/me 200 in 54ms
+ GET /api/auth/me 200 in 54ms
+ GET /api/users 200 in 72ms
+ GET /api/auth/me 200 in 30ms
+ POST /api/auth/logout 200 in 48ms
+ POST /api/auth/login 200 in 186ms
+ GET /api/auth/me 200 in 36ms
+ GET /api/auth/me 200 in 35ms
+ GET /api/items 200 in 64ms
+ GET /api/transactions?limit=200 200 in 124ms
+ GET /api/items 200 in 31ms
+ GET /api/transactions?limit=200 200 in 78ms
+ GET /api/auth/me 200 in 21ms
+ GET /api/auth/me 200 in 24ms
+ GET /api/users 200 in 34ms
+ GET /api/auth/me 200 in 47ms
+ GET /api/auth/me 200 in 23ms
+ GET /api/items 200 in 70ms
+ GET /api/transactions?limit=200 200 in 89ms
+ GET /api/auth/me 200 in 97ms
+ GET /api/auth/me 200 in 22ms
+ GET /api/items 200 in 49ms
+ GET /api/refs/locations 200 in 107ms
+ GET /api/refs/categories 200 in 126ms
+ GET /api/auth/me 200 in 135ms
+ GET /api/auth/me 200 in 18ms
+ GET /api/auth/me 200 in 50ms
+ GET /api/auth/me 200 in 25ms
+ GET /api/users 200 in 39ms
+ GET /api/auth/me 200 in 31ms
+ GET /api/audit?limit=200 200 in 48ms
+ GET /api/auth/me 200 in 68ms
+ GET /api/auth/me 200 in 20ms
+ GET /api/auth/me 200 in 29ms
+ GET /api/items 200 in 39ms
+ GET /api/transactions?limit=200 200 in 94ms
+ GET /api/auth/me 200 in 102ms
+ GET /api/auth/me 200 in 27ms
+ GET /api/auth/me 200 in 17ms
+ GET /api/auth/me 200 in 23ms
+ GET /api/items 200 in 44ms
+ GET /api/refs/categories 200 in 101ms
+ GET /api/auth/me 200 in 112ms
+ GET /api/refs/locations 200 in 129ms
+ GET /api/auth/me 200 in 26ms
+ ○ Compiling /alerts ...
+ ✓ Compiled /alerts in 1361ms (826 modules)
+ ✓ Compiled /api/alerts in 413ms (527 modules)
+ GET /api/auth/me 200 in 903ms
+ GET /api/alerts?status=open 200 in 992ms
+ GET /api/items 200 in 48ms
+ GET /api/auth/me 200 in 62ms
+ GET /api/transactions?limit=200 200 in 83ms
+ GET /api/auth/me 200 in 19ms
+ GET /api/items 200 in 29ms
+ GET /api/transactions?limit=200 200 in 78ms
+ GET /api/items 200 in 33ms
+ GET /api/transactions?limit=200 200 in 88ms
+ GET /api/items 200 in 31ms
+ GET /api/transactions?limit=200 200 in 82ms
+ ✓ Compiled /api/auth/logout in 317ms (529 modules)
+ POST /api/auth/logout 200 in 541ms
+ ✓ Compiled /login in 445ms (533 modules)
+Terminate batch job (Y/N)? 
+[?25h
