@@ -21,9 +21,9 @@ export const GET = handler(async () => {
   // Sliding session: re-issue the cookie only once the token is past
   // half-life. Re-signing on every call would rewrite the cookie on each
   // dashboard poll and activity ping for no benefit.
-  const token = getSessionToken();
+  const token = await getSessionToken();
   if (token && (await needsRefresh(token, minutes))) {
-    setSessionCookie(await signSession(session, minutes), minutes);
+    await setSessionCookie(await signSession(session, minutes), minutes);
   }
 
   return ok({ user: session, sessionMinutes: minutes });

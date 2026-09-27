@@ -15,10 +15,11 @@ export const runtime = "nodejs";
  * only knows four explicit join paths, and none of them nest.
  */
 export const GET = handler(
-  async (_req: Request, { params }: { params: { id: string } }) => {
+  async (_req: Request, { params }: { params: Promise<{ id: string }> }) => {
     await requireUser();
+    const { id } = await params;
 
-    const malformed = badId(params.id, "alert");
+    const malformed = badId(id, "alert");
     if (malformed) return malformed;
 
     const { data: alert, error } = await db()
@@ -27,7 +28,7 @@ export const GET = handler(
         `id, type, message, resolved, resolved_by, resolved_at, created_at, item_id,
          item:items(sku, name, unit, quantity, low_stock_threshold, expiration_date)`
       )
-      .eq("id", params.id)
+      .eq("id", id)
       .maybeSingle();
 
     if (error) return fail(error.message, 500);
@@ -68,10 +69,11 @@ export const GET = handler(
 
 /** Resolve or re-open a single alert. */
 export const PATCH = handler(
-  async (req: Request, { params }: { params: { id: string } }) => {
+  async (req: Request, { params }: { params: Promise<{ id: string }> }) => {
     const user = await requireUser();
+    const { id } = await params;
 
-    const malformed = badId(params.id, "alert");
+    const malformed = badId(id, "alert");
     if (malformed) return malformed;
     const body = await readBody(req);
     const resolved = body.resolved !== false;
@@ -87,7 +89,7 @@ export const PATCH = handler(
             }
           : { resolved: false, resolved_by: null, resolved_at: null }
       )
-      .eq("id", params.id)
+      .eq("id", id)
       .select()
       .maybeSingle();
 

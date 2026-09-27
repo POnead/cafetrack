@@ -1,7 +1,15 @@
 "use client";
 
 import { useState } from "react";
-import { Card, Modal, Empty, Badge, Toast } from "@/components/ui";
+import {
+  Card,
+  Modal,
+  Empty,
+  Badge,
+  Toast,
+  DataCard,
+  DataField,
+} from "@/components/ui";
 import { ScanInput } from "@/components/ScanInput";
 import { fmtQty, fmtDate } from "@/lib/format";
 import { expiryStatus } from "@/lib/status";
@@ -518,7 +526,65 @@ export default function CheckoutPage() {
         {cart.length === 0 ? (
           <Empty>Nothing scanned yet — scan or type a SKU to begin.</Empty>
         ) : (
-          <div className="overflow-x-auto">
+          <>
+            <div className="space-y-2.5 pb-3 lg:hidden">
+              {cart.map((l) => (
+                <DataCard key={l.sku}>
+                  <div className="min-w-0">
+                    <div className="font-semibold text-cocoa-800">{l.name}</div>
+                    <div className="font-mono text-xs text-cocoa-400">{l.sku}</div>
+                  </div>
+
+                  <DataField label="On hand">{fmtQty(l.onHand, l.unit)}</DataField>
+
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[11px] font-bold uppercase tracking-wide text-cocoa-400">
+                      Quantity
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        className="btn-ghost min-h-[40px] !px-3.5 !py-2 text-sm"
+                        onClick={() => setQty(l.sku, l.qty - 1)}
+                        aria-label={`Decrease ${l.name}`}
+                      >
+                        -
+                      </button>
+                      <input
+                        className="input w-24 text-center"
+                        type="number"
+                        inputMode="decimal"
+                        min="0"
+                        step="0.001"
+                        value={l.qty}
+                        onChange={(e) => setQty(l.sku, Number(e.target.value))}
+                      />
+                      <button
+                        className="btn-ghost min-h-[40px] !px-3.5 !py-2 text-sm"
+                        onClick={() => setQty(l.sku, l.qty + 1)}
+                        aria-label={`Increase ${l.name}`}
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+
+                  <DataField label="Projected">
+                    <span className="font-semibold tabular-nums text-cocoa-900">
+                      {fmtQty(projected(l), l.unit)}
+                    </span>
+                  </DataField>
+
+                  <button
+                    className="btn-danger min-h-[40px] w-full !py-1.5 text-sm"
+                    onClick={() => removeLine(l.sku)}
+                  >
+                    Remove
+                  </button>
+                </DataCard>
+              ))}
+            </div>
+
+            <div className="hidden overflow-x-auto lg:block">
             <table className="w-full">
               <thead>
                 <tr className="bg-cream-100/60">
@@ -580,6 +646,7 @@ export default function CheckoutPage() {
               </tbody>
             </table>
           </div>
+          </>
         )}
       </Card>
 

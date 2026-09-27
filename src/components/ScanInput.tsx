@@ -54,10 +54,13 @@ export function ScanInput({
     <div className="relative">
       <input
         ref={ref}
-        className="input pr-24 font-mono text-base"
+        className="input font-mono text-base sm:pr-24"
         value={value}
         disabled={disabled}
         autoFocus={autoFocus}
+        inputMode="text"
+        autoCapitalize="characters"
+        spellCheck={false}
         placeholder={placeholder}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={(e) => {
@@ -67,9 +70,12 @@ export function ScanInput({
           }
         }}
       />
-      <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-2">
+      {/* Absolutely positioned beside the field on sm+, which is where there is
+          room for it. Below that the padding would eat most of a narrow input,
+          so the button becomes a normal flow item underneath instead. */}
+      <div className="absolute right-2 top-1/2 hidden -translate-y-1/2 items-center gap-2 sm:flex">
         {lastScanAt > 0 && (
-          <span className="text-[11px] text-emerald-600 font-medium">captured</span>
+          <span className="text-[11px] font-medium text-emerald-600">captured</span>
         )}
         <button
           type="button"
@@ -78,6 +84,19 @@ export function ScanInput({
           disabled={disabled}
         >
           Add
+        </button>
+      </div>
+      <div className="mt-2 flex items-center gap-2 sm:hidden">
+        {lastScanAt > 0 && (
+          <span className="text-[11px] font-medium text-emerald-600">captured</span>
+        )}
+        <button
+          type="button"
+          className="btn-ghost !py-1.5 flex-1 text-sm"
+          onClick={submit}
+          disabled={disabled}
+        >
+          Add item
         </button>
       </div>
     </div>

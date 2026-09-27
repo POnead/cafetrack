@@ -1,7 +1,16 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Card, Badge, Empty, Spinner, Stat, Toast } from "@/components/ui";
+import {
+  Card,
+  Badge,
+  Empty,
+  Spinner,
+  Stat,
+  Toast,
+  DataCard,
+  DataField,
+} from "@/components/ui";
 import { fmtQty, fmtDate, daysUntil, toCsv } from "@/lib/format";
 import { stockStatus } from "@/lib/status";
 import { printStockReport } from "@/lib/report-print";
@@ -505,7 +514,57 @@ export default function ReportsPage() {
                 {items.length === 0 ? "No items yet." : "No items in this category."}
               </Empty>
             ) : (
-              <div className="overflow-x-auto">
+              <>
+                <div className="space-y-2.5 pb-3 lg:hidden">
+                  {shownItems.map((i) => {
+                    const status = stockStatus(i.quantity, i.low_stock_threshold);
+                    const d = daysUntil(i.expiration_date);
+                    return (
+                      <DataCard key={i.id}>
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="font-semibold text-cocoa-800">
+                              {i.name}
+                            </div>
+                            <div className="font-mono text-xs text-cocoa-400">
+                              {i.sku}
+                            </div>
+                          </div>
+                          <Badge tone={status.tone} variant="tag">
+                            {status.label}
+                          </Badge>
+                        </div>
+
+                        <DataField label="On hand">
+                          {fmtQty(i.quantity, i.unit)}
+                        </DataField>
+                        <DataField label="Threshold">
+                          {fmtQty(i.low_stock_threshold, i.unit)}
+                        </DataField>
+                        <DataField label="Category">
+                          {i.category?.name ?? "—"}
+                        </DataField>
+                        <DataField label="Location">
+                          {i.location?.name ?? "—"}
+                        </DataField>
+                        <DataField label="Expiry">
+                          {i.expiration_date ? (
+                            <span className="text-xs">
+                              {fmtDate(i.expiration_date)}
+                              {d !== null && d < 0 && (
+                                <span className="text-red-600"> (expired)</span>
+                              )}
+                            </span>
+                          ) : (
+                            <span className="text-cocoa-200">—</span>
+                          )}
+                        </DataField>
+                      </DataCard>
+                    );
+                  })}
+                </div>
+
+                <div className="hidden overflow-x-auto lg:block">
                 <table className="w-full">
                   <thead>
                     <tr className="bg-cream-100/60">
@@ -562,7 +621,7 @@ export default function ReportsPage() {
                             )}
                           </td>
                           <td className="td">
-                            <Badge tone={status.tone} variant="solid">
+                            <Badge tone={status.tone} variant="tag">
                               {status.label}
                             </Badge>
                           </td>
@@ -572,6 +631,7 @@ export default function ReportsPage() {
                   </tbody>
                 </table>
               </div>
+              </>
             )}
           </Card>
         </>

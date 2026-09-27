@@ -9,6 +9,6 @@ export const POST = handler(async () => {
   if (session) {
     await audit(session, "LOGOUT", "user", session.id, {}, { critical: false });
   }
-  clearSessionCookie();
+  await clearSessionCookie();
   return ok({ ok: true });
 });

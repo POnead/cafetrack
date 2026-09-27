@@ -17,6 +17,49 @@ export function Card({
 }
 
 /* ------------------------------------------------------------------ */
+/* Mobile data cards                                                   */
+/*                                                                     */
+/* The wide tables are unusable on a phone, so every list renders a    */
+/* stacked card below `lg` and the table above it. These two keep the   */
+/* six call sites rendering the same shape instead of six near-copies.  */
+/* ------------------------------------------------------------------ */
+
+/** One record as a card. `lg:hidden` — the table takes over from there. */
+export function DataCard({
+  children,
+  className = "",
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div className={`card space-y-2.5 p-4 lg:hidden ${className}`}>
+      {children}
+    </div>
+  );
+}
+
+/** A label/value line inside a DataCard. */
+export function DataField({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-3 text-sm">
+      <span className="shrink-0 text-[11px] font-bold uppercase tracking-wide text-cocoa-400">
+        {label}
+      </span>
+      <span className="min-w-0 break-words text-right text-cocoa-700">
+        {children}
+      </span>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Stat pill — label on the left, count badge on the right            */
 /* ------------------------------------------------------------------ */
 
@@ -64,36 +107,53 @@ export type BadgeTone = "slate" | "green" | "amber" | "red" | "blue";
 export function Badge({
   children,
   tone = "slate",
-  variant = "soft",
+  variant = "label",
+  dot = true,
 }: {
   children: ReactNode;
   tone?: BadgeTone;
   /**
-   * `soft` keeps the original tinted look (used for roles, log actions).
-   * `solid` is the filled pill used for status columns, so In Stock / Low Stock
-   * / Out of Stock are distinguishable at a glance.
+   * `label` is the original pill, used for plain category words where the
+   * shape is the point (user roles, audit actions).
+   * `tag` is the outline status tag used for every status / type / stock
+   * badge, so In Stock / Low Stock / Out of Stock read as one scale and sit
+   * naturally in the warm palette. See `.badge-tag` in globals.css.
    */
-  variant?: "soft" | "solid";
+  variant?: "label" | "tag";
+  /**
+   * Leading dot on tags. It inherits the text colour via `bg-current`, so the
+   * state is still readable without relying on hue alone.
+   */
+  dot?: boolean;
 }) {
-  const soft = {
+  const label = {
     slate: "bg-cocoa-50 text-cocoa-600",
-    green: "bg-emerald-50 text-emerald-700",
-    amber: "bg-amber-50 text-amber-700",
-    red: "bg-red-50 text-red-700",
+    green: "bg-sage-50 text-sage-700",
+    amber: "bg-ochre-50 text-ochre-700",
+    red: "bg-terracotta-50 text-terracotta-700",
     blue: "bg-cream-200 text-cocoa-700",
   };
 
-  const solid = {
-    slate: "bg-cocoa-400 text-white",
-    green: "bg-emerald-500 text-white",
-    // amber-600 rather than amber-500: white text stays legible.
-    amber: "bg-amber-600 text-white",
-    red: "bg-red-500 text-white",
-    blue: "bg-cocoa-700 text-cream-50",
+  // Outline only: no fill, just a tinted border and warm text. Reads as a
+  // printed label rather than a status light.
+  const tag = {
+    slate: "bg-transparent text-cocoa-600 border-cocoa-200",
+    green: "bg-transparent text-sage-700 border-sage-500/40",
+    amber: "bg-transparent text-ochre-700 border-ochre-500/40",
+    red: "bg-transparent text-terracotta-700 border-terracotta-500/40",
+    blue: "bg-transparent text-cocoa-700 border-cream-400",
   };
 
+  const isTag = variant === "tag";
+
   return (
-    <span className={`badge ${(variant === "solid" ? solid : soft)[tone]}`}>
+    <span className={`${isTag ? "badge-tag" : "badge"} ${(isTag ? tag : label)[tone]}`}>
+      {isTag && dot && (
+        <span
+          className="h-1.5 w-1.5 shrink-0 rounded-full bg-current"
+          aria-hidden="true"
+        />
+      )}
       {children}
     </span>
   );

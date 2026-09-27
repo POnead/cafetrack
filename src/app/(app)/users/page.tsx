@@ -1,7 +1,16 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Card, Modal, Badge, Empty, Spinner, Toast } from "@/components/ui";
+import {
+  Card,
+  Modal,
+  Badge,
+  Empty,
+  Spinner,
+  Toast,
+  DataCard,
+  DataField,
+} from "@/components/ui";
 import { BarcodeView, printBarcodeLabelsAsync } from "@/components/BarcodeView";
 import { fmtDateTime } from "@/lib/format";
 import { accountStatus } from "@/lib/status";
@@ -287,15 +296,117 @@ export default function UsersPage() {
           </div>
         </div>
 
-        {filtered.length === 0 ? (
+        {filtered.length === 0 && (
           <Empty>
             {users.length === 0
               ? "No accounts yet."
               : "No accounts match your filters."}
           </Empty>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full">
+        )}
+
+        {filtered.length > 0 && (
+          <>
+            <div className="space-y-2.5 px-3 pb-3 lg:hidden">
+              {filtered.map((u) => (
+                <DataCard key={u.id}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="font-semibold text-cocoa-800">
+                        {u.full_name}
+                        {u.id === meId && (
+                          <span className="ml-2 text-[11px] text-cocoa-300">you</span>
+                        )}
+                      </div>
+                      <div className="font-mono text-xs text-cocoa-400">
+                        {u.username}
+                      </div>
+                    </div>
+                    <Badge tone={accountStatus(u.is_active).tone} variant="tag">
+                      {accountStatus(u.is_active).label}
+                    </Badge>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <Badge tone={u.role === "admin" ? "blue" : "slate"}>
+                      {u.role}
+                    </Badge>
+                  </div>
+
+                  <DataField label="Barcode">
+                    <span className="font-mono text-xs">
+                      {u.qr_token ?? "—"}
+                    </span>
+                  </DataField>
+                  <DataField label="Added">
+                    <span className="text-xs text-cocoa-400">
+                      {fmtDateTime(u.created_at)}
+                    </span>
+                  </DataField>
+
+                  {!u.is_active && (
+                    <DataField label="Reason">
+                      <span className="text-xs">
+                        {u.deactivation_reason ?? "no reason given"}
+                        {u.deactivated_at && (
+                          <span className="block text-cocoa-300">
+                            {fmtDateTime(u.deactivated_at)}
+                          </span>
+                        )}
+                      </span>
+                    </DataField>
+                  )}
+
+                  <div className="flex flex-wrap gap-1.5 pt-1">
+                    {u.qr_token && (
+                      <>
+                        <button
+                          className="btn-ghost min-h-[40px] flex-1 !px-2 !py-1.5 text-xs"
+                          onClick={() => setBarcodeUser(u)}
+                        >
+                          Label
+                        </button>
+                        <button
+                          className="btn-ghost min-h-[40px] flex-1 !px-2 !py-1.5 text-xs"
+                          onClick={() => printToken(u)}
+                        >
+                          Print
+                        </button>
+                        <button
+                          className="btn-ghost min-h-[40px] flex-1 !px-2 !py-1.5 text-xs"
+                          disabled={busyId === u.id}
+                          onClick={() => regenerate(u)}
+                        >
+                          New code
+                        </button>
+                      </>
+                    )}
+                    <button
+                      className="btn-ghost min-h-[40px] flex-1 !px-2 !py-1.5 text-xs"
+                      onClick={() => {
+                        setNewPassword("");
+                        setResetting(u);
+                      }}
+                    >
+                      Reset password
+                    </button>
+                    <button
+                      className={
+                        u.is_active
+                          ? "btn-danger min-h-[40px] flex-1 !px-2 !py-1.5 text-xs"
+                          : "btn-primary min-h-[40px] flex-1 !px-2 !py-1.5 text-xs"
+                      }
+                      disabled={busyId === u.id}
+                      onClick={() => toggleActive(u)}
+                    >
+                      {u.is_active ? "Deactivate" : "Reactivate"}
+                    </button>
+                  </div>
+                </DataCard>
+              ))}
+            </div>
+
+            <div className="hidden overflow-x-auto lg:block">
+              <table className="w-full">
               <thead>
                 <tr className="bg-cream-100/60">
                   <th className="th">Name</th>
@@ -333,7 +444,7 @@ export default function UsersPage() {
                       {fmtDateTime(u.created_at)}
                     </td>
                     <td className="td">
-                      <Badge tone={accountStatus(u.is_active).tone} variant="solid">
+                      <Badge tone={accountStatus(u.is_active).tone} variant="tag">
                         {accountStatus(u.is_active).label}
                       </Badge>
                       {!u.is_active && (
@@ -405,6 +516,7 @@ export default function UsersPage() {
               </tbody>
             </table>
           </div>
+          </>
         )}
       </Card>
 

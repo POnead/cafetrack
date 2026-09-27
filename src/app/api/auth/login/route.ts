@@ -99,7 +99,7 @@ export const POST = handler(async (req: Request) => {
   // Session lifetime comes from settings.session_timeout_minutes.
   const minutes = await getSessionMinutes();
   const token = await signSession(session, minutes);
-  setSessionCookie(token, minutes);
+  await setSessionCookie(token, minutes);
 
   await audit(session, "LOGIN", "user", user.id, { method: "admin_password" });
 

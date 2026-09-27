@@ -10,10 +10,11 @@ const USER_COLUMNS =
 
 /** Update a staff/admin account: name, password, status, staff code. */
 export const PATCH = handler(
-  async (req: Request, { params }: { params: { id: string } }) => {
+  async (req: Request, { params }: { params: Promise<{ id: string }> }) => {
     const admin = await requireAdmin();
+    const { id } = await params;
 
-    const malformed = badId(params.id, "user");
+    const malformed = badId(id, "user");
     if (malformed) return malformed;
 
     const body = await readBody(req);
@@ -21,7 +22,7 @@ export const PATCH = handler(
     const { data: before } = await db()
       .from("users")
       .select("id, username, full_name, role, is_active")
-      .eq("id", params.id)
+      .eq("id", id)
       .maybeSingle();
 
     if (!before) return fail("User not found", 404);
@@ -118,7 +119,7 @@ export const PATCH = handler(
     const { data, error } = await db()
       .from("users")
       .update(patch)
-      .eq("id", params.id)
+      .eq("id", id)
       .select(USER_COLUMNS)
       .maybeSingle();
 

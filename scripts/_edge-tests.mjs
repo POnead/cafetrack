@@ -190,9 +190,23 @@ async function rawCall(method, path, rawBody, cookie) {
   check("staff opening /audit page does not crash", r.status === 200, `${r.status}`);
   r = await call("GET", "/users", null, sc);
   check("staff opening /users page does not crash", r.status === 200, `${r.status}`);
-  // staff checkout works
-  const milk = seed.data.items.find((i) => i.name === "Fresh Milk");
-  r = await call("POST", "/api/transactions", { type: "checkout", password: "staff123", items: [{ sku: milk.sku, qty: 1 }] }, sc);
+  // Staff checkout works.
+  //
+  // Uses a throwaway item rather than a seeded one: a previous run can leave
+  // "Fresh Milk" at 0, and the API then correctly answers 409 insufficient
+  // stock — which would fail this test for a reason that has nothing to do
+  // with staff permissions. Restocking first makes the test independent of
+  // whatever state the database was left in.
+  const spill = await call(
+    "POST",
+    "/api/items",
+    { name: `Edge Staff ${Date.now().toString(36)}`, quantity: 5, low_stock_threshold: 1 },
+    A
+  );
+  check("throwaway item created for the checkout check", spill.status === 201, `${spill.status} ${spill.data?.error}`);
+  const spillItem = spill.data?.item ?? { sku: null };
+
+  r = await call("POST", "/api/transactions", { type: "checkout", password: "staff123", items: [{ sku: spillItem.sku, qty: 1 }] }, sc);
   check("staff can checkout with own password", r.status === 201, `${r.status} ${r.data?.error}`);
 
   /* ============ 5. Users management ============ */
@@ -253,13 +267,18 @@ async function rawCall(method, path, rawBody, cookie) {
   const tc = (ts.headers.getSetCookie?.() ?? []).map((x) => x.split(";")[0]).join("; ");
   check("temp staff login", ts.status === 200, `got ${ts.status}`);
   await call("PATCH", `/api/users/${temp.id}`, { is_active: false }, A2);
-  r = await call("POST", "/api/transactions", { type: "checkout", password: "password1", items: [{ sku: milk.sku, qty: 1 }] }, tc);
+  r = await call("POST", "/api/transactions", { type: "checkout", password: "password1", items: [{ sku: spillItem.sku, qty: 1 }] }, tc);
   check("deactivated staff cannot transact (403)", r.status === 403, `${r.status} ${r.data?.error}`);
   r = await call("POST", "/api/auth/staff", { token: temp.qr_token, password: "wrong-password" });
   check("deactivated staff, wrong password -> generic 401", r.status === 401 && r.data?.deactivated === undefined, `${r.status} ${r.data?.error}`);
   r = await call("POST", "/api/auth/staff", { token: temp.qr_token, password: "password1" });
   check("deactivated staff cannot re-login (403 + deactivated flag)", r.status === 403 && r.data?.deactivated === true, `${r.status} ${r.data?.error}`);
   await call("PATCH", `/api/users/${temp.id}`, { is_active: false, regenerate_token: true }, A2);
+
+  // Remove the throwaway item so a run does not leave stock behind.
+  if (spillItem.id) {
+    await call("DELETE", `/api/items/${spillItem.id}`, {}, A2);
+  }
 
   /* ============ 9. Audit chain after all activity ============ */
   section("audit chain");

@@ -28,6 +28,32 @@ const config: Config = {
           800: "#4A2D17",
           900: "#3D2B1F", // body text
         },
+        /* Warm status tones — sit next to the cream/cocoa scale.
+           Used by the status/type/stock tags (see Badge `variant="tag"`). */
+        sage: {
+          50: "#EEF3E9",
+          100: "#DCE7D2",
+          500: "#6B8F5A",
+          700: "#4A6638",
+        },
+        ochre: {
+          50: "#FAF0DC",
+          100: "#F3E0BB",
+          500: "#B8862F",
+          700: "#8A611A",
+        },
+        terracotta: {
+          50: "#F7E4DF",
+          100: "#EFCFC7",
+          500: "#B5603E",
+          700: "#8A3423",
+        },
+        rust: {
+          50: "#EDD5CE",
+          100: "#E0BAB0",
+          500: "#8B3A24",
+          700: "#5E2318",
+        },
         /* Kept so existing pages keep working after the palette swap */
         brand: {
           50: "#FDF3E3",

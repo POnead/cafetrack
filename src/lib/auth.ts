@@ -74,12 +74,16 @@ export async function readSessionToken(token: string): Promise<SessionUser | nul
   }
 }
 
-export function getSessionToken(): string | null {
-  return cookies().get(COOKIE_NAME)?.value ?? null;
+// Next 15 made `cookies()` async. Every caller of this (getSession, and the
+// helpers above) is already async, so awaiting here propagates cleanly rather
+// than needing a sync accessor that can no longer exist.
+export async function getSessionToken(): Promise<string | null> {
+  const jar = await cookies();
+  return jar.get(COOKIE_NAME)?.value ?? null;
 }
 
 export async function getSession(): Promise<SessionUser | null> {
-  const token = getSessionToken();
+  const token = await getSessionToken();
   if (!token) return null;
   return readSessionToken(token);
 }
@@ -132,8 +136,15 @@ export class HttpError extends Error {
   }
 }
 
-export function setSessionCookie(token: string, minutes: number = SESSION_MINUTES) {
-  cookies().set({
+// Next 15 made `cookies()` async, so both writers are async too. Every caller
+// is a route handler that already awaits, so this adds no real cost — the
+// cookie write has to happen before the response is returned either way.
+export async function setSessionCookie(
+  token: string,
+  minutes: number = SESSION_MINUTES
+) {
+  const jar = await cookies();
+  jar.set({
     name: COOKIE_NAME,
     value: token,
     httpOnly: true,
@@ -144,8 +155,9 @@ export function setSessionCookie(token: string, minutes: number = SESSION_MINUTE
   });
 }
 
-export function clearSessionCookie() {
-  cookies().set({
+export async function clearSessionCookie() {
+  const jar = await cookies();
+  jar.set({
     name: COOKIE_NAME,
     value: "",
     httpOnly: true,

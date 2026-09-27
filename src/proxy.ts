@@ -11,7 +11,9 @@ const PUBLIC_PATHS = [
   "/api/auth/logout",
 ];
 
-export async function middleware(req: NextRequest) {
+// Next 16 renamed the `middleware` file convention to `proxy`; the export is
+// `proxy` rather than `middleware`. Same behaviour, same matcher.
+export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   if (PUBLIC_PATHS.some((p) => pathname === p)) {

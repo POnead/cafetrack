@@ -106,6 +106,13 @@ body {
   .badge {
     @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold;
   }
+
+  /* Status/type/stock tag — outline only, so it reads as a printed label
+     rather than a notification chip. Deliberately NOT .badge: the tighter
+     type and the square-ish corner must not bleed onto role/action labels. */
+  .badge-tag {
+    @apply inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider;
+  }
 }
 
 /* Custom scrollbar so the warm theme carries into scroll areas */

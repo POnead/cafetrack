@@ -129,10 +129,10 @@ export default function AlertDetailPage() {
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 space-y-2">
             <div className="flex flex-wrap items-center gap-2">
-              <Badge tone={kind.tone} variant="solid">
+              <Badge tone={kind.tone} variant="tag">
                 {kind.label}
               </Badge>
-              <Badge tone={alert.resolved ? "green" : "slate"} variant="solid">
+              <Badge tone={alert.resolved ? "green" : "slate"} variant="tag">
                 {alert.resolved ? "Resolved" : "Open"}
               </Badge>
             </div>
@@ -206,12 +206,12 @@ export default function AlertDetailPage() {
             <>
               <div className="flex flex-wrap gap-2">
                 {stock && (
-                  <Badge tone={stock.tone} variant="solid">
+                  <Badge tone={stock.tone} variant="tag">
                     {stock.label}
                   </Badge>
                 )}
                 {expiry && expiry.key !== "none" && (
-                  <Badge tone={expiry.tone} variant="solid">
+                  <Badge tone={expiry.tone} variant="tag">
                     {expiry.label}
                   </Badge>
                 )}
@@ -271,10 +271,10 @@ export default function AlertDetailPage() {
                 >
                   <div className="min-w-0 space-y-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <Badge tone={hk.tone} variant="solid">
+                      <Badge tone={hk.tone} variant="tag">
                         {hk.label}
                       </Badge>
-                      <Badge tone={h.resolved ? "green" : "slate"} variant="solid">
+                      <Badge tone={h.resolved ? "green" : "slate"} variant="tag">
                         {h.resolved ? "Resolved" : "Open"}
                       </Badge>
                       {isCurrent && (

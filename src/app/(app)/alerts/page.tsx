@@ -2,7 +2,16 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Card, Badge, Empty, Spinner, Stat, Toast } from "@/components/ui";
+import {
+  Card,
+  Badge,
+  Empty,
+  Spinner,
+  Stat,
+  Toast,
+  DataCard,
+  DataField,
+} from "@/components/ui";
 import { fmtDateTime } from "@/lib/format";
 import { alertTypeStatus, stockStatus } from "@/lib/status";
 
@@ -35,7 +44,7 @@ const TABS: { key: Status; label: string }[] = [
 function TypeBadge({ type }: { type: string }) {
   const status = alertTypeStatus(type);
   return (
-    <Badge tone={status.tone} variant="solid">
+    <Badge tone={status.tone} variant="tag">
       {status.label}
     </Badge>
   );
@@ -47,7 +56,7 @@ function StockBadge({ item }: { item: AlertRow["item"] }) {
 
   const status = stockStatus(item.quantity, item.low_stock_threshold);
   return (
-    <Badge tone={status.tone} variant="solid">
+    <Badge tone={status.tone} variant="tag">
       {status.label}
     </Badge>
   );
@@ -176,16 +185,57 @@ export default function AlertsPage() {
         <Spinner />
       ) : (
         <Card className="!p-0">
-          {alerts.length === 0 ? (
+          {alerts.length === 0 && (
             <Empty>Nothing to show — no alerts match this filter.</Empty>
-          ) : (
-            <div className="overflow-x-auto">
+          )}
+
+          {alerts.length > 0 && (
+            <div className="space-y-2.5 px-3 pb-3 lg:hidden">
+              {alerts.map((a) => (
+                <DataCard key={a.id}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="font-semibold text-cocoa-800">
+                        {a.item?.name ?? "Deleted item"}
+                      </div>
+                      <div className="font-mono text-xs text-cocoa-400">
+                        {a.item?.sku ?? "—"}
+                      </div>
+                    </div>
+                    <TypeBadge type={a.type} />
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <StockBadge item={a.item} />
+                  </div>
+
+                  <DataField label="Message">{a.message}</DataField>
+                  <DataField label="Raised">
+                    <span className="text-xs text-cocoa-400">
+                      {fmtDateTime(a.created_at)}
+                      {a.resolved && a.resolved_by && ` · by ${a.resolved_by}`}
+                    </span>
+                  </DataField>
+
+                  <Link
+                    href={`/alerts/${a.id}`}
+                    className="btn-ghost min-h-[40px] w-full !py-1.5 text-sm"
+                  >
+                    View alert
+                  </Link>
+                </DataCard>
+              ))}
+            </div>
+          )}
+
+          {alerts.length > 0 && (
+            <div className="hidden overflow-x-auto lg:block">
               <table className="w-full">
                 <thead>
                   <tr className="bg-cream-100/60">
-                    <th className="th">Type</th>
+                    <th className="th">Alert</th>
                     <th className="th">Item</th>
-                    <th className="th">Stock</th>
+                    <th className="th">Current Stock</th>
                     <th className="th">Message</th>
                     <th className="th">Raised</th>
                     <th className="th text-right">Action</th>

@@ -12,11 +12,13 @@ import {
 export const runtime = "nodejs";
 
 /* ---------------- read one ---------------- */
+// Next 15 delivers route `params` as a Promise; each handler awaits it once.
 export const GET = handler(
-  async (_req: Request, { params }: { params: { id: string } }) => {
+  async (_req: Request, { params }: { params: Promise<{ id: string }> }) => {
     await requireUser();
+    const { id } = await params;
 
-    const malformed = badId(params.id, "item");
+    const malformed = badId(id, "item");
     if (malformed) return malformed;
 
     const { data, error } = await db()
@@ -24,7 +26,7 @@ export const GET = handler(
       .select(
         `*, category:categories(id, name), location:locations(id, name)`
       )
-      .eq("id", params.id)
+      .eq("id", id)
       .maybeSingle();
 
     if (error) return fail(error.message, 500);
@@ -35,10 +37,11 @@ export const GET = handler(
 
 /* ---------------- update ---------------- */
 export const PATCH = handler(
-  async (req: Request, { params }: { params: { id: string } }) => {
+  async (req: Request, { params }: { params: Promise<{ id: string }> }) => {
     const admin = await requireAdmin();
+    const { id } = await params;
 
-    const malformed = badId(params.id, "item");
+    const malformed = badId(id, "item");
     if (malformed) return malformed;
 
     const body = await readBody(req);
@@ -46,7 +49,7 @@ export const PATCH = handler(
     const { data: before } = await db()
       .from("items")
       .select("*")
-      .eq("id", params.id)
+      .eq("id", id)
       .maybeSingle();
 
     if (!before) return fail("Item not found", 404);
@@ -86,7 +89,7 @@ export const PATCH = handler(
     const { data, error } = await db()
       .from("items")
       .update(patch)
-      .eq("id", params.id)
+      .eq("id", id)
       .eq("version", before.version)
       .select()
       .maybeSingle();
@@ -116,21 +119,22 @@ export const PATCH = handler(
 
 /* ---------------- delete ---------------- */
 export const DELETE = handler(
-  async (_req: Request, { params }: { params: { id: string } }) => {
+  async (_req: Request, { params }: { params: Promise<{ id: string }> }) => {
     const admin = await requireAdmin();
+    const { id } = await params;
 
-    const malformed = badId(params.id, "item");
+    const malformed = badId(id, "item");
     if (malformed) return malformed;
 
     const { data: item } = await db()
       .from("items")
       .select("*")
-      .eq("id", params.id)
+      .eq("id", id)
       .maybeSingle();
 
     if (!item) return fail("Item not found", 404);
 
-    const { error } = await db().from("items").delete().eq("id", params.id);
+    const { error } = await db().from("items").delete().eq("id", id);
     if (error) return fail(error.message, 500);
 
     await audit(admin, "ITEM_DELETE", "item", item.id, {

@@ -1,7 +1,15 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Card, Badge, Empty, Spinner, Toast } from "@/components/ui";
+import {
+  Card,
+  Badge,
+  Empty,
+  Spinner,
+  Toast,
+  DataCard,
+  DataField,
+} from "@/components/ui";
 import { fmtDateTime } from "@/lib/format";
 
 type Entry = {
@@ -41,6 +49,7 @@ const ACTION_TONE: Record<
 
 export default function AuditPage() {
   const [entries, setEntries] = useState<Entry[]>([]);
+  const [total, setTotal] = useState(0);
   const [query, setQuery] = useState("");
   const [actionFilter, setActionFilter] = useState("");
   const [actorFilter, setActorFilter] = useState("");
@@ -66,6 +75,7 @@ export default function AuditPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not load the audit trail");
       setEntries(data.entries ?? []);
+      setTotal(data.total ?? 0);
       setError(null);
     } catch (e: any) {
       setError(e.message || "Could not load the audit trail");
@@ -140,6 +150,21 @@ export default function AuditPage() {
   const hasFilters = Boolean(
     query || actionFilter || actorFilter || fromDate || toDate
   );
+
+  /**
+   * The API returns the newest `limit` rows, so the table shows a window, not
+   * the whole trail. `seq` is a bigserial, so it is intentionally sparse —
+   * rolled-back inserts burn numbers — and it must never be renumbered, since
+   * it is hashed into every entry. Naming the window is what stops the first
+   * visible number from reading like a truncated or tampered log.
+   */
+  const window = useMemo(() => {
+    if (entries.length === 0) return null;
+    const newest = entries[0].seq;
+    const oldest = entries[entries.length - 1].seq;
+    const truncated = total > entries.length;
+    return { newest, oldest, truncated, total };
+  }, [entries, total]);
 
   function clearFilters() {
     setQuery("");
@@ -261,7 +286,18 @@ export default function AuditPage() {
             </button>
           )}
           <div className="ml-auto text-xs text-cocoa-400">
-            {shown.length} of {entries.length} entries
+            {shown.length} of {entries.length} shown
+            {window && (
+              <>
+                {" · "}
+                <span className="font-mono">seq {window.oldest}–{window.newest}</span>
+                {window.truncated && (
+                  <span title={`Older entries exist — the table loads the newest ${entries.length} of ${window.total}. Numbers skip because the log is append-only.`}>
+                    {" · "}newest {entries.length} of {window.total}
+                  </span>
+                )}
+              </>
+            )}
           </div>
         </div>
 
@@ -270,7 +306,51 @@ export default function AuditPage() {
         ) : shown.length === 0 ? (
           <Empty>No audit entries match.</Empty>
         ) : (
-          <div className="overflow-x-auto">
+          <>
+            {/* Stacked cards below lg; the wide table takes over above it. */}
+            <div className="space-y-2.5 px-3 pb-3 lg:hidden">
+              {shown.map((e) => (
+                <DataCard key={e.seq}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="font-semibold text-cocoa-800">
+                        {e.actor_name}
+                      </div>
+                      <div className="text-xs text-cocoa-400">
+                        {fmtDateTime(e.created_at)}
+                      </div>
+                    </div>
+                    <Badge tone={ACTION_TONE[e.action] ?? "slate"}>
+                      {e.action}
+                    </Badge>
+                  </div>
+
+                  <DataField label="Seq">
+                    <span className="font-mono">{e.seq}</span>
+                  </DataField>
+                  <DataField label="Entity">
+                    <span className="text-xs">
+                      {e.entity_type ?? "—"}
+                      {e.entity_id && (
+                        <span className="block font-mono text-cocoa-400">
+                          {e.entity_id}
+                        </span>
+                      )}
+                    </span>
+                  </DataField>
+                  <DataField label="Details">
+                    <code
+                      className="block break-all text-[11px] text-cocoa-500"
+                      title={JSON.stringify(e.details)}
+                    >
+                      {JSON.stringify(e.details)}
+                    </code>
+                  </DataField>
+                </DataCard>
+              ))}
+            </div>
+
+            <div className="hidden overflow-x-auto lg:block">
             <table className="w-full">
               <thead>
                 <tr className="bg-cream-100/60">
@@ -315,7 +395,8 @@ export default function AuditPage() {
                 ))}
               </tbody>
             </table>
-          </div>
+            </div>
+          </>
         )}
       </Card>
 

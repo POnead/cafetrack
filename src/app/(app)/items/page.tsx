@@ -1,7 +1,16 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Card, Modal, Spinner, Empty, Toast, Badge } from "@/components/ui";
+import {
+  Card,
+  Modal,
+  Spinner,
+  Empty,
+  Toast,
+  Badge,
+  DataCard,
+  DataField,
+} from "@/components/ui";
 import { BarcodeView, printBarcodeLabelsAsync } from "@/components/BarcodeView";
 import { fmtQty, fmtDate } from "@/lib/format";
 import { stockStatus, expiryStatus } from "@/lib/status";
@@ -349,10 +358,90 @@ export default function ItemsPage() {
           </div>
         </div>
 
-        {filtered.length === 0 ? (
+        {/* Phones get stacked cards; the table above the fold takes over at lg. */}
+        {filtered.length > 0 && (
+          <div className="space-y-2.5 lg:hidden">
+            {filtered.map((i) => {
+              const status = stockStatus(i.quantity, i.low_stock_threshold);
+              const expiry = expiryStatus(i.expiration_date);
+              return (
+                <DataCard key={i.id}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="font-semibold text-cocoa-800">{i.name}</div>
+                      <div className="font-mono text-xs text-cocoa-400">{i.sku}</div>
+                    </div>
+                    <Badge tone={status.tone} variant="tag">
+                      {status.label}
+                    </Badge>
+                  </div>
+
+                  <DataField label="On hand">
+                    <span
+                      className={
+                        status.key === "ok" ? "" : "font-semibold text-red-600"
+                      }
+                    >
+                      {fmtQty(i.quantity, i.unit)}
+                    </span>
+                  </DataField>
+                  <DataField label="Category">{i.category?.name ?? "—"}</DataField>
+                  <DataField label="Location">{i.location?.name ?? "—"}</DataField>
+                  <DataField label="Form">
+                    <span className="capitalize">{i.physical_form}</span>
+                  </DataField>
+                  <DataField label="Expiry">
+                    {i.expiration_date ? (
+                      <span
+                        className={
+                          expiry.key === "expired"
+                            ? "font-semibold text-red-600"
+                            : expiry.key === "soon"
+                            ? "text-amber-700"
+                            : ""
+                        }
+                      >
+                        {fmtDate(i.expiration_date)}
+                        {expiry.key === "expired" && " (expired)"}
+                        {expiry.key === "soon" && ` (${expiry.days}d)`}
+                      </span>
+                    ) : (
+                      <span className="text-cocoa-200">—</span>
+                    )}
+                  </DataField>
+
+                  <div className="flex gap-1.5 pt-1">
+                    <button
+                      className="btn-ghost min-h-[40px] flex-1 !px-2 !py-1.5 text-xs"
+                      onClick={() => setLabelItem(i)}
+                    >
+                      Label
+                    </button>
+                    <button
+                      className="btn-ghost min-h-[40px] flex-1 !px-2 !py-1.5 text-xs"
+                      onClick={() => openEdit(i)}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      className="btn-danger min-h-[40px] flex-1 !px-2 !py-1.5 text-xs"
+                      onClick={() => remove(i)}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </DataCard>
+              );
+            })}
+          </div>
+        )}
+
+        {filtered.length === 0 && (
           <Empty>No items match your filters.</Empty>
-        ) : (
-          <div className="overflow-x-auto">
+        )}
+
+        {filtered.length > 0 && (
+        <div className="hidden overflow-x-auto lg:block">
             <table className="w-full">
               <thead>
                 <tr className="bg-cream-100/60">
@@ -407,7 +496,7 @@ export default function ItemsPage() {
                         )}
                       </td>
                       <td className="td">
-                        <Badge tone={status.tone} variant="solid">
+                        <Badge tone={status.tone} variant="tag">
                           {status.label}
                         </Badge>
                       </td>

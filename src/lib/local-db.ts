@@ -10,6 +10,7 @@
  *
  *   from(t).select(str).eq(c,v).order(c,{ascending}).limit(n)   -> SELECT
  *   .single() / .maybeSingle()                                  -> row shaping
+ *   .select(c, { count: "exact" })  /  { head: true }          -> row count
  *   from(t).insert(obj).select(str).single()                    -> INSERT .. RETURNING
  *   from(t).update(obj).eq(c,v).select(str).maybeSingle()       -> UPDATE .. RETURNING
  *   from(t).delete().eq(c,v)                                    -> DELETE
@@ -28,6 +29,13 @@ type Row = Record<string, any>;
 export type DbResult<T = any> = {
   data: T;
   error: { message: string } | null;
+  /**
+   * Present only for `.select(cols, { count: "exact", head: true })`, mirroring
+   * supabase-js: the row count of the full result set, independent of `limit`.
+   * The local adapter cannot know that without a second query, so it runs the
+   * count itself and returns it here.
+   */
+  count?: number | null;
 };
 
 /* ------------------------------------------------------------------ */
@@ -329,14 +337,21 @@ class LocalQuery implements PromiseLike<DbResult> {
   private orders: string[] = [];
   private limitCount: number | null = null;
   private shape: "many" | "single" | "maybe" = "many";
+  private wantCount = false;
+  private headOnly = false;
   private run: Promise<DbResult> | null = null;
 
   constructor(private table: string) {}
 
   /* ---- chainable surface ---- */
 
-  select(columns = "*") {
+  select(
+    columns = "*",
+    options?: { count?: "exact" | "planned" | "estimated"; head?: boolean }
+  ) {
     this.selectStr = columns;
+    this.wantCount = options?.count === "exact";
+    this.headOnly = Boolean(options?.head);
     return this;
   }
 
@@ -430,13 +445,39 @@ class LocalQuery implements PromiseLike<DbResult> {
   private async execute(): Promise<DbResult> {
     try {
       const pg = await localDbReady();
-      const { text, values } = this.build();
+      const { text, values, countOnly } = this.build();
       const result = await pg.query(text, values);
-      return this.shapeRows(result.rows as Row[]);
+
+      if (countOnly) {
+        const n = Number((result.rows as Row[])[0]?.count ?? 0);
+        return { data: null, error: null, count: n };
+      }
+
+      const shaped = this.shapeRows(result.rows as Row[]);
+
+      // supabase-js attaches `count` to the same response as the rows, so the
+      // count is a second round trip when both are asked for. PGlite serialises
+      // queries per connection anyway, so this adds no real concurrency.
+      if (this.wantCount) {
+        const { text: countText, values: countValues } = this.buildCountQuery();
+        const counted = await pg.query(countText, countValues);
+        shaped.count = Number((counted.rows as Row[])[0]?.count ?? 0);
+      }
+
+      return shaped;
     } catch (e: any) {
       // Match supabase-js: query failures come back as { error }, not throws.
       return { data: null, error: { message: e?.message || String(e) } };
     }
+  }
+
+  /** Same WHERE clause, but counting every matching row rather than the page. */
+  private buildCountQuery(): { text: string; values: unknown[] } {
+    const where = this.buildWhere("t", 0);
+    return {
+      text: `select count(*)::int as ${quoteId("count")} from ${this.table} t${where.sql}`,
+      values: where.values,
+    };
   }
 
   private shapeRows(rows: Row[]): DbResult {
@@ -469,7 +510,7 @@ class LocalQuery implements PromiseLike<DbResult> {
 
   /* ---- SQL generation ---- */
 
-  private build(): { text: string; values: unknown[] } {
+  private build(): { text: string; values: unknown[]; countOnly: boolean } {
     if (this.mode === "insert") return this.buildInsert();
     if (this.mode === "update") return this.buildUpdate();
     if (this.mode === "delete") return this.buildDelete();
@@ -478,6 +519,20 @@ class LocalQuery implements PromiseLike<DbResult> {
 
   private buildSelect() {
     const alias = "t";
+    const where = this.buildWhere(alias, 0);
+
+    // `head: true` asks for the row count and no body at all, which is how
+    // PostgREST reports the size of a filtered set. `limit` is ignored here
+    // because the whole point is to learn how many rows exist *before* the
+    // limit is applied.
+    if (this.headOnly) {
+      return {
+        text: `select count(*)::int as ${quoteId("count")} from ${this.table} ${alias}${where.sql}`,
+        values: where.values,
+        countOnly: true,
+      };
+    }
+
     const { star, plain, embeds } = parseSelect(this.selectStr ?? "*");
     const cols: string[] = [];
 
@@ -508,7 +563,6 @@ class LocalQuery implements PromiseLike<DbResult> {
 
     if (cols.length === 0) cols.push(`${alias}.*`);
 
-    const where = this.buildWhere(alias, 0);
     let text = `select ${cols.join(", ")} from ${this.table} ${alias}${where.sql}`;
 
     if (this.orders.length) text += ` order by ${this.orders.join(", ")}`;
@@ -516,7 +570,7 @@ class LocalQuery implements PromiseLike<DbResult> {
       text += ` limit ${Math.max(0, Math.floor(this.limitCount))}`;
     }
 
-    return { text, values: where.values };
+    return { text, values: where.values, countOnly: false };
   }
 
   private buildInsert() {
@@ -543,7 +597,7 @@ class LocalQuery implements PromiseLike<DbResult> {
     const returning = this.returningList();
     if (returning) text += ` returning ${returning}`;
 
-    return { text, values };
+    return { text, values, countOnly: false };
   }
 
   private buildUpdate() {
@@ -564,7 +618,7 @@ class LocalQuery implements PromiseLike<DbResult> {
     const returning = this.returningList();
     if (returning) text += ` returning ${returning}`;
 
-    return { text, values: [...values, ...where.values] };
+    return { text, values: [...values, ...where.values], countOnly: false };
   }
 
   private buildDelete() {
@@ -578,7 +632,7 @@ class LocalQuery implements PromiseLike<DbResult> {
     const returning = this.returningList();
     if (returning) text += ` returning ${returning}`;
 
-    return { text, values: where.values };
+    return { text, values: where.values, countOnly: false };
   }
 
   private buildWhere(alias: string, offset: number) {

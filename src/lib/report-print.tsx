@@ -139,13 +139,19 @@ export function printStockReport(opts: {
           td { padding: 6px 8px; border-bottom: 1px solid #F0E4D8; vertical-align: top; }
           td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
           .mono { font-family: ui-monospace, monospace; font-size: 11px; color: #96755A; }
-          .expired { color: #B42318; }
+          .expired { color: #8A3423; }
           .empty { color: #96755A; font-style: italic; }
-          .pill { display: inline-block; padding: 2px 8px; border-radius: 999px;
-                  font-size: 10px; font-weight: 600; }
-          .pill-out { background: #FEE4E2; color: #B42318; }
-          .pill-low { background: #FEF0C7; color: #B54708; }
-          .pill-ok { background: #DCFAE6; color: #067647; }
+          .pill { display: inline-flex; align-items: center; gap: 4px;
+                  padding: 2px 8px; border: 1px solid; border-radius: 4px;
+                  background: transparent; font-size: 10px; font-weight: 700;
+                  text-transform: uppercase; letter-spacing: .06em; }
+          /* Dot inherits the tag's text colour, the print equivalent of the
+             bg-current dot on screen (Badge variant="tag" in ui.tsx). */
+          .pill::before { content: ""; width: 6px; height: 6px; flex: none;
+                          border-radius: 999px; background: currentColor; }
+          .pill-out { color: #8A3423; border-color: rgba(181, 96, 62, 0.4); }
+          .pill-low { color: #8A611A; border-color: rgba(184, 134, 47, 0.4); }
+          .pill-ok { color: #4A6638; border-color: rgba(107, 143, 90, 0.4); }
           .btn { padding: 8px 16px; border-radius: 999px; border: 1px solid #D99B3F;
                  background: #E8B563; color: #3D2B1F; font-weight: 600;
                  font-size: 14px; cursor: pointer; }

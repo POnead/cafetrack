@@ -221,7 +221,7 @@ src/
     status.ts          shared status wording and colours
     ref-delete.ts      shared in-use guard for the reference lists
     report-print.tsx   print/PDF view of the stock report
-  middleware.ts        JWT check for every route
+  proxy.ts           JWT check for every route (was middleware.ts before Next 16)
 ```
 
 ---

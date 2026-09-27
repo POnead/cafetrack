@@ -3,15 +3,19 @@ import { deleteRef } from "@/lib/ref-delete";
 
 export const runtime = "nodejs";
 
+// Next 15 delivers route `params` as a Promise, so it is awaited once here and
+// the resolved id is used for the rest of the handler.
 export const DELETE = handler(
-  async (_req: Request, { params }: { params: { id: string } }) => {
-    const malformed = badId(params.id, "category");
+  async (_req: Request, { params }: { params: Promise<{ id: string }> }) => {
+    const { id } = await params;
+
+    const malformed = badId(id, "category");
     if (malformed) return malformed;
 
     const failed = await deleteRef({
       table: "categories",
       column: "category_id",
-      id: params.id,
+      id,
       label: "category",
       noun: "category",
       action: "CATEGORY_DELETE",
