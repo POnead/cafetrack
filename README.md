@@ -217,6 +217,12 @@ src/
 
 ## Known limitations
 
+- **A failed audit write is reported, not hidden.** `audit()` throws by default,
+  so a change that could not be recorded answers `500` rather than a misleading
+  success. The message says the change may have been applied but went
+  unaudited, because the routes call `audit()` *after* the write commits.
+  Sign-in attempts and sign-out pass `critical: false`, because a rejected
+  password must stay a `401` and sign-out must always clear the session cookie.
 - **Input validation on `POST`/`PATCH /api/items`.** `_edge-tests.mjs` fails four
   checks a browser could otherwise trigger: `quantity: null` is coerced to `0`
   instead of being rejected, a malformed `expiration_date` reaches the database,

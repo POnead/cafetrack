@@ -170,10 +170,10 @@ begin
           coalesce(p_details, '{}'::jsonb), v_prev, '')
   returning * into v_row;
 
-  v_hash := encode(sha256((
+  v_hash := encode(sha256(convert_to((
       v_row.seq::text || '|' || v_prev || '|' || p_actor_name || '|' || p_action || '|' ||
       coalesce(p_entity_type,'') || '|' || coalesce(p_entity_id,'') || '|' ||
-      coalesce(p_details, '{}'::jsonb)::text)::bytea), 'hex');
+      coalesce(p_details, '{}'::jsonb)::text), 'UTF8')), 'hex');
 
   update audit_log set entry_hash = v_hash where seq = v_row.seq returning * into v_row;
   return v_row;
@@ -198,10 +198,10 @@ begin
       broken_seq := r.seq; reason := 'prev_hash mismatch'; return next; return;
     end if;
 
-    v_expected := encode(sha256((
+    v_expected := encode(sha256(convert_to((
         r.seq::text || '|' || r.prev_hash || '|' || r.actor_name || '|' || r.action || '|' ||
         coalesce(r.entity_type,'') || '|' || coalesce(r.entity_id,'') || '|' ||
-        r.details::text)::bytea), 'hex');
+        r.details::text), 'UTF8')), 'hex');
 
     if v_expected <> r.entry_hash then
       broken_seq := r.seq; reason := 'entry_hash mismatch'; return next; return;

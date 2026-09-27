@@ -7,7 +7,7 @@ export const runtime = "nodejs";
 export const POST = handler(async () => {
   const session = await getSession();
   if (session) {
-    await audit(session, "LOGOUT", "user", session.id, {});
+    await audit(session, "LOGOUT", "user", session.id, {}, { critical: false });
   }
   clearSessionCookie();
   return ok({ ok: true });

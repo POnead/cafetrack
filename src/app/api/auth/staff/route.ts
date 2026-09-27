@@ -58,7 +58,7 @@ export const POST = handler(async (req: Request) => {
       method: "staff_qr",
       reason: "unknown_token",
       token: clean,
-    });
+    }, { critical: false });
     return fail("Unrecognized staff credential", 401);
   }
 
@@ -69,7 +69,8 @@ export const POST = handler(async (req: Request) => {
       "LOGIN_FAILED",
       "user",
       user.id,
-      { method: "staff_qr", reason: "bad_password" }
+      { method: "staff_qr", reason: "bad_password" },
+      { critical: false }
     );
     return fail("Incorrect password", 401);
   }
@@ -83,7 +84,8 @@ export const POST = handler(async (req: Request) => {
       "LOGIN_FAILED",
       "user",
       user.id,
-      { method: "staff_qr", reason: "deactivated" }
+      { method: "staff_qr", reason: "deactivated" },
+      { critical: false }
     );
     return fail(deactivatedMessage(user.deactivation_reason), 403, {
       deactivated: true,

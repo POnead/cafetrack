@@ -4,8 +4,18 @@
  * Two substitutions, nothing else:
  *   1. drop `create extension pgcrypto` — not bundled with PGlite, and
  *      gen_random_uuid() is a core function in the PostgreSQL 18 it ships.
- *   2. `encode(digest(x,'sha256'),'hex')` -> `encode(sha256(x::bytea),'hex')`
+ *   2. `encode(digest(x,'sha256'),'hex')` -> `encode(sha256(convert_to(x,'UTF8')),'hex')`
  *      which produces identical hashes, so audit chains stay compatible.
+ *
+ *      `convert_to`, not `x::bytea`. A text->bytea cast runs the input through
+ *      `byteain`, which *parses* the `\xDEADBEEF` hex / backslash-escape
+ *      formats -- it is a decoder, not an encoding. Ordinary text such as
+ *      `1|GENESIS|admin|ITEM_CREATE|item|abc|{}` is not valid input to it and
+ *      the cast throws "invalid input syntax for type bytea". That silently
+ *      dropped audit entries whose details JSON contained an escaped quote or
+ *      backslash (any item named `Cafe "Special"`, say). `convert_to` is a real
+ *      text->bytes conversion and hashes byte-for-byte the same as pgcrypto's
+ *      `digest(text,'sha256')`, which is what keeps the two modes compatible.
  *
  * Run with:  node scripts/build-local-schema.mjs
  */
@@ -26,7 +36,7 @@ const converted = source
   )
   .replace(
     /encode\(digest\(([\s\S]*?),\s*'sha256'\), 'hex'\)/g,
-    "encode(sha256(($1)::bytea), 'hex')"
+    "encode(sha256(convert_to(($1), 'UTF8')), 'hex')"
   );
 
 if (/digest\s*\(/.test(converted)) {
@@ -36,6 +46,18 @@ if (/digest\s*\(/.test(converted)) {
 
 if (/\bdigest\b/.test(source) === false) {
   console.error("Refusing to write: schema.sql had no digest() calls — has it changed?");
+  process.exit(1);
+}
+
+// A text::bytea cast decodes hex/escape input rather than converting, and
+// throws on ordinary text. Guard against it creeping back in.
+if (/::\s*bytea/.test(converted)) {
+  console.error("Refusing to write: a ::bytea cast survived the rewrite.");
+  process.exit(1);
+}
+
+if (!/convert_to\(/.test(converted)) {
+  console.error("Refusing to write: no convert_to() calls — has the rewrite changed?");
   process.exit(1);
 }
 

@@ -61,7 +61,8 @@ export const POST = handler(async (req: Request) => {
       "LOGIN_FAILED",
       "user",
       user.id,
-      { method: "admin_password" }
+      { method: "admin_password" },
+      { critical: false }
     );
     return fail("Invalid credentials", 401);
   }
@@ -76,7 +77,8 @@ export const POST = handler(async (req: Request) => {
       "LOGIN_FAILED",
       "user",
       user.id,
-      { method: "admin_password", reason: "deactivated" }
+      { method: "admin_password", reason: "deactivated" },
+      { critical: false }
     );
     return fail(deactivatedMessage(user.deactivation_reason), 403, {
       deactivated: true,
