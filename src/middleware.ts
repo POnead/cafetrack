@@ -1,9 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { jwtVerify } from "jose";
-
-const SECRET = new TextEncoder().encode(
-  process.env.AUTH_SECRET || "dev-only-secret-change-me-please-32-chars-min"
-);
+import { resolveAuthSecret } from "@/lib/secret";
 
 const COOKIE_NAME = "cafetrack_session";
 
@@ -27,8 +24,21 @@ export async function middleware(req: NextRequest) {
     return deny(req, pathname);
   }
 
+  // Same rule as the session code (src/lib/secret.ts), but failing closed: a
+  // misconfigured deployment must refuse access rather than verify tokens
+  // against the published dev secret.
+  let secret: Uint8Array;
   try {
-    await jwtVerify(token, SECRET);
+    secret = new TextEncoder().encode(resolveAuthSecret());
+  } catch {
+    return new NextResponse("Server is misconfigured: AUTH_SECRET is not set.", {
+      status: 503,
+      headers: { "content-type": "text/plain; charset=utf-8" },
+    });
+  }
+
+  try {
+    await jwtVerify(token, secret);
     return NextResponse.next();
   } catch {
     return deny(req, pathname);

@@ -35,7 +35,7 @@ async function call(method, path, body) {
 
   const contentType = res.headers.get("content-type") || "";
   const data = contentType.includes("json") ? await res.json() : null;
-  return { status: res.status, data };
+  return { status: res.status, data, headers: res.headers };
 }
 
 function check(label, ok, detail = "") {
@@ -106,6 +106,21 @@ async function main() {
 
   res = await call("GET", "/api/items?q=" + encodeURIComponent('Cups)"('));
   check("search with quotes/parens -> 200", res.status === 200, "got " + res.status);
+
+  // A malformed uuid used to reach Postgres and come back as a 500.
+  res = await call("GET", "/api/items/not-a-uuid");
+  check(
+    "GET /api/items/:id with a malformed id -> 400",
+    res.status === 400,
+    `got ${res.status}`
+  );
+
+  res = await call("GET", "/api/alerts/not-a-uuid");
+  check(
+    "GET /api/alerts/:id with a malformed id -> 400",
+    res.status === 400,
+    `got ${res.status}`
+  );
 
   res = await call("POST", "/api/items", {
     name: "Smoke Test Item",
@@ -225,6 +240,13 @@ async function main() {
   const users = res.data?.users ?? [];
   check("GET /api/users", res.status === 200 && users.length >= 3, `${users.length} accounts`);
   check("password hashes are never returned", users.every((u) => !("password_hash" in u)));
+
+  res = await call("PATCH", "/api/users/not-a-uuid", { is_active: false });
+  check(
+    "PATCH /api/users/:id with a malformed id -> 400",
+    res.status === 400,
+    `got ${res.status}`
+  );
 
   res = await call("POST", "/api/users", {
     full_name: "Smoke Tester",
@@ -366,6 +388,85 @@ async function main() {
 
   res = await call("GET", `/api/items/lookup?code=${encodeURIComponent(newItem?.sku ?? "x")}`);
   check("deleted item no longer resolves -> 404", res.status === 404);
+
+  section("sign-in throttling");
+  // A throwaway account, so the throttle is exercised without locking out
+  // anyone the rest of the suite depends on.
+  const throttleUser = (
+    await call("POST", "/api/users", {
+      username: `throttle${Date.now().toString(36)}`,
+      full_name: "Throttle Check",
+      password: STAFF_PASSWORD,
+      role: "staff",
+    })
+  ).data?.user;
+  check(
+    "created a throwaway account to throttle",
+    Boolean(throttleUser?.qr_token),
+    throttleUser?.username || ""
+  );
+
+  if (throttleUser?.qr_token) {
+    const token = throttleUser.qr_token;
+    const adminCookieThrottle = cookie;
+    const wrong = async () =>
+      (await call("POST", "/api/auth/staff", { token, password: "wrong-on-purpose" })).status;
+
+    const firstRun = [];
+    for (let i = 0; i < 4; i++) firstRun.push(await wrong());
+    check(
+      "four wrong passwords are still answered normally",
+      firstRun.every((s) => s === 401),
+      firstRun.join(",")
+    );
+
+    const good = await call("POST", "/api/auth/staff", { token, password: STAFF_PASSWORD });
+    check(
+      "the right password still works, and clears the counter",
+      good.status === 200,
+      `got ${good.status}`
+    );
+
+    const secondRun = [];
+    for (let i = 0; i < 4; i++) secondRun.push(await wrong());
+    check(
+      "a success reset the counter, so four more are fine",
+      secondRun.every((s) => s === 401),
+      secondRun.join(",")
+    );
+
+    // Five consecutive failures are answered normally; the sixth is refused.
+    const fifth = await call("POST", "/api/auth/staff", {
+      token,
+      password: "wrong-on-purpose",
+    });
+    check("the fifth failure is still answered", fifth.status === 401, `got ${fifth.status}`);
+
+    const blocked = await call("POST", "/api/auth/staff", {
+      token,
+      password: "wrong-on-purpose",
+    });
+    check("the sixth attempt is throttled", blocked.status === 429, `got ${blocked.status}`);
+
+    const retryAfter = blocked.headers?.get?.("retry-after");
+    check("429 carries a Retry-After header", Number(retryAfter) > 0, retryAfter || "none");
+
+    // The sign-in above replaced the shared cookie with a staff session.
+    cookie = adminCookieThrottle;
+
+    const adminStillIn = await call("POST", "/api/auth/login", ADMIN);
+    check(
+      "the lockout is scoped to that one account",
+      adminStillIn.status === 200,
+      `got ${adminStillIn.status}`
+    );
+
+    // Park the throwaway account: inactive, with a rotated code.
+    await call("PATCH", `/api/users/${throttleUser.id}`, {
+      is_active: false,
+      regenerate_token: true,
+    });
+  }
 
   section("sign out");
   res = await call("POST", "/api/auth/logout");

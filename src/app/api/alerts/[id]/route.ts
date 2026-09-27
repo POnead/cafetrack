@@ -1,20 +1,9 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail } from "@/lib/api";
+import { handler, ok, fail, badId } from "@/lib/api";
 import { requireUser } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 
 export const runtime = "nodejs";
-
-/**
- * `id` is a uuid column, so anything else is a malformed request rather than a
- * missing row — without this the database reports a type error and the route
- * would answer 500.
- */
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function badId(id: string) {
-  return UUID.test(id) ? null : fail("Not a valid alert id", 400);
-}
 
 /* ---------------- read one, with its context ---------------- */
 /**
@@ -27,10 +16,10 @@ function badId(id: string) {
  */
 export const GET = handler(
   async (_req: Request, { params }: { params: { id: string } }) => {
-    const malformed = badId(params.id);
-    if (malformed) return malformed;
-
     await requireUser();
+
+    const malformed = badId(params.id, "alert");
+    if (malformed) return malformed;
 
     const { data: alert, error } = await db()
       .from("alerts")
@@ -80,10 +69,10 @@ export const GET = handler(
 /** Resolve or re-open a single alert. */
 export const PATCH = handler(
   async (req: Request, { params }: { params: { id: string } }) => {
-    const malformed = badId(params.id);
-    if (malformed) return malformed;
-
     const user = await requireUser();
+
+    const malformed = badId(params.id, "alert");
+    if (malformed) return malformed;
     const body = await req.json();
     const resolved = body.resolved !== false;
 

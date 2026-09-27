@@ -9,6 +9,7 @@ import {
 } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { getSessionMinutes } from "@/lib/settings";
+import { checkLoginThrottle, tooManyAttempts, userKey } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -16,6 +17,11 @@ export const POST = handler(async (req: Request) => {
   const { username, password } = await req.json();
 
   if (!username || !password) return fail("Username and password are required");
+
+  // Throttled before any password work — that is the whole point of the check.
+  const key = userKey(String(username));
+  const throttle = await checkLoginThrottle(key, "admin_password");
+  if (throttle.blocked) return tooManyAttempts(throttle.retryAfterSeconds);
 
   const { data: user, error: lookupError } = await db()
     .from("users")
@@ -36,7 +42,8 @@ export const POST = handler(async (req: Request) => {
 
   const logAttempt = async (success: boolean) => {
     await db().from("login_attempts").insert({
-      username,
+      // The same key the throttle counts, so a success clears the failures.
+      username: key,
       method: "admin_password",
       success,
     });

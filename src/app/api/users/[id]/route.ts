@@ -1,5 +1,5 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail } from "@/lib/api";
+import { handler, ok, fail, badId } from "@/lib/api";
 import { hashPassword, newStaffToken, requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 
@@ -12,6 +12,10 @@ const USER_COLUMNS =
 export const PATCH = handler(
   async (req: Request, { params }: { params: { id: string } }) => {
     const admin = await requireAdmin();
+
+    const malformed = badId(params.id, "user");
+    if (malformed) return malformed;
+
     const body = await req.json();
 
     const { data: before } = await db()

@@ -1,5 +1,5 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail } from "@/lib/api";
+import { handler, ok, fail, badId } from "@/lib/api";
 import { requireAdmin, requireUser } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 
@@ -9,6 +9,10 @@ export const runtime = "nodejs";
 export const GET = handler(
   async (_req: Request, { params }: { params: { id: string } }) => {
     await requireUser();
+
+    const malformed = badId(params.id, "item");
+    if (malformed) return malformed;
+
     const { data, error } = await db()
       .from("items")
       .select(
@@ -27,6 +31,10 @@ export const GET = handler(
 export const PATCH = handler(
   async (req: Request, { params }: { params: { id: string } }) => {
     const admin = await requireAdmin();
+
+    const malformed = badId(params.id, "item");
+    if (malformed) return malformed;
+
     const body = await req.json();
 
     const { data: before } = await db()
@@ -94,6 +102,9 @@ export const PATCH = handler(
 export const DELETE = handler(
   async (_req: Request, { params }: { params: { id: string } }) => {
     const admin = await requireAdmin();
+
+    const malformed = badId(params.id, "item");
+    if (malformed) return malformed;
 
     const { data: item } = await db()
       .from("items")

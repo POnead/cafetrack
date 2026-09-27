@@ -18,6 +18,22 @@ export function fail(
   return NextResponse.json({ error: message, ...(extra ?? {}) }, { status });
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Guard for routes whose `:id` is a uuid column. Postgres reports a type error
+ * for anything else ("invalid input syntax for type uuid"), which the routes
+ * would otherwise surface as a 500 when the real problem is a malformed
+ * request. The write paths that ignored the database error answered 404, which
+ * is a different mistake and a misleading one.
+ *
+ * Returns the response to send, or null when the id is usable. Call it after
+ * authenticating, so an anonymous caller still gets a 401.
+ */
+export function badId(id: string, what = "id") {
+  return UUID.test(id) ? null : fail(`Not a valid ${what} id`, 400);
+}
+
 /** Wraps a route handler so thrown HttpErrors become clean JSON responses. */
 export function handler(fn: (...args: any[]) => Promise<Response>) {
   return async (...args: any[]) => {

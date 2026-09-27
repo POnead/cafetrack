@@ -3,6 +3,12 @@ import { handler, ok, fail } from "@/lib/api";
 import { verifyPassword, signSession, setSessionCookie, deactivatedMessage } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { getSessionMinutes } from "@/lib/settings";
+import {
+  checkLoginThrottle,
+  tooManyAttempts,
+  tokenKey,
+  userKey,
+} from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -30,9 +36,17 @@ export const POST = handler(async (req: Request) => {
     );
   }
 
+  // A known account is throttled on that account; an unknown code is throttled
+  // on a hash of the code itself, so brute-forcing codes never writes a usable
+  // credential into the log.
+  const key = user ? userKey(user.username) : tokenKey(clean);
+  const throttle = await checkLoginThrottle(key, "staff_qr");
+  if (throttle.blocked) return tooManyAttempts(throttle.retryAfterSeconds);
+
   const logAttempt = async (success: boolean) => {
     await db().from("login_attempts").insert({
-      username: user?.username ?? null,
+      // The same key the throttle counts, so a success clears the failures.
+      username: key,
       method: "staff_qr",
       success,
     });

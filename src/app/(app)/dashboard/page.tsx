@@ -32,7 +32,11 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
 
-  async function load() {
+  async function load(force = false) {
+    // A 2s poll is cheap, but a forgotten background tab has no reason to keep
+    // asking. The first load is forced, so a hidden tab still populates.
+    if (!force && document.hidden) return;
+
     // Skip while a poll is still in flight so a slow response cannot land
     // late and overwrite fresher data.
     if (inFlight.current) return;
@@ -59,8 +63,10 @@ export default function DashboardPage() {
   }
 
   useEffect(() => {
-    load();
-    const timer = setInterval(load, 4000); // near-real-time refresh
+    load(true);
+    // Near-real-time refresh, skipped while the tab is hidden (see load).
+    // Wrapped in an arrow so the interval cannot pass an argument into `force`.
+    const timer = setInterval(() => load(), 2000);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

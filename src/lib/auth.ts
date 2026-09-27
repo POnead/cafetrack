@@ -1,10 +1,10 @@
 import { SignJWT, jwtVerify } from "jose";
 import { cookies } from "next/headers";
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { resolveAuthSecret } from "./secret";
 
-const SECRET = new TextEncoder().encode(
-  process.env.AUTH_SECRET || "dev-only-secret-change-me-please-32-chars-min"
-);
+// Fails fast at startup in production; see src/lib/secret.ts.
+const SECRET = new TextEncoder().encode(resolveAuthSecret());
 
 export const COOKIE_NAME = "cafetrack_session";
 
