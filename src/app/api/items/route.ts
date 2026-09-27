@@ -1,8 +1,14 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail } from "@/lib/api";
+import { handler, ok, fail, readBody } from "@/lib/api";
 import { requireAdmin, requireUser } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { randomBytes } from "node:crypto";
+import {
+  FieldError,
+  requireQuantity,
+  parseThreshold,
+  parseExpiryDate,
+} from "@/lib/item-validation";
 
 export const runtime = "nodejs";
 
@@ -53,15 +59,24 @@ export const GET = handler(async (req: Request) => {
 /* ---------------- create ---------------- */
 export const POST = handler(async (req: Request) => {
   const admin = await requireAdmin();
-  const body = await req.json();
+  const body = await readBody(req);
 
   const name = String(body.name || "").trim();
   if (!name) return fail("Item name is required");
 
-  const quantity = Number(body.quantity ?? 0);
-  if (Number.isNaN(quantity) || quantity < 0) return fail("Invalid quantity");
-
-  const lowStock = Number(body.low_stock_threshold ?? 5);
+  // Quantity is required and must be a real number — never defaulted. A missing
+  // or blank value used to become 0, which silently emptied the item.
+  let quantity: number;
+  let lowStock: number;
+  let expiry: string | null;
+  try {
+    quantity = requireQuantity(body.quantity, "Quantity");
+    lowStock = parseThreshold(body.low_stock_threshold ?? 5, "Low-stock threshold");
+    expiry = parseExpiryDate(body.expiration_date);
+  } catch (e: any) {
+    if (e instanceof FieldError) return fail(e.message);
+    throw e;
+  }
 
   // SKU generation: CT-<CATEGORY>-<RANDOM4>
   let categoryLabel = "GEN";
@@ -101,8 +116,8 @@ export const POST = handler(async (req: Request) => {
       physical_form: body.physical_form || "solid",
       unit: body.unit || "pcs",
       quantity,
-      low_stock_threshold: Number.isNaN(lowStock) ? 5 : lowStock,
-      expiration_date: body.expiration_date || null,
+      low_stock_threshold: lowStock,
+      expiration_date: expiry,
     })
     .select()
     .single();

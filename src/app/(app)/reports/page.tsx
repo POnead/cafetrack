@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Card, Badge, Empty, Spinner, Stat, Toast } from "@/components/ui";
 import { fmtQty, fmtDate, daysUntil, toCsv } from "@/lib/format";
 import { stockStatus } from "@/lib/status";
+import { printStockReport } from "@/lib/report-print";
 
 type Item = {
   id: string;
@@ -13,8 +14,10 @@ type Item = {
   quantity: number;
   low_stock_threshold: number;
   expiration_date: string | null;
-  category: { name: string } | null;
-  location: { name: string } | null;
+  // `id` is present in the /api/items embed and is what the category filter
+  // matches on.
+  category: { id: string; name: string } | null;
+  location: { id: string; name: string } | null;
 };
 
 type Txn = {
@@ -32,6 +35,18 @@ const MOVEMENT_LABEL: Record<string, string> = {
   waste: "Logged as waste",
 };
 
+/* Date-range presets. "all" and "custom" are not day counts. */
+const RANGE_DAYS = { "7d": 7, "30d": 30, "90d": 90 } as const;
+type RangeKey = keyof typeof RANGE_DAYS | "all" | "custom";
+
+const RANGE_OPTIONS: { key: RangeKey; label: string }[] = [
+  { key: "all", label: "All time" },
+  { key: "7d", label: "Last 7 days" },
+  { key: "30d", label: "Last 30 days" },
+  { key: "90d", label: "Last 90 days" },
+  { key: "custom", label: "Custom" },
+];
+
 /* Stock wording + tones come from @/lib/status so every page agrees. */
 
 export default function ReportsPage() {
@@ -46,21 +61,75 @@ export default function ReportsPage() {
 
   const inFlight = useRef(false);
 
+  // Used as the heading on the printed/PDF report. Defaults to the product
+  // name so the export still works if the settings read fails.
+  const [businessName, setBusinessName] = useState("CafeTrack");
+
+  /* ---------- filters ----------
+   * The spec asks for reports filtered "by date range, item category, and
+   * staff". Category filtering here is client-side over the snapshot; the date
+   * range and staff are sent to the server because transactions are fetched
+   * newest-first with a cap, so filtering after the fact would silently drop
+   * rows that were never fetched.
+   */
+  const [range, setRange] = useState<RangeKey>("all");
+  const [fromDay, setFromDay] = useState("");
+  const [toDay, setToDay] = useState("");
+  const [staff, setStaff] = useState("");
+  const [typeFilter, setTypeFilter] = useState("");
+  const [catFilter, setCatFilter] = useState("");
+  const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
+
+  const rangeParams = useMemo(() => {
+    if (range === "custom") {
+      return { from: fromDay, to: toDay };
+    }
+    if (range === "all") return { from: "", to: "" };
+    const days = RANGE_DAYS[range];
+    const d = new Date();
+    d.setDate(d.getDate() - days);
+    return { from: d.toISOString().slice(0, 10), to: "" };
+  }, [range, fromDay, toDay]);
+
   async function load() {
     if (inFlight.current) return;
     inFlight.current = true;
 
     try {
-      const [i, t] = await Promise.all([
+      // Date range / staff / type are applied server-side: the transactions
+      // endpoint caps at 500 newest-first, so filtering the returned page
+      // client-side would quietly omit anything older.
+      const qs = new URLSearchParams({ limit: "500" });
+      if (rangeParams.from) qs.set("from", rangeParams.from);
+      if (rangeParams.to) qs.set("to", rangeParams.to);
+      if (staff) qs.set("staff", staff);
+      if (typeFilter) qs.set("type", typeFilter);
+
+      const [i, t, c] = await Promise.all([
         fetch("/api/items").then((r) => r.json()),
-        fetch("/api/transactions?limit=200").then((r) => r.json()),
+        fetch(`/api/transactions?${qs}`).then((r) => r.json()),
+        // Advisory: the report still works if the reference list fails.
+        fetch("/api/refs/categories")
+          .then((r) => r.json())
+          .catch(() => ({ items: [] })),
       ]);
+
+      setCategories(c.items ?? []);
 
       if (i.error) throw new Error(i.error);
       if (t.error) throw new Error(t.error);
 
       setItems(i.items ?? []);
       setTxns(t.transactions ?? []);
+
+      // Advisory only: a failure here must not take the whole report down.
+      fetch("/api/settings")
+        .then((r) => r.json())
+        .then((s) => {
+          if (s?.settings?.business_name) setBusinessName(s.settings.business_name);
+        })
+        .catch(() => {});
+
       setError(null);
     } catch (e: any) {
       setError(e.message || "Could not build the report");
@@ -70,16 +139,33 @@ export default function ReportsPage() {
     }
   }
 
+  // Reload whenever a filter changes. `load` is stable enough for this page and
+  // the eslint rule is off throughout the codebase, matching the other pages.
   useEffect(() => {
     load();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rangeParams.from, rangeParams.to, staff, typeFilter]);
 
   /* ---------- derived ---------- */
 
-  const low = items.filter(
+  // Category filter is applied here, to the already-fetched snapshot, so it
+  // affects the inventory table and the counts without a second request.
+  const shownItems = useMemo(() => {
+    if (!catFilter) return items;
+    return items.filter((i) => i.category?.id === catFilter);
+  }, [items, catFilter]);
+
+  // Staff who actually appear in the loaded window, so the dropdown does not
+  // offer someone with no matching transactions.
+  const staffNames = useMemo(
+    () => [...new Set(txns.map((t) => t.actor_name).filter(Boolean))].sort(),
+    [txns]
+  );
+
+  const low = shownItems.filter(
     (i) => stockStatus(i.quantity, i.low_stock_threshold).key === "low"
   );
-  const out = items.filter(
+  const out = shownItems.filter(
     (i) => stockStatus(i.quantity, i.low_stock_threshold).key === "out"
   );
 
@@ -110,7 +196,7 @@ export default function ReportsPage() {
   })();
 
   function exportCsv() {
-    const rows = items.map((i) => {
+    const rows = shownItems.map((i) => {
       const d = daysUntil(i.expiration_date);
       return {
         SKU: i.sku,
@@ -150,6 +236,17 @@ export default function ReportsPage() {
     setToast({ msg: `Exported ${rows.length} rows`, tone: "success" });
   }
 
+  function exportPdf() {
+    printStockReport({
+      businessName,
+      items: shownItems,
+      movement,
+      topMovers,
+      lowCount: low.length,
+      outCount: out.length,
+    });
+  }
+
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -164,6 +261,13 @@ export default function ReportsPage() {
             Reload
           </button>
           <button
+            className="btn-ghost"
+            onClick={exportPdf}
+            disabled={items.length === 0}
+          >
+            Export PDF
+          </button>
+          <button
             className="btn-primary"
             onClick={exportCsv}
             disabled={items.length === 0}
@@ -173,6 +277,136 @@ export default function ReportsPage() {
         </div>
       </div>
 
+      {/* Filters. Date range / staff / type change the transactions query;
+          category narrows the inventory snapshot in place. */}
+      <Card>
+        <div className="flex flex-wrap items-end gap-3">
+          <div>
+            <label className="label" htmlFor="f-range">
+              Date range
+            </label>
+            <select
+              id="f-range"
+              className="input"
+              value={range}
+              onChange={(e) => setRange(e.target.value as RangeKey)}
+            >
+              {RANGE_OPTIONS.map((o) => (
+                <option key={o.key} value={o.key}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {range === "custom" && (
+            <>
+              <div>
+                <label className="label" htmlFor="f-from">
+                  From
+                </label>
+                <input
+                  id="f-from"
+                  type="date"
+                  className="input"
+                  value={fromDay}
+                  max={toDay || undefined}
+                  onChange={(e) => setFromDay(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="label" htmlFor="f-to">
+                  To
+                </label>
+                <input
+                  id="f-to"
+                  type="date"
+                  className="input"
+                  value={toDay}
+                  min={fromDay || undefined}
+                  onChange={(e) => setToDay(e.target.value)}
+                />
+              </div>
+            </>
+          )}
+
+          <div>
+            <label className="label" htmlFor="f-type">
+              Movement
+            </label>
+            <select
+              id="f-type"
+              className="input"
+              value={typeFilter}
+              onChange={(e) => setTypeFilter(e.target.value)}
+            >
+              <option value="">All movements</option>
+              <option value="checkout">Checked out</option>
+              <option value="restock">Restocked</option>
+              <option value="waste">Waste</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="label" htmlFor="f-staff">
+              Staff
+            </label>
+            <select
+              id="f-staff"
+              className="input"
+              value={staff}
+              onChange={(e) => setStaff(e.target.value)}
+            >
+              <option value="">Everyone</option>
+              {staffNames.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="label" htmlFor="f-cat">
+              Category
+            </label>
+            <select
+              id="f-cat"
+              className="input"
+              value={catFilter}
+              onChange={(e) => setCatFilter(e.target.value)}
+            >
+              <option value="">All categories</option>
+              {categories.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {(rangeParams.from ||
+            rangeParams.to ||
+            staff ||
+            typeFilter ||
+            catFilter) && (
+            <button
+              className="btn-ghost"
+              onClick={() => {
+                setRange("all");
+                setFromDay("");
+                setToDay("");
+                setStaff("");
+                setTypeFilter("");
+                setCatFilter("");
+              }}
+            >
+              Clear filters
+            </button>
+          )}
+        </div>
+      </Card>
+
       {error && (
         <div className="rounded-xl bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
           {error}
@@ -180,7 +414,7 @@ export default function ReportsPage() {
       )}
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Stat label="Items tracked" value={items.length} />
+        <Stat label="Items tracked" value={shownItems.length} />
         <Stat label="Low Stock" value={low.length} tone="warn" />
         <Stat label="Out of Stock" value={out.length} tone="danger" />
         <Stat label="Movements loaded" value={txns.length} />
@@ -262,12 +496,14 @@ export default function ReportsPage() {
                 On hand by item
               </h2>
               <span className="text-[11px] text-cocoa-400">
-                {items.length} items
+                {shownItems.length} items
               </span>
             </div>
 
-            {items.length === 0 ? (
-              <Empty>No items yet.</Empty>
+            {shownItems.length === 0 ? (
+              <Empty>
+                {items.length === 0 ? "No items yet." : "No items in this category."}
+              </Empty>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full">
@@ -284,7 +520,7 @@ export default function ReportsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {items.map((i) => {
+                    {shownItems.map((i) => {
                       const status = stockStatus(i.quantity, i.low_stock_threshold);
                       const d = daysUntil(i.expiration_date);
                       return (

@@ -10,7 +10,10 @@
     "seed": "node --env-file=.env.local scripts/seed.mjs",
     "db:reset": "node scripts/reset-local-db.mjs",
     "db:wipe": "node scripts/wipe-local-data.mjs",
-    "db:schema": "node scripts/build-local-schema.mjs"
+    "db:schema": "node scripts/build-local-schema.mjs",
+    "db:backup": "node scripts/backup-local-db.mjs",
+    "db:restore": "node scripts/restore-local-db.mjs",
+    "perf": "node scripts/perf-check.mjs"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.8",

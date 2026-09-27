@@ -305,6 +305,7 @@ async function seedIfEmpty(pg: PGlite) {
 
 type Filter =
   | { kind: "eq"; column: string; value: unknown }
+  | { kind: "lt" | "lte" | "gt" | "gte"; column: string; value: unknown }
   | { kind: "or"; clauses: { column: string; op: string; value: string }[] };
 
 type Mode = "select" | "insert" | "update" | "delete";
@@ -360,6 +361,25 @@ class LocalQuery implements PromiseLike<DbResult> {
     this.filters.push({ kind: "eq", column, value });
     return this;
   }
+
+  /* ---- comparison operators ----
+   *
+   * These exist for date-range and threshold filtering. They were listed in
+   * OPS but had no chainable method, so a `.gte()` call would have thrown in
+   * local mode while working fine against Supabase — the exact silent split
+   * this adapter is supposed to avoid.
+   */
+  private compare(kind: "lt" | "lte" | "gt" | "gte") {
+    return (column: string, value: unknown) => {
+      this.filters.push({ kind, column, value });
+      return this;
+    };
+  }
+
+  lt = this.compare("lt");
+  lte = this.compare("lte");
+  gt = this.compare("gt");
+  gte = this.compare("gte");
 
   /** Supports the PostgREST form `col.op.value,col.op.value` (treated as OR). */
   or(expression: string) {
@@ -573,6 +593,17 @@ class LocalQuery implements PromiseLike<DbResult> {
         return `${alias}.${quoteId(filter.column)} = $${offset + values.length}`;
       }
 
+      // Comparison operator: lt / lte / gt / gte. A null bound is meaningless
+      // for these (there is no ordering against null), so it is skipped rather
+      // than emitting a `> NULL` that silently matches nothing.
+      if (filter.kind !== "or") {
+        if (filter.value === null || filter.value === undefined) return null;
+        values.push(filter.value);
+        return `${alias}.${quoteId(filter.column)} ${OPS[filter.kind]} $${
+          offset + values.length
+        }`;
+      }
+
       const clauses = filter.clauses.map((clause) => {
         values.push(clause.value);
         return `${alias}.${quoteId(clause.column)} ${clause.op} $${
@@ -582,8 +613,12 @@ class LocalQuery implements PromiseLike<DbResult> {
       return `(${clauses.join(" or ")})`;
     });
 
+    // A comparison against null produced no clause (see above), so drop those
+    // before joining rather than emitting "where  and x".
+    const usable = parts.filter((p): p is string => p !== null);
+
     return {
-      sql: parts.length ? ` where ${parts.join(" and ")}` : "",
+      sql: usable.length ? ` where ${usable.join(" and ")}` : "",
       values,
     };
   }

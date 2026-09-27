@@ -34,6 +34,46 @@ export function badId(id: string, what = "id") {
   return UUID.test(id) ? null : fail(`Not a valid ${what} id`, 400);
 }
 
+/**
+ * Reads and parses a JSON request body, answering 400 rather than throwing when
+ * the body is absent or malformed.
+ *
+ * `req.json()` throws on an empty or truncated body, and the generic handler
+ * turned that into a 500 that also leaked the raw parser message ("Unexpected
+ * end of JSON input") to the caller. An absent body is a malformed *request*,
+ * not a server fault, and every route that reads a body has to answer the same
+ * way — so it is handled here rather than repeated at nine call sites.
+ *
+ * Returns `{}` for an empty body so a route's own required-field checks produce
+ * the useful message ("Item name is required") instead of a generic one.
+ */
+export async function readBody(req: Request): Promise<any> {
+  let text: string;
+  try {
+    text = await req.text();
+  } catch {
+    throw new HttpError(400, "Could not read the request body");
+  }
+
+  // An empty body is treated as `{}` so the route's own required-field check
+  // produces the useful message ("Item name is required") rather than a generic
+  // "invalid JSON" one.
+  if (!text || !text.trim()) return {};
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new HttpError(400, "Request body must be valid JSON");
+  }
+
+  // A bare `null`, number or string parses fine but has no fields; treat those
+  // as an empty object so property access below cannot blow up.
+  if (parsed === null || typeof parsed !== "object") return {};
+
+  return parsed;
+}
+
 /** Wraps a route handler so thrown HttpErrors become clean JSON responses. */
 export function handler(fn: (...args: any[]) => Promise<Response>) {
   return async (...args: any[]) => {

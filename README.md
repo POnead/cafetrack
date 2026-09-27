@@ -48,17 +48,22 @@ fallback when a label is damaged.
   low-stock threshold, out of stock, or expiring, and again if the movement you
   just recorded pushed something under its threshold.
 - **Inventory** — items with SKU, category, location, physical form, unit,
-  quantity, low-stock threshold and expiry date. Barcode labels for the whole
-  filtered list or one at a time.
+  quantity, low-stock threshold and expiry date. Search, filter by category, and
+  sort by clicking any column header. Barcode labels for the whole filtered
+  list or one at a time.
 - **Alerts** — low stock, out of stock, expired and expiring soon, raised by a
   database function. Every alert has a detail page with the item, its current
   stock and its full alert history. Resolving an alert closes the alert; it
   never moves stock.
+- **Settings** — admins set the expiry-warning window, session timeout and
+  business name, and add or remove item categories and storage locations.
+  Changes take effect immediately, not after the settings cache expires.
 - **Staff accounts** — admins create staff and admin accounts, print a staff
   barcode, reset passwords, and deactivate an account **with a reason**. The
   reason is shown to that person the next time they try to sign in.
 - **Reports** — stock snapshot, movement summary, top movers, soonest expiries,
-  and a CSV export.
+  filterable by date range, movement type, staff and category, with a CSV or PDF
+  export of whatever is currently in view.
 - **Audit trail** — every stock movement and account change, hash-chained so
   entries cannot be edited or removed without it showing, with a "verify chain"
   button that walks the whole chain.
@@ -96,6 +101,26 @@ npm run db:reset       # delete ./.pglite; rebuilt on the next request
 npm run db:wipe        # clear the data, keep the admin account and the
                        # reference lists (categories, locations)
 ```
+
+### Backup and restore
+
+The spec asks for "backup and restore capability for inventory data". In local
+mode the database *is* the `.pglite` directory, so a backup is a copy of it:
+
+```bash
+npm run db:backup                          # -> backups/cafetrack-<timestamp>/
+npm run db:restore -- backups/cafetrack-<timestamp>
+```
+
+Both refuse to run while `npm run dev` is up, because PGlite is single-process
+and copying or swapping the database underneath a running server is not safe.
+A backup records a row count per table in `manifest.json`, and a restore compares
+those counts against the live database afterwards, so restoring the wrong backup
+is reported rather than silently accepted. The previous database is kept as
+`.pglite.replaced` unless you pass `--force`. The ten most recent backups are
+pruned; `backups/` is gitignored.
+
+Under Supabase there is nothing to copy — that platform handles its own backups.
 
 ---
 
@@ -156,11 +181,20 @@ start `npm run dev` first:
 node scripts/smoke-test.mjs     # full API walk-through; makes and cleans up its own data
 node scripts/_edge-tests.mjs    # hostile and edge-case inputs
 node scripts/_pages.mjs         # every page renders
+npm run perf                    # measures the spec's performance targets
 ```
 
-`smoke-test.mjs` currently reports **60 passed, 0 failed**. `_edge-tests.mjs`
-reports **50 passed, 4 failed** — those four are known gaps in input validation
-rather than regressions, and they are listed under Limitations below.
+`smoke-test.mjs` currently reports **68 passed, 0 failed**. `_edge-tests.mjs`
+reports **71 passed, 0 failed**.
+
+The edge suite is safe to run repeatedly: it edits a seeded item to check the
+optimistic-version guard and restores the name afterwards, so it does not drift
+the database.
+
+`npm run perf` times the three targets in the spec — item lookup under 100 ms,
+dashboard refresh under 2 s, stock deduction under 1 s — and prints pass/fail per
+target. It needs the dev server running, and it writes a real checkout then
+restocks the same amount, so point it at a development database.
 
 ---
 
@@ -174,7 +208,7 @@ scripts/               seed, schema build, db reset/wipe, test scripts
 src/
   app/
     (app)/             signed-in area: dashboard, checkout, items, alerts,
-                       reports, audit, users
+                       reports, audit, users, settings
     api/               every API route
     login/             sign-in page
   components/          Nav, ScanInput, BarcodeView, ui primitives, icons
@@ -185,6 +219,8 @@ src/
     secret.ts          the AUTH_SECRET rule
     rate-limit.ts      sign-in throttling
     status.ts          shared status wording and colours
+    ref-delete.ts      shared in-use guard for the reference lists
+    report-print.tsx   print/PDF view of the stock report
   middleware.ts        JWT check for every route
 ```
 
@@ -223,11 +259,17 @@ src/
   unaudited, because the routes call `audit()` *after* the write commits.
   Sign-in attempts and sign-out pass `critical: false`, because a rejected
   password must stay a `401` and sign-out must always clear the session cookie.
-- **Input validation on `POST`/`PATCH /api/items`.** `_edge-tests.mjs` fails four
-  checks a browser could otherwise trigger: `quantity: null` is coerced to `0`
-  instead of being rejected, a malformed `expiration_date` reaches the database,
-  and the concurrent-edit check is stricter than the implementation. These
-  predate the current test suite and are the first thing worth tightening.
+- **A malformed request body answers `400`, not `500`.** Every route that reads a
+  body goes through `readBody()` in `lib/api.ts`, so a missing, empty or
+  unparseable body is a bad request rather than a server fault, and the raw
+  parser message ("Unexpected end of JSON input") is never returned to a caller.
+  An empty body is treated as `{}` so the route's own required-field check
+  produces the useful message.
+- **Input validation on `POST`/`PATCH /api/items`.** Quantity must be present and
+  a real number — `null`, a missing field, and `""` are all rejected rather than
+  defaulting to `0`, which used to silently empty a stocked item. `expiration_date`
+  is checked for a real `YYYY-MM-DD` calendar day before it reaches the database,
+  so a bad date is a `400` and not a `500`.
 - **No pagination.** `/api/items` returns every row; transactions and the audit
   trail cap at 500. Fine for a single café, but `audit_log` grows without bound.
 - **The local database adapter** (`src/lib/local-db.ts`) implements the subset
@@ -237,8 +279,10 @@ src/
   query fails at runtime.
 - **No password self-service.** Staff can only be given a new password by an
   admin, so anyone who forgets theirs is stuck until an admin acts.
-- **Categories and locations are read-only** in the UI; new ones are added by
-  editing the database.
+- **Categories and locations are managed from the Settings page**, not by editing
+  the database. Renaming is not supported — a reference row is deleted and
+  re-added, and a row still assigned to an item cannot be deleted (409), so
+  items never end up pointing at a missing category or location.
 - **Printing is vector, scanning is not verified automatically.** Barcodes are
   drawn as SVG at whole-pixel module widths, which is what makes them
   scannable, but nothing here proves a printed label scans — that needs a

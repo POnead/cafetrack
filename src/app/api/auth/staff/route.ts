@@ -1,5 +1,5 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail } from "@/lib/api";
+import { handler, ok, fail, readBody } from "@/lib/api";
 import { verifyPassword, signSession, setSessionCookie, deactivatedMessage } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { getSessionMinutes } from "@/lib/settings";
@@ -13,7 +13,7 @@ import {
 export const runtime = "nodejs";
 
 export const POST = handler(async (req: Request) => {
-  const { token, password } = await req.json();
+  const { token, password } = await readBody(req);
 
   if (!token || !password) return fail("Staff code and password are required");
 

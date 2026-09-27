@@ -1,7 +1,13 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail, badId } from "@/lib/api";
+import { handler, ok, fail, badId, readBody } from "@/lib/api";
 import { requireAdmin, requireUser } from "@/lib/auth";
 import { audit } from "@/lib/audit";
+import {
+  FieldError,
+  requireQuantity,
+  parseThreshold,
+  parseExpiryDate,
+} from "@/lib/item-validation";
 
 export const runtime = "nodejs";
 
@@ -35,7 +41,7 @@ export const PATCH = handler(
     const malformed = badId(params.id, "item");
     if (malformed) return malformed;
 
-    const body = await req.json();
+    const body = await readBody(req);
 
     const { data: before } = await db()
       .from("items")
@@ -54,17 +60,27 @@ export const PATCH = handler(
     if (body.location_id !== undefined) patch.location_id = body.location_id || null;
     if (body.physical_form !== undefined) patch.physical_form = body.physical_form;
     if (body.unit !== undefined) patch.unit = body.unit;
-    if (body.expiration_date !== undefined)
-      patch.expiration_date = body.expiration_date || null;
-    if (body.low_stock_threshold !== undefined)
-      patch.low_stock_threshold = Number(body.low_stock_threshold);
 
-    // Quantity edits here are corrections, not movements — still versioned.
-    if (body.quantity !== undefined) {
-      const q = Number(body.quantity);
-      if (Number.isNaN(q) || q < 0) return fail("Invalid quantity");
-      patch.quantity = q;
-      patch.version = Number(before.version) + 1;
+    // A rejected field answers 400 rather than letting the database error
+    // surface as a 500 from what is really a malformed request.
+    try {
+      if (body.low_stock_threshold !== undefined) {
+        patch.low_stock_threshold = parseThreshold(
+          body.low_stock_threshold,
+          "Low-stock threshold"
+        );
+      }
+      if (body.expiration_date !== undefined) {
+        patch.expiration_date = parseExpiryDate(body.expiration_date);
+      }
+      if (body.quantity !== undefined) {
+        patch.quantity = requireQuantity(body.quantity, "Quantity");
+        // Quantity edits here are corrections, not movements — still versioned.
+        patch.version = Number(before.version) + 1;
+      }
+    } catch (e: any) {
+      if (e instanceof FieldError) return fail(e.message);
+      throw e;
     }
 
     const { data, error } = await db()

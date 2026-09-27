@@ -1,5 +1,5 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail, badId } from "@/lib/api";
+import { handler, ok, fail, badId, readBody } from "@/lib/api";
 import { hashPassword, newStaffToken, requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 
@@ -16,7 +16,7 @@ export const PATCH = handler(
     const malformed = badId(params.id, "user");
     if (malformed) return malformed;
 
-    const body = await req.json();
+    const body = await readBody(req);
 
     const { data: before } = await db()
       .from("users")

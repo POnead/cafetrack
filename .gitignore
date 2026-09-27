@@ -9,3 +9,6 @@ build/
 next-env.d.ts
 .DS_Store
 .pglite/
+.pglite.manifest.json
+backups/
+.pglite.replaced/

@@ -1,5 +1,5 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail } from "@/lib/api";
+import { handler, ok, fail, readBody } from "@/lib/api";
 import { hashPassword, newStaffToken, requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 
@@ -27,7 +27,7 @@ export const GET = handler(async () => {
 /* ---------------- create ---------------- */
 export const POST = handler(async (req: Request) => {
   const admin = await requireAdmin();
-  const body = await req.json();
+  const body = await readBody(req);
 
   const username = String(body.username ?? "")
     .trim()

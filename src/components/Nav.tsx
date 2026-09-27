@@ -9,6 +9,7 @@ import {
   BoxIcon,
   CartIcon,
   ChartIcon,
+  CogIcon,
   HomeIcon,
   LogOutIcon,
   ShieldIcon,
@@ -38,7 +39,10 @@ const ADMIN_NAV: NavGroup[] = [
   },
   {
     title: "User Management",
-    items: [{ href: "/users", label: "Staff Accounts", icon: UsersIcon }],
+    items: [
+      { href: "/users", label: "Staff Accounts", icon: UsersIcon },
+      { href: "/settings", label: "Settings", icon: CogIcon },
+    ],
   },
   {
     title: "Report & Analytics",

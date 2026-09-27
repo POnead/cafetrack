@@ -1,5 +1,5 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail } from "@/lib/api";
+import { handler, ok, fail, readBody } from "@/lib/api";
 import { requireUser, verifyPassword } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 
@@ -26,6 +26,18 @@ export const GET = handler(async (req: Request) => {
   );
   const type = searchParams.get("type");
 
+  // Date range. The spec asks for reports "filtered by date range", so `from`
+  // and `to` bound created_at. `to` is inclusive: a date-only value covers the
+  // whole of that day, which is what a person picking "up to 27 Sep" means.
+  const from = searchParams.get("from");
+  const to = searchParams.get("to");
+  const staff = searchParams.get("staff");
+
+  // A malformed date is ignored rather than passed to Postgres, where it would
+  // surface as a 500 from what is really a bad request.
+  const isoDay = (v: string | null) =>
+    v && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
+
   let query = db()
     .from("transactions")
     .select(
@@ -37,6 +49,18 @@ export const GET = handler(async (req: Request) => {
 
   if (type) query = query.eq("type", type);
 
+  const fromDay = isoDay(from);
+  if (fromDay) query = query.gte("created_at", `${fromDay}T00:00:00.000Z`);
+
+  const toDay = isoDay(to);
+  if (toDay) query = query.lte("created_at", `${toDay}T23:59:59.999Z`);
+
+  // `actor_id` is the uuid; `actor_name` is what the UI shows, so accept a name.
+  if (staff) {
+    if (/^[0-9a-f-]{36}$/i.test(staff)) query = query.eq("actor_id", staff);
+    else query = query.eq("actor_name", staff);
+  }
+
   const { data, error } = await query;
   if (error) return fail(error.message, 500);
 
@@ -46,7 +70,7 @@ export const GET = handler(async (req: Request) => {
 /* ---------------- commit a movement ---------------- */
 export const POST = handler(async (req: Request) => {
   const session = await requireUser();
-  const body = await req.json();
+  const body = await readBody(req);
 
   const type = String(body.type ?? "") as TxnType;
   if (!TYPES.includes(type)) return fail("Invalid transaction type");

@@ -1,5 +1,5 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail } from "@/lib/api";
+import { handler, ok, fail, readBody } from "@/lib/api";
 import {
   hashPassword,
   verifyPassword,
@@ -14,7 +14,7 @@ import { checkLoginThrottle, tooManyAttempts, userKey } from "@/lib/rate-limit";
 export const runtime = "nodejs";
 
 export const POST = handler(async (req: Request) => {
-  const { username, password } = await req.json();
+  const { username, password } = await readBody(req);
 
   if (!username || !password) return fail("Username and password are required");
 

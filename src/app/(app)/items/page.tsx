@@ -22,6 +22,19 @@ type Item = {
 
 type Ref = { id: string; name: string };
 
+type SortKey =
+  | "name"
+  | "sku"
+  | "category"
+  | "location"
+  | "quantity"
+  | "threshold"
+  | "expiration"
+  | "status";
+
+/** Worst first, so "sort by status" surfaces what needs attention. */
+const STATUS_RANK: Record<string, number> = { out: 0, low: 1, ok: 2 };
+
 const EMPTY_FORM = {
   name: "",
   category_id: "",
@@ -41,6 +54,11 @@ export default function ItemsPage() {
 
   const [q, setQ] = useState("");
   const [catFilter, setCatFilter] = useState("");
+
+  // Default order matches what the API already returns (name ascending), so
+  // leaving the page alone looks unchanged.
+  const [sortKey, setSortKey] = useState<SortKey | null>(null);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
 
   const [editing, setEditing] = useState<Item | null>(null);
   const [creating, setCreating] = useState(false);
@@ -88,16 +106,91 @@ export default function ItemsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The spec asks for "search, filter, and sort capabilities". Sorting is done
+  // here rather than in the query because every row is already loaded, and
+  // this keeps the local adapter out of it.
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    return items.filter((i) => {
+    const rows = items.filter((i) => {
       if (catFilter && i.category?.id !== catFilter) return false;
       if (!needle) return true;
       return (
         i.name.toLowerCase().includes(needle) || i.sku.toLowerCase().includes(needle)
       );
     });
-  }, [items, q, catFilter]);
+
+    if (!sortKey) return rows;
+
+    const dir = sortDir === "asc" ? 1 : -1;
+    const value = (i: Item): string | number => {
+      switch (sortKey) {
+        case "name":
+          return i.name.toLowerCase();
+        case "sku":
+          return i.sku.toLowerCase();
+        case "category":
+          return i.category?.name?.toLowerCase() ?? "";
+        case "location":
+          return i.location?.name?.toLowerCase() ?? "";
+        case "quantity":
+          return Number(i.quantity);
+        case "threshold":
+          return Number(i.low_stock_threshold);
+        case "expiration":
+          // Undated items sort last either way, instead of as an empty string
+          // which would bury them at the top of a descending sort.
+          return i.expiration_date ?? "";
+        case "status":
+          return STATUS_RANK[stockStatus(i.quantity, i.low_stock_threshold).key];
+      }
+    };
+
+    return [...rows].sort((a, b) => {
+      const av = value(a);
+      const bv = value(b);
+      if (av < bv) return -1 * dir;
+      if (av > bv) return 1 * dir;
+      // Stable tiebreak so equal rows do not shuffle between renders.
+      return a.name.localeCompare(b.name);
+    });
+  }, [items, q, catFilter, sortKey, sortDir]);
+
+  /** Click a header to sort by it; clicking the active one flips direction. */
+  function toggleSort(key: SortKey) {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      // Text reads best A-Z; quantities, dates and status best highest-first.
+      setSortDir(
+        key === "name" || key === "sku" || key === "category" || key === "location"
+          ? "asc"
+          : "desc"
+      );
+    }
+  }
+
+  function sortHeader(key: SortKey, label: string, extra = "") {
+    const active = sortKey === key;
+    return (
+      <th className={`th select-none ${extra}`}>
+        <button
+          type="button"
+          onClick={() => toggleSort(key)}
+          className="inline-flex items-center gap-1 hover:text-cocoa-700"
+          aria-label={`Sort by ${label}`}
+        >
+          {label}
+          <span
+            className={`text-[10px] leading-none ${active ? "text-cocoa-600" : "text-cocoa-300"}`}
+            aria-hidden="true"
+          >
+            {active ? (sortDir === "asc" ? "▲" : "▼") : "↕"}
+          </span>
+        </button>
+      </th>
+    );
+  }
 
   function openCreate() {
     setForm({ ...EMPTY_FORM });
@@ -133,14 +226,29 @@ export default function ItemsPage() {
     setFormError(null);
 
     try {
+      // Checked here so an empty box is reported in the form rather than
+      // round-tripping to the API. `Number("")` is 0, which would otherwise
+      // save a fully stocked item as empty.
+      const qty = Number(form.quantity);
+      if (form.quantity.trim() === "" || !Number.isFinite(qty) || qty < 0) {
+        setFormError("Enter a quantity of 0 or more");
+        return;
+      }
+      const low = Number(form.low_stock_threshold);
+      if (form.low_stock_threshold.trim() !== "" && (!Number.isFinite(low) || low < 0)) {
+        setFormError("Low-stock threshold must be a number that is not negative");
+        return;
+      }
+
       const payload = {
         name: form.name,
         category_id: form.category_id || null,
         location_id: form.location_id || null,
         physical_form: form.physical_form,
         unit: form.unit,
-        quantity: Number(form.quantity),
-        low_stock_threshold: Number(form.low_stock_threshold),
+        quantity: qty,
+        low_stock_threshold:
+          form.low_stock_threshold.trim() === "" ? 5 : Math.round(low),
         expiration_date: form.expiration_date || null,
       };
 
@@ -248,14 +356,14 @@ export default function ItemsPage() {
             <table className="w-full">
               <thead>
                 <tr className="bg-cream-100/60">
-                  <th className="th">Item</th>
-                  <th className="th">SKU</th>
-                  <th className="th">Category</th>
-                  <th className="th">Location</th>
+                  {sortHeader("name", "Item")}
+                  {sortHeader("sku", "SKU")}
+                  {sortHeader("category", "Category")}
+                  {sortHeader("location", "Location")}
                   <th className="th">Form</th>
-                  <th className="th text-right">On Hand</th>
-                  <th className="th">Expiry</th>
-                  <th className="th">Status</th>
+                  {sortHeader("quantity", "On Hand", "text-right")}
+                  {sortHeader("expiration", "Expiry")}
+                  {sortHeader("status", "Status")}
                   <th className="th text-right">Actions</th>
                 </tr>
               </thead>
