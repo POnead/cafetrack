@@ -53,7 +53,10 @@ fallback when a label is damaged.
   list or one at a time.
 - **Alerts** — low stock, out of stock, expired and expiring soon, raised by a
   database function. Every alert has a detail page with the item, its current
-  stock and its full alert history. Resolving an alert closes the alert; it
+  stock and its full alert history. An open alert **escalates in place** when
+  the item gets worse — low stock becomes out of stock, expiring becomes
+  expired — keeping the same alert id, so the message always states the current
+  severity and an item is never listed twice. Resolving an alert closes it; it
   never moves stock. Staff can read alerts, but **only an admin can resolve,
   re-open, or force a recompute** — the controls are hidden for staff and the
   API refuses them with `403`.
@@ -189,7 +192,7 @@ npm run perf          # measures the spec's performance targets
 
 `test:smoke` currently reports **68 passed, 0 failed**. `test:edge` reports
 **83 passed, 0 failed**, `test:pages` **17 passed, 0 failed**, and
-`test:journeys` **65 passed, 0 failed**.
+`test:journeys` **73 passed, 0 failed**.
 
 `test:journeys` is the one to read for behaviour rather than status codes: it
 drives whole stories (a new hire's first day, an ingredient running out and

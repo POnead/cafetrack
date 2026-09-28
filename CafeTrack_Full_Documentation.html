@@ -367,7 +367,7 @@
       <tr><td class="id">SR-F24</td><td>The system shall update inventory levels instantly in the database after every transaction.</td></tr>
       <tr><td class="id">SR-F25</td><td>The system shall reflect current stock levels on the Admin dashboard in real time.</td></tr>
       <tr><td class="id">SR-F26</td><td>The system shall trigger real-time alerts for low-stock levels and near-expiry items.</td></tr>
-      <tr><td class="id">SR-F27</td><td>The system shall generate separate alerts for out-of-stock and expired items.</td></tr>
+      <tr><td class="id">SR-F27</td><td>The system shall generate separate alerts for out-of-stock and expired items, and shall escalate an open alert in place when the condition worsens, so the alert always states the item's current severity.</td></tr>
       <tr><td class="id">SR-F28</td><td>The system shall use optimistic locking to prevent negative inventory.</td></tr>
       <tr><td class="id">SR-F29</td><td>The system shall handle concurrent checkouts without overselling.</td></tr>
       <tr><td class="id">SR-F30</td><td>The system shall allow Admin to resolve alerts after corrective action. Staff may view alerts read-only, but shall not be able to resolve, re-open, or force an alert recompute.</td></tr>
@@ -585,9 +585,9 @@
   <p>Automated testing is executed against a running instance of the application using three repeatable test suites. The results below were produced on <strong>September 28, 2026</strong> against the current build on Next.js 16.3.6. Each suite is run through an npm command and exits with a non-zero status on any failure, making the results reproducible.</p>
 
   <div class="info-block">
-    <p><strong>Overall result: 233 automated assertions passed, 0 failed.</strong></p>
+    <p><strong>Overall result: 241 automated assertions passed, 0 failed.</strong></p>
     <ul>
-      <li><code>npm run test:journeys</code> — 65 passed, 0 failed (six end-to-end user stories)</li>
+      <li><code>npm run test:journeys</code> — 73 passed, 0 failed (six end-to-end user stories)</li>
       <li><code>npm run test:edge</code> — 83 passed, 0 failed (12 scenario groups)</li>
       <li><code>npm run test:smoke</code> — 68 passed, 0 failed (every API route exercised)</li>
       <li><code>npm run test:pages</code> — 17 passed, 0 failed (every page renders for both roles)</li>
@@ -627,6 +627,7 @@
       <tr><td>Alerts</td><td>Near-expiry alert triggered</td><td>Tested</td><td>Pass</td></tr>
       <tr><td>Alerts</td><td>Out-of-stock and expired alerts triggered</td><td>Tested</td><td>Pass</td></tr>
       <tr><td>Alerts</td><td>Alerts resolve, reopen, and auto-clear after restock</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Alerts</td><td>An open alert escalates in place when the item worsens (low to out-of-stock, expiring to expired)</td><td>Tested</td><td>Pass</td></tr>
       <tr><td>Audit Trail</td><td>All transactions logged with staff ID and timestamp</td><td>Tested</td><td>Pass</td></tr>
       <tr><td>Audit Trail</td><td>Hash chain remains intact after heavy activity</td><td>Tested</td><td>Pass</td></tr>
       <tr><td>Audit Trail</td><td>Audit records cannot be modified or deleted</td><td>Manual</td><td>By design</td></tr>
@@ -683,7 +684,6 @@
       <li><strong>Session invalidation on logout.</strong> Sessions are stateless signed tokens, so signing out clears the browser cookie but does not revoke a token that was already issued. A copied cookie remains usable until it expires (15 minutes by default). This is a deliberate trade-off for a low-traffic internal system.</li>
       <li><strong>Audit immutability is enforced by the application, not the database.</strong> No code path exposes a way to edit or delete an audit entry, and the hash chain makes any undetected tampering evident. However, the table itself is not protected by a database-level rule blocking <code>UPDATE</code> or <code>DELETE</code>; a compromised database credential could alter history, which <code>verify_audit_chain()</code> would then detect.</li>
       <li><strong>Staff can read the full transaction history.</strong> Any signed-in staff member may call the transaction history endpoint and see every recorded movement, including those made by other staff. This is a deliberate choice: in a small cafe, visible stock movement supports the transparency and accountability the project goals call for, and reading history is not a system-critical action. It is noted here so the decision is explicit — restricting staff to their own movements would be a straightforward change to the history filter if the client later prefers it.</li>
-      <li><strong>An open alert is not re-typed when the situation worsens.</strong> If an item drops below its low-stock threshold and then falls to zero, the existing low-stock alert stays as it is rather than escalating to an out-of-stock alert. The item remains visible on the alert list and is still counted as out of stock on the dashboard, so nothing is hidden; the out-of-stock alert is raised once the earlier one is resolved. Escalating in place would be a small change to the alert-refresh function if the client wants the alert to state the current severity on its own.</li>
     </ul>
   </div>
 
