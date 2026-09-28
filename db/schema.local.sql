@@ -304,7 +304,8 @@ $$;
 -- ============================================================
 -- FUNCTION: refresh_alerts
 -- Recomputes low-stock / out-of-stock / near-expiry / expired.
--- Auto-resolves alerts that no longer apply.
+-- Auto-resolves alerts that no longer apply, and escalates an open
+-- alert when the underlying condition gets worse.
 -- ============================================================
 create or replace function refresh_alerts()
 returns void
@@ -316,6 +317,42 @@ declare
 begin
   select coalesce(value::int, 7) into v_days from settings where key = 'expiry_warning_days';
   v_days := coalesce(v_days, 7);
+
+  -- Escalate an open stock alert in place, before opening new ones.
+  --
+  -- The insert below only fires for an item with no open stock alert, so an
+  -- item that drops below its threshold and then reaches zero used to keep
+  -- saying "is low on stock (1 pcs left)" about an item sitting at zero. This
+  -- rewrites the type and the message to match the item's current severity.
+  -- The alert keeps its identity (same id, no new row), so nothing duplicates
+  -- and the operator's history of it stays intact.
+  update alerts a
+     set type = case when i.quantity <= 0 then 'out_of_stock' else 'low_stock' end,
+         message = case when i.quantity <= 0
+                        then i.name || ' is out of stock'
+                        else i.name || ' is low on stock (' || i.quantity || ' ' || i.unit || ' left)'
+                   end
+    from items i
+   where i.id = a.item_id
+     and a.resolved = false
+     and a.type in ('low_stock','out_of_stock')
+     and a.type is distinct from
+         (case when i.quantity <= 0 then 'out_of_stock' else 'low_stock' end);
+
+  -- Same for expiry: an item that crosses its date while its warning is open
+  -- is expired, not merely expiring.
+  update alerts a
+     set type = case when i.expiration_date < current_date then 'expired' else 'near_expiry' end,
+         message = case when i.expiration_date < current_date
+                        then i.name || ' expired on ' || i.expiration_date
+                        else i.name || ' expires on ' || i.expiration_date
+                   end
+    from items i
+   where i.id = a.item_id
+     and a.resolved = false
+     and a.type in ('near_expiry','expired')
+     and a.type is distinct from
+         (case when i.expiration_date < current_date then 'expired' else 'near_expiry' end);
 
   -- open stock alerts
   insert into alerts (item_id, type, message)

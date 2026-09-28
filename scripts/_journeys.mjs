@@ -194,22 +194,20 @@ async function stockOf(sku, cookie) {
     (a) => a.item?.sku === oats.sku && a.type === "out_of_stock"
   );
 
-  // refresh_alerts() only opens a new stock alert when the item has no open
-  // low_stock/out_of_stock alert, and it never re-types one that is already
-  // open. So an item that drains to zero while a low-stock alert is already
-  // open keeps that alert rather than escalating it to out_of_stock.
-  //
-  // That is the delivered behaviour and it is asserted here so a future change
-  // to alert escalation is a deliberate, visible edit to this line. It is
-  // recorded as a product observation, not a correctness failure: the item is
-  // still alerted, the dashboard still counts it as out of stock, and a fresh
-  // out_of_stock alert is raised as soon as the stale one is resolved.
-  const stillLow = (r.data?.alerts ?? []).find((a) => a.item?.sku === oats.sku);
-  check("the drained item is still alerted exactly once", Boolean(stillLow), stillLow?.message ?? "none");
-  check("the open alert was not re-typed to out_of_stock", !outAlert && stillLow?.type === "low_stock", stillLow?.type ?? "");
+  // An open alert escalates in place when the item gets worse: the same alert
+  // is re-typed and re-worded rather than a second one being opened, so the
+  // list never shows one item twice and the message always states the current
+  // severity. The id is unchanged, which is what makes it "in place".
+  check("a zero-stock item is alerted as out_of_stock", Boolean(outAlert), outAlert?.message ?? "none");
+  check("the message states the current severity", /is out of stock/.test(outAlert?.message ?? ""), outAlert?.message ?? "");
+  check(
+    "no duplicate alert was opened for the same item",
+    (r.data?.alerts ?? []).filter((a) => a.item?.sku === oats.sku).length === 1
+  );
+  check("the escalated alert kept its identity", outAlert?.id === lowAlert?.id, `${lowAlert?.id} -> ${outAlert?.id}`);
 
-  if (stillLow) {
-    r = await call("PATCH", `/api/alerts/${stillLow.id}`, { resolved: true }, A);
+  if (outAlert) {
+    r = await call("PATCH", `/api/alerts/${outAlert.id}`, { resolved: true }, A);
     check("admin resolved the alert", r.status === 200 && r.data?.alert?.resolved === true, `${r.status}`);
     check(
       "the resolution records who did it",
@@ -217,14 +215,6 @@ async function stockOf(sku, cookie) {
       r.data?.alert?.resolved_by ?? "none"
     );
   }
-
-  // With the stale alert cleared, the next pass raises the out_of_stock one.
-  await call("POST", "/api/alerts", undefined, A);
-  r = await call("GET", "/api/alerts?status=open", undefined, A);
-  const raisedOut = (r.data?.alerts ?? []).find(
-    (a) => a.item?.sku === oats.sku && a.type === "out_of_stock"
-  );
-  check("a zero-stock item alerts as out_of_stock once the old alert is cleared", Boolean(raisedOut), raisedOut?.message ?? "none");
 
   r = await call(
     "POST",
@@ -333,6 +323,37 @@ async function stockOf(sku, cookie) {
   );
   check("an expired item alerts even under a 5-day window", Boolean(expiredAlert), expiredAlert?.message ?? "none");
 
+  // Expiry escalates the same way: an item inside the warning window, then
+  // moved past its date, keeps one alert that is re-worded to "expired".
+  r = await call(
+    "POST",
+    "/api/items",
+    { name: `Journey Expiring ${hire}`, quantity: 5, low_stock_threshold: 1, expiration_date: day(2) },
+    A
+  );
+  const expiring = r.data?.item ?? {};
+  check("added an item that will expire soon", r.status === 201, `${r.status} ${r.data?.error ?? ""}`);
+
+  await call("POST", "/api/alerts", undefined, A);
+  r = await call("GET", "/api/alerts?status=open", undefined, A);
+  const soonAlert = (r.data?.alerts ?? []).find(
+    (a) => a.item?.sku === expiring.sku && a.type === "near_expiry"
+  );
+  check("it alerts as expiring soon", Boolean(soonAlert), soonAlert?.message ?? "none");
+
+  r = await call("PATCH", `/api/items/${expiring.id}`, { expiration_date: day(-1) }, A);
+  check("moved its expiry into the past", r.status === 200, `${r.status} ${r.data?.error ?? ""}`);
+
+  await call("POST", "/api/alerts", undefined, A);
+  r = await call("GET", "/api/alerts?status=open", undefined, A);
+  const nowExpired = (r.data?.alerts ?? []).find((a) => a.item?.sku === expiring.sku);
+  check("the same alert escalates to expired", nowExpired?.type === "expired", nowExpired?.type ?? "none");
+  check("it kept its identity", nowExpired?.id === soonAlert?.id, `${soonAlert?.id} -> ${nowExpired?.id}`);
+  check(
+    "still only one alert for the item",
+    (r.data?.alerts ?? []).filter((a) => a.item?.sku === expiring.sku).length === 1
+  );
+
   await call("PATCH", "/api/settings", { expiry_warning_days: "7" }, A);
 
   /* ================================================================= */
@@ -413,6 +434,9 @@ async function stockOf(sku, cookie) {
 
   r = await call("DELETE", `/api/items/${expiredItem.id}`, undefined, A);
   check("removed the expired test ingredient", r.status === 200, `${r.status}`);
+
+  r = await call("DELETE", `/api/items/${expiring.id}`, undefined, A);
+  check("removed the expiring test ingredient", r.status === 200, `${r.status}`);
 
   // This account was switched off in journey 1, so it has to come back on
   // before it can be parked off again. Ending on is_active: false is what
