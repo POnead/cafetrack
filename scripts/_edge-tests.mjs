@@ -186,6 +186,33 @@ async function rawCall(method, path, rawBody, cookie) {
   check("staff blocked from creating items", r.status === 403, `${r.status}`);
   r = await call("POST", "/api/users", { username: "hack", full_name: "Hack", password: "password1" }, sc);
   check("staff blocked from creating users", r.status === 403, `${r.status}`);
+
+  // Alerts: staff may READ (the /alerts link is in their nav on purpose) but
+  // must not resolve or recompute. SR-F30 assigns resolution to Admin, and a
+  // barista should not be able to silence a low-stock warning.
+  r = await call("GET", "/api/alerts?status=open", null, sc);
+  check("staff can read the alert list", r.status === 200, `${r.status}`);
+  const staffAlert = r.data?.alerts?.[0];
+  if (staffAlert) {
+    r = await call("GET", `/api/alerts/${staffAlert.id}`, null, sc);
+    check("staff can read an alert's detail", r.status === 200, `${r.status}`);
+
+    r = await call("PATCH", `/api/alerts/${staffAlert.id}`, { resolved: true }, sc);
+    check("staff blocked from resolving an alert", r.status === 403, `${r.status} ${r.data?.error ?? ""}`);
+
+    // The alert must be untouched, not merely refused after changing.
+    const after = await call("GET", `/api/alerts/${staffAlert.id}`, null, sc);
+    check(
+      "the alert is still open after the refused attempt",
+      after.data?.alert?.resolved === staffAlert.resolved,
+      `resolved=${after.data?.alert?.resolved}`
+    );
+  } else {
+    check("staff can read the alert list", false, "no open alert to test against");
+  }
+  r = await call("POST", "/api/alerts", undefined, sc);
+  check("staff blocked from forcing an alert recompute", r.status === 403, `${r.status}`);
+
   r = await call("GET", "/audit", null, sc);
   check("staff opening /audit page does not crash", r.status === 200, `${r.status}`);
   r = await call("GET", "/users", null, sc);
@@ -208,6 +235,32 @@ async function rawCall(method, path, rawBody, cookie) {
 
   r = await call("POST", "/api/transactions", { type: "checkout", password: "staff123", items: [{ sku: spillItem.sku, qty: 1 }] }, sc);
   check("staff can checkout with own password", r.status === 201, `${r.status} ${r.data?.error}`);
+
+  /* ---- waste: a third movement type, separate from checkout (SR-F21a) ---- */
+  r = await call("POST", "/api/transactions", { type: "waste", password: "staff123", items: [{ sku: spillItem.sku, qty: 2 }] }, sc);
+  check("staff can log waste", r.status === 201, `${r.status} ${r.data?.error}`);
+
+  const afterWaste = await call("GET", `/api/items/lookup?code=${encodeURIComponent(spillItem.sku)}`, null, sc);
+  const wasteQty = Number(afterWaste.data?.item?.quantity);
+  check(
+    "waste deducted the quantity (5 - 1 checkout - 2 waste = 2)",
+    wasteQty === 2,
+    `quantity=${wasteQty}`
+  );
+
+  r = await call("POST", "/api/transactions", { type: "waste", password: "staff123", items: [{ sku: spillItem.sku, qty: 999 }] }, sc);
+  check("waste cannot exceed available stock", r.status === 409, `${r.status} ${r.data?.error}`);
+
+  r = await call("POST", "/api/transactions", { type: "waste", password: "wrong-on-purpose", items: [{ sku: spillItem.sku, qty: 1 }] }, sc);
+  check("waste without a valid password is refused", r.status === 401, `${r.status} ${r.data?.error}`);
+
+  r = await call("POST", "/api/transactions", { type: "expired", password: "staff123", items: [{ sku: spillItem.sku, qty: 1 }] }, sc);
+  check("an unknown movement type is rejected", r.status === 400, `${r.status} ${r.data?.error}`);
+
+  // Leave the throwaway item as the suite found it, so the waste test is
+  // repeatable — it asserts on an absolute quantity, not a delta.
+  r = await call("POST", "/api/transactions", { type: "restock", password: "admin123", items: [{ sku: spillItem.sku, qty: 3 }] }, A);
+  check("throwaway item restored for the next run", r.status === 201, `${r.status} ${r.data?.error}`);
 
   /* ============ 5. Users management ============ */
   section("user management validation");

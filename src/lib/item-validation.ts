@@ -120,4 +120,18 @@ export function parsePhysicalForm(raw: unknown): string {
   return s;
 }
 
+/**
+ * Every staff token is generated as "CT-STF-" plus ten hex characters
+ * (newStaffToken in lib/auth.ts), while an item SKU is "CT-<CATEGORY>-<4 hex>".
+ * The two shapes cannot collide, so a code carrying this prefix is definitely
+ * not an item.
+ *
+ * Used only to explain a rejected scan. Nothing is looked up and no credential
+ * is validated here — the answer is identical whether or not the code is real,
+ * so this reveals nothing about which staff ids exist.
+ */
+export function looksLikeStaffCode(code: string): boolean {
+  return /^CT-STF-[0-9A-F]{10}$/i.test(code.trim());
+}
+
 export { requireQuantity };

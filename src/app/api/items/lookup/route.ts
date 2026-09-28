@@ -1,6 +1,7 @@
 import { db } from "@/lib/supabase";
 import { handler, ok, fail } from "@/lib/api";
 import { requireUser } from "@/lib/auth";
+import { looksLikeStaffCode } from "@/lib/item-validation";
 
 export const runtime = "nodejs";
 
@@ -30,7 +31,18 @@ export const GET = handler(async (req: Request) => {
     .maybeSingle();
 
   if (error) return fail(error.message, 500);
-  if (!data) return fail(`No item matches "${sku}"`, 404);
+  if (!data) {
+    // A staff badge scanned at the counter is the likely mistake, and "no item
+    // matches CT-STF-..." reads like a damaged label rather than a wrong page.
+    // The message says what the code *is*, never whether that staff id exists.
+    if (looksLikeStaffCode(sku)) {
+      return fail(
+        `"${sku}" is a staff ID, not an item. Scan an item label to record stock, or use a staff code to sign in.`,
+        404
+      );
+    }
+    return fail(`No item matches "${sku}"`, 404);
+  }
 
   return ok({ item: data });
 });
