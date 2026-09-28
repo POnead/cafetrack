@@ -11,6 +11,7 @@
     "db:reset": "node scripts/reset-local-db.mjs",
     "db:wipe": "node scripts/wipe-local-data.mjs",
     "db:schema": "node scripts/build-local-schema.mjs",
+    "db:migrate": "node scripts/migrate-sql.mjs",
     "db:backup": "node scripts/backup-local-db.mjs",
     "db:restore": "node scripts/restore-local-db.mjs",
     "perf": "node scripts/perf-check.mjs",

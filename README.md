@@ -145,6 +145,27 @@ Local mode is the default; Supabase is optional and only used if you remove the
 Both modes go through the same query layer (`src/lib/supabase.ts`), so the API
 routes are identical either way.
 
+### Updating a hosted project later
+
+`db/schema.sql` is written to be re-runnable — it uses `if not exists` and
+`create or replace` throughout, and never drops or truncates — so pasting the
+whole file into the SQL Editor is always safe.
+
+When the change is only to a stored function, `npm run db:migrate` is less
+error-prone. It writes `db/migrate.sql`, containing just the `create or replace
+function` statements and any `add column if not exists` migrations, each with a
+header explaining the procedure. It cannot create, drop, or modify client data,
+so it is safe to run against a live project. Paste the result into the SQL
+Editor and run.
+
+Two files in `db/` are generated — never edit them by hand or the next build
+overwrites your change:
+
+| File                  | Built by            | From            |
+| --------------------- | ------------------- | --------------- |
+| `db/schema.local.sql` | `npm run db:schema` | `db/schema.sql` |
+| `db/migrate.sql`      | `npm run db:migrate`| `db/schema.sql` |
+
 ---
 
 ## Environment variables
@@ -174,6 +195,7 @@ routes are identical either way.
 | `npm run lint`      | ESLint                                                |
 | `npm run seed`      | Seed **Supabase** (local mode seeds itself)            |
 | `npm run db:schema` | Regenerate `db/schema.local.sql` from `db/schema.sql`  |
+| `npm run db:migrate`| Write `db/migrate.sql` — paste-ready, data-safe updates for a hosted project |
 | `npm run db:reset`  | Delete the local database                              |
 | `npm run db:wipe`   | Clear local data, keep admin + reference lists         |
 
