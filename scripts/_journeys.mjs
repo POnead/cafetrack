@@ -261,7 +261,13 @@ async function stockOf(sku, cookie) {
   );
 
   r = await call("GET", "/api/transactions?limit=200", undefined, A);
-  const mine = (r.data?.transactions ?? []).filter((t) => t.note?.startsWith("journey "));
+  // Scoped to this run's SKU, not just the note prefix. Deleting an item leaves
+  // its transaction history behind (transaction_items.item_id is set null but
+  // the rows remain), so a note-only filter would also match a previous run's
+  // movements and every total would come out doubled.
+  const mine = (r.data?.transactions ?? []).filter(
+    (t) => t.note?.startsWith("journey ") && t.transaction_items?.some((li) => li.sku === oats.sku)
+  );
   const totals = mine.reduce((acc, t) => {
     const q = t.transaction_items?.reduce((n, li) => n + Number(li.quantity), 0) ?? 0;
     acc[t.type] = (acc[t.type] ?? 0) + q;

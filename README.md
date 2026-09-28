@@ -122,8 +122,13 @@ and copying or swapping the database underneath a running server is not safe.
 A backup records a row count per table in `manifest.json`, and a restore compares
 those counts against the live database afterwards, so restoring the wrong backup
 is reported rather than silently accepted. The previous database is kept as
-`.pglite.replaced` unless you pass `--force`. The ten most recent backups are
-pruned; `backups/` is gitignored.
+`.pglite.replaced` unless you pass `--force`.
+
+Old backups are pruned after each successful run, keeping the newest **3** — set
+`CAFETRACK_BACKUP_KEEP` to change it. Each one is a full copy of the database
+directory, so without a limit repeated runs quietly fill the disk. Pruning runs
+*after* the new backup is written, never before, so a failure cannot leave you
+with nothing. `backups/` is gitignored.
 
 Under Supabase there is nothing to copy — that platform handles its own backups.
 
@@ -177,6 +182,7 @@ overwrites your change:
 | `AUTH_SECRET`                | **yes in production** | Signs session cookies. At least 32 characters.                    |
 | `SEED_ADMIN_PASSWORD`        | no                   | Admin password created on first run. Defaults to `admin123`.       |
 | `SEED_STAFF_PASSWORD`        | no                   | Staff password created on first run. Defaults to `staff123`.       |
+| `CAFETRACK_BACKUP_KEEP`      | no                   | How many local backups to keep. Defaults to 3.                      |
 | `BASE_URL`                   | no                   | Target for the test scripts. Defaults to `http://localhost:3000`.  |
 | `NEXT_PUBLIC_SUPABASE_*`     | Supabase only        | Project URL and anon key.                                         |
 | `SUPABASE_SERVICE_ROLE_KEY`  | Supabase only        | Server-side key. Never exposed to the browser.                    |
