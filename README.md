@@ -54,7 +54,9 @@ fallback when a label is damaged.
 - **Alerts** — low stock, out of stock, expired and expiring soon, raised by a
   database function. Every alert has a detail page with the item, its current
   stock and its full alert history. Resolving an alert closes the alert; it
-  never moves stock.
+  never moves stock. Staff can read alerts, but **only an admin can resolve,
+  re-open, or force a recompute** — the controls are hidden for staff and the
+  API refuses them with `403`.
 - **Settings** — admins set the expiry-warning window, session timeout and
   business name, and add or remove item categories and storage locations.
   Changes take effect immediately, not after the settings cache expires.
@@ -178,14 +180,18 @@ There is no unit-test runner. Two scripts drive a running server over HTTP, so
 start `npm run dev` first:
 
 ```bash
-node scripts/smoke-test.mjs     # full API walk-through; makes and cleans up its own data
-node scripts/_edge-tests.mjs    # hostile and edge-case inputs
-node scripts/_pages.mjs         # every page renders
-npm run perf                    # measures the spec's performance targets
+npm run test:smoke    # full API walk-through; makes and cleans up its own data
+npm run test:edge     # hostile and edge-case inputs
+npm run test:pages    # every page renders, for an admin and a staff session
+npm run perf          # measures the spec's performance targets
 ```
 
-`smoke-test.mjs` currently reports **68 passed, 0 failed**. `_edge-tests.mjs`
-reports **71 passed, 0 failed**.
+`test:smoke` currently reports **68 passed, 0 failed**. `test:edge` reports
+**83 passed, 0 failed**, and `test:pages` reports **17 passed, 0 failed**.
+
+The page suite is the reason the alert pages carry a role check: it renders
+`/alerts` and `/alerts/[id]` under both an admin and a staff session, so a
+control that is hidden for staff cannot silently break the page for them.
 
 The edge suite is safe to run repeatedly: it edits a seeded item to check the
 optimistic-version guard and restores the name afterwards, so it does not drift

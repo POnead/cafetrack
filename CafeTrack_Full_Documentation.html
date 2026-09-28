@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>CafeTrack — Full Project Documentation</title>
+<style>
+  @page {
+    size: A4;
+    margin: 20mm 18mm;
+    @bottom-center {
+      content: "Page " counter(page) " of " counter(pages);
+      font-size: 9pt;
+      color: #888;
+    }
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: "Calibri", "Segoe UI", Arial, sans-serif;
+    font-size: 10.5pt;
+    line-height: 1.55;
+    color: #1a1a1a;
+    background: #fff;
+  }
+
+  .page-wrap {
+    max-width: 210mm;
+    margin: 0 auto;
+    padding: 20mm 18mm;
+  }
+
+  /* ---------- COVER ---------- */
+  .cover {
+    text-align: center;
+    padding: 60px 0 40px;
+    border-bottom: 3px solid #4d6bfe;
+    margin-bottom: 30px;
+  }
+  .cover .school {
+    font-size: 10pt;
+    color: #555;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  .cover h1 {
+    font-size: 24pt;
+    font-weight: 700;
+    color: #0d0d0d;
+    margin-bottom: 6px;
+  }
+  .cover .subtitle {
+    font-size: 13pt;
+    color: #4d6bfe;
+    font-weight: 600;
+    margin-bottom: 18px;
+  }
+  .cover .meta {
+    font-size: 9.5pt;
+    color: #666;
+    line-height: 1.8;
+  }
+
+  /* ---------- HEADINGS ---------- */
+  h1.section {
+    font-size: 16pt;
+    font-weight: 700;
+    color: #0d0d0d;
+    border-bottom: 3px solid #4d6bfe;
+    padding-bottom: 8px;
+    margin: 40px 0 20px;
+    page-break-after: avoid;
+  }
+  h1.section:first-of-type { margin-top: 0; }
+
+  h2 {
+    font-size: 13pt;
+    font-weight: 700;
+    color: #0d0d0d;
+    margin: 26px 0 12px;
+    page-break-after: avoid;
+  }
+
+  h3 {
+    font-size: 11.5pt;
+    font-weight: 700;
+    color: #4d6bfe;
+    margin: 20px 0 8px;
+    page-break-after: avoid;
+  }
+
+  h4 {
+    font-size: 10.5pt;
+    font-weight: 700;
+    color: #2a2f45;
+    margin: 16px 0 6px;
+    page-break-after: avoid;
+  }
+
+  p {
+    margin-bottom: 10px;
+    text-align: justify;
+  }
+
+  ul, ol {
+    margin: 6px 0 12px 22px;
+  }
+  li {
+    margin-bottom: 4px;
+  }
+
+  /* ---------- TABLES ---------- */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 18px;
+    font-size: 9.5pt;
+    page-break-inside: auto;
+  }
+  thead { display: table-header-group; }
+  tr { page-break-inside: avoid; }
+
+  th {
+    background: #4d6bfe;
+    color: #fff;
+    text-align: left;
+    padding: 7px 10px;
+    font-weight: 600;
+    border: 1px solid #3b5bdb;
+  }
+  td {
+    padding: 6px 10px;
+    border: 1px solid #d8dbe0;
+    vertical-align: top;
+  }
+  tbody tr:nth-child(even) { background: #f7f8fa; }
+
+  td.id {
+    font-family: "Consolas", "Courier New", monospace;
+    font-weight: 700;
+    color: #4d6bfe;
+    white-space: nowrap;
+    width: 75px;
+  }
+
+  /* ---------- SPECIAL BLOCKS ---------- */
+  .info-block {
+    background: #f7f8fa;
+    border-left: 4px solid #4d6bfe;
+    padding: 14px 18px;
+    margin-bottom: 20px;
+    border-radius: 0 6px 6px 0;
+  }
+  .info-block p:last-child { margin-bottom: 0; }
+  .info-block ul { margin: 6px 0 0 18px; }
+  .info-block li { margin-bottom: 2px; }
+
+  code {
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 9pt;
+    background: #eceef3;
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+  .info-block code { background: #e6e9f2; }
+
+  .page-break { page-break-before: always; }
+
+  .prepared {
+    margin-top: 50px;
+    padding-top: 20px;
+    border-top: 1px solid #e5e5e5;
+    font-size: 9.5pt;
+    color: #666;
+    text-align: center;
+    line-height: 1.8;
+  }
+  .prepared strong { color: #1a1a1a; }
+
+  .new-badge {
+    display: inline-block;
+    background: #f0fdf4;
+    color: #15803d;
+    font-size: 7.5pt;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 10px;
+    margin-left: 8px;
+    vertical-align: middle;
+    border: 1px solid #bbf7d0;
+  }
+
+  @media print {
+    body { font-size: 10pt; }
+    .page-wrap { padding: 0; max-width: none; }
+    .new-badge { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="page-wrap">
+
+  <!-- ============================================================ -->
+  <!-- COVER                                                         -->
+  <!-- ============================================================ -->
+  <div class="cover">
+    <div class="school">Batangas State University — Lipa Campus<br>College of Informatics and Computing Sciences</div>
+    <h1>CafeTrack</h1>
+    <div class="subtitle">Real-Time Stock Monitoring with Barcode-Based Authentication<br>for Merrylane Cafe Foodhub</div>
+    <div class="meta">
+      <strong>Client:</strong> Merrylane Cafe Foodhub, Lipa City<br>
+      <strong>Developer:</strong> Group 3<br>
+      <strong>Document Version:</strong> 1.1 &nbsp;·&nbsp; <strong>Date of Agreement:</strong> November 16, 2025<br>
+      <strong>Last Updated:</strong> September 28, 2026 &nbsp;·&nbsp; Testing results verified on this date
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- 1. PROJECT OVERVIEW                                           -->
+  <!-- ============================================================ -->
+  <h1 class="section">1. Project Overview</h1>
+
+  <h2>Project Title</h2>
+  <p><strong>CafeTrack: Real-Time Stock Monitoring with Barcode-based Authentication for Merrylane Cafe Foodhub</strong></p>
+
+  <h2>Project Description</h2>
+  <p>CafeTrack is a connected inventory management system designed to automate and streamline the management of ingredient stocks, item checkout, restock operations, and expiration tracking for Merrylane Cafe Foodhub. It provides a centralized, secure, and real-time platform for recording stock movements, generating barcodes, calculating inventory levels, producing reports, and ensuring accountability through an immutable audit trail.</p>
+  <p>The system reduces manual effort, minimizes human error, and enhances transparency for both staff and administrators. Through Barcode-based authentication and real-time stock deduction, CafeTrack enables the cafe to maintain accurate inventory records while preventing spoilage, waste, and stock discrepancies.</p>
+
+  <h2>Group Members</h2>
+  <div class="info-block">
+    <p><strong>Project Lead / Backend Developer:</strong> Maquinto, Mark Jahevy</p>
+    <p><strong>System Analyst / Frontend Developer:</strong> Obedencio, Mark Andrei</p>
+    <p><strong>System and Logic Tester / Documentation:</strong> Rodriguez, Prince Deano</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- 2. PROJECT GOALS AND OBJECTIVES                               -->
+  <!-- ============================================================ -->
+  <h1 class="section">2. Project Goals and Objectives</h1>
+
+  <h2>Primary Objective</h2>
+  <p>To develop a connected inventory management system that allows administrators to manually encode and generate barcodes for ingredients, while enabling staff to perform quick, Barcode-based checkout and real-time stock deduction for Merrylane Cafe Foodhub.</p>
+
+  <h2>Additional Objectives</h2>
+  <p>Beyond the core client requirements, the system includes the following strategic enhancements to improve usability, accountability, and operational effectiveness:</p>
+  <ul>
+    <li><strong>Role-Based Access Control (RBAC):</strong> Distinct permissions for Admins (owner/manager) who manage the system, and Staff (cooks/baristas) who can only perform checkout and restock operations.</li>
+    <li><strong>Barcode Authentication (Staff Login):</strong> Staff scan their personal barcode codes to log in and enter a password to verify their identity before performing any inventory transactions.</li>
+    <li><strong>Manual Item Management (Admin Check-In):</strong> Admins can manually add, edit, or delete ingredients through the web dashboard, inputting details such as category, physical form (liquid/powder), quantity, and expiration dates.</li>
+    <li><strong>Automatic barcode Generation:</strong> The system automatically generates unique barcodes or barcodes for each ingredient upon manual entry, which can be printed and affixed to storage containers.</li>
+    <li><strong>Barcode-based Item Checkout/Restock:</strong> Staff can scan item barcodes using connected scanner devices to quickly and accurately deduct items from inventory.</li>
+    <li><strong>Multi-Item Checkout with Confirmation:</strong> Staff can scan multiple items in one transaction, with a final confirmation step (password/code) required to prevent accidental deductions.</li>
+    <li><strong>Real-Time Stock Updates:</strong> Inventory levels automatically adjust instantly in the database and reflect on the admin dashboard immediately after every checkout transaction.</li>
+    <li><strong>Automated Alerts &amp; Reports:</strong> The system generates real-time alerts for low-stock levels and near-expiry items, plus historical reports for inventory usage and waste tracking.</li>
+    <li><strong>Immutable Audit Trail:</strong> A secure, uneditable chronological log records all system activities (item additions, checkouts, adjustments) with staff identification and timestamps for compliance and accountability.</li>
+    <li><strong>Expiration &amp; Out-of-Stock Alert:</strong> The system alerts admin users about items that are near expiration, out of stock, or already expired.</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <!-- 3. REQUIREMENTS                                               -->
+  <!-- ============================================================ -->
+  <div class="page-break"></div>
+  <h1 class="section">3. Requirements</h1>
+
+  <!-- ---------- 3.1 USER REQUIREMENTS (NEW) ---------- -->
+  <h2>3.1 User Requirements <span class="new-badge">NEW</span></h2>
+  <p>User requirements describe what the users of the system — Merrylane Cafe Foodhub staff and administrators — need from CafeTrack, stated in plain, non-technical language. These serve as the foundation from which the more detailed system requirements are derived.</p>
+
+  <table>
+    <thead>
+      <tr><th style="width:80px;">ID</th><th>User Requirement</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="id">UR-1</td><td>Staff should be able to log in quickly using their personal barcode and a password.</td></tr>
+      <tr><td class="id">UR-2</td><td>Admin should be able to log in using a username and password.</td></tr>
+      <tr><td class="id">UR-3</td><td>Admin should be able to add, edit, and remove ingredients from a dashboard.</td></tr>
+      <tr><td class="id">UR-4</td><td>Admin should be able to enter ingredient details like category, physical form, quantity, and expiration date.</td></tr>
+      <tr><td class="id">UR-5</td><td>The system should automatically create a barcode for each ingredient that can be printed and attached to storage containers.</td></tr>
+      <tr><td class="id">UR-6</td><td>Staff should be able to scan item barcodes to check out ingredients during cooking or preparation.</td></tr>
+      <tr><td class="id">UR-7</td><td>Staff should be able to scan multiple items in one transaction and confirm before completing checkout.</td></tr>
+      <tr><td class="id">UR-8</td><td>Staff should be able to restock items by scanning their barcodes.</td></tr>
+      <tr><td class="id">UR-9</td><td>Staff should be able to type in an item ID manually if a barcode is damaged or unreadable.</td></tr>
+      <tr><td class="id">UR-10</td><td>Admin should see stock levels update immediately after every transaction.</td></tr>
+      <tr><td class="id">UR-11</td><td>Admin should receive alerts when items are running low, near expiry, out of stock, or already expired.</td></tr>
+      <tr><td class="id">UR-12</td><td>Admin should be able to generate reports on inventory usage and waste.</td></tr>
+      <tr><td class="id">UR-13</td><td>Admin should be able to filter and export reports for documentation.</td></tr>
+      <tr><td class="id">UR-14</td><td>The system should keep a record of every activity that cannot be changed or deleted.</td></tr>
+      <tr><td class="id">UR-15</td><td>Admin should be able to add, edit, disable, and enable user accounts.</td></tr>
+      <tr><td class="id">UR-16</td><td>Admin should be able to assign roles — Admin or Staff — to each user.</td></tr>
+      <tr><td class="id">UR-17</td><td>Admin should be able to generate personal barcode credentials for each staff member.</td></tr>
+      <tr><td class="id">UR-18</td><td>Admin should be able to configure item categories, storage locations, and alert thresholds.</td></tr>
+      <tr><td class="id">UR-19</td><td>Admin should be able to mark alerts as resolved after taking corrective action.</td></tr>
+      <tr><td class="id">UR-20</td><td>Staff should only be able to access checkout and restock functions — nothing else.</td></tr>
+      <tr><td class="id">UR-21</td><td>Staff should be able to log stock that is wasted through spoilage, spillage, or expiry.</td></tr>
+      <tr><td class="id">UR-22</td><td>The system should block repeated wrong-password attempts on a sign-in account for a period of time.</td></tr>
+      <tr><td class="id">UR-23</td><td>Admin should be able to record a reason when deactivating an account, so the staff member knows who to ask about it.</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ---------- 3.2 SYSTEM REQUIREMENTS (NEW) ---------- -->
+  <div class="page-break"></div>
+  <h2>3.2 System Requirements <span class="new-badge">NEW</span></h2>
+  <p>System requirements translate the user requirements into precise, testable specifications that describe how CafeTrack will deliver each capability. These are subdivided into functional and non-functional requirements.</p>
+
+  <h3>3.2.1 Functional Requirements</h3>
+
+  <h4>User Authentication</h4>
+  <table>
+    <thead><tr><th style="width:80px;">ID</th><th>System Requirement</th></tr></thead>
+    <tbody>
+      <tr><td class="id">SR-F1</td><td>The system shall allow Staff to authenticate via personal barcode scan plus password verification.</td></tr>
+      <tr><td class="id">SR-F2</td><td>The system shall allow Admin to authenticate via username and password.</td></tr>
+      <tr><td class="id">SR-F3</td><td>The system shall enforce Role-Based Access Control (RBAC) with distinct permissions for Admin and Staff.</td></tr>
+      <tr><td class="id">SR-F4</td><td>The system shall automatically terminate a session after 15 minutes of inactivity.</td></tr>
+      <tr><td class="id">SR-F5</td><td>The system shall log all failed login attempts and unauthorized scan attempts.</td></tr>
+      <tr><td class="id">SR-F6</td><td>The system shall prevent the last active Admin account from being disabled.</td></tr>
+      <tr><td class="id">SR-F6a</td><td>The system shall lock out an account after 5 consecutive failed sign-in attempts, releasing the lock automatically after a 15-minute window or a successful sign-in.</td></tr>
+      <tr><td class="id">SR-F6b</td><td>The system shall allow Admin to record a reason when deactivating an account, and display that reason on the sign-in screen only after correct credentials are supplied.</td></tr>
+    </tbody>
+  </table>
+
+  <h4>User Management (Admin)</h4>
+  <table>
+    <thead><tr><th style="width:80px;">ID</th><th>System Requirement</th></tr></thead>
+    <tbody>
+      <tr><td class="id">SR-F7</td><td>The system shall allow Admin to add, edit, disable, and enable user accounts.</td></tr>
+      <tr><td class="id">SR-F8</td><td>The system shall allow Admin to assign roles (Admin or Staff) to each user.</td></tr>
+      <tr><td class="id">SR-F9</td><td>The system shall generate and assign personal barcode credentials per staff member.</td></tr>
+      <tr><td class="id">SR-F10</td><td>The system shall allow Admin to view all users with search and filtering capabilities.</td></tr>
+    </tbody>
+  </table>
+
+  <h4>Item Management (Admin)</h4>
+  <table>
+    <thead><tr><th style="width:80px;">ID</th><th>System Requirement</th></tr></thead>
+    <tbody>
+      <tr><td class="id">SR-F11</td><td>The system shall allow Admin to add, edit, and delete ingredients through the web dashboard.</td></tr>
+      <tr><td class="id">SR-F12</td><td>The system shall accept item details: category, physical form (liquid/powder), quantity, and expiration date.</td></tr>
+      <tr><td class="id">SR-F13</td><td>The system shall automatically generate a unique barcode or barcode for each ingredient upon entry.</td></tr>
+      <tr><td class="id">SR-F14</td><td>The system shall allow Admin to print generated barcodes for physical labeling.</td></tr>
+      <tr><td class="id">SR-F15</td><td>The system shall allow Admin to view all inventory items with search, filter, and sort capabilities.</td></tr>
+    </tbody>
+  </table>
+
+  <h4>Barcode-based Inventory Checkout / Restock</h4>
+  <table>
+    <thead><tr><th style="width:80px;">ID</th><th>System Requirement</th></tr></thead>
+    <tbody>
+      <tr><td class="id">SR-F16</td><td>The system shall require Staff authentication via personal barcode and password before any transaction.</td></tr>
+      <tr><td class="id">SR-F17</td><td>The system shall accept item barcode scans via connected scanner devices.</td></tr>
+      <tr><td class="id">SR-F18</td><td>The system shall automatically deduct scanned items from inventory during checkout.</td></tr>
+      <tr><td class="id">SR-F19</td><td>The system shall support multi-item checkout within a single transaction.</td></tr>
+      <tr><td class="id">SR-F20</td><td>The system shall require a final confirmation step (password/code) before completing checkout.</td></tr>
+      <tr><td class="id">SR-F21</td><td>The system shall support restock operations with automatic quantity addition.</td></tr>
+      <tr><td class="id">SR-F21a</td><td>The system shall support logging waste, deducting stock for spoilage, spillage, or expiry and recording the staff member responsible.</td></tr>
+      <tr><td class="id">SR-F22</td><td>The system shall reject invalid or unrecognized barcodes with error messages.</td></tr>
+      <tr><td class="id">SR-F23</td><td>The system shall allow manual entry of item ID as a fallback for damaged barcodes.</td></tr>
+    </tbody>
+  </table>
+
+  <h4>Real-Time Stock Monitoring</h4>
+  <table>
+    <thead><tr><th style="width:80px;">ID</th><th>System Requirement</th></tr></thead>
+    <tbody>
+      <tr><td class="id">SR-F24</td><td>The system shall update inventory levels instantly in the database after every transaction.</td></tr>
+      <tr><td class="id">SR-F25</td><td>The system shall reflect current stock levels on the Admin dashboard in real time.</td></tr>
+      <tr><td class="id">SR-F26</td><td>The system shall trigger real-time alerts for low-stock levels and near-expiry items.</td></tr>
+      <tr><td class="id">SR-F27</td><td>The system shall generate separate alerts for out-of-stock and expired items.</td></tr>
+      <tr><td class="id">SR-F28</td><td>The system shall use optimistic locking to prevent negative inventory.</td></tr>
+      <tr><td class="id">SR-F29</td><td>The system shall handle concurrent checkouts without overselling.</td></tr>
+      <tr><td class="id">SR-F30</td><td>The system shall allow Admin to resolve alerts after corrective action. Staff may view alerts read-only, but shall not be able to resolve, re-open, or force an alert recompute.</td></tr>
+    </tbody>
+  </table>
+
+  <h4>Reporting &amp; Analytics</h4>
+  <table>
+    <thead><tr><th style="width:80px;">ID</th><th>System Requirement</th></tr></thead>
+    <tbody>
+      <tr><td class="id">SR-F31</td><td>The system shall generate historical reports for inventory usage and waste tracking.</td></tr>
+      <tr><td class="id">SR-F32</td><td>The system shall allow filtering and sorting of reports by date range, item category, and staff.</td></tr>
+      <tr><td class="id">SR-F33</td><td>The system shall export inventory reports in CSV format and as a print-ready PDF document (generated through the browser's print dialog).</td></tr>
+    </tbody>
+  </table>
+
+  <h4>Audit Trail</h4>
+  <table>
+    <thead><tr><th style="width:80px;">ID</th><th>System Requirement</th></tr></thead>
+    <tbody>
+      <tr><td class="id">SR-F34</td><td>The system shall log all system activities: item additions, checkouts, adjustments, and restocks.</td></tr>
+      <tr><td class="id">SR-F35</td><td>The system shall record staff identification and timestamps for every transaction.</td></tr>
+      <tr><td class="id">SR-F36</td><td>The system shall maintain an immutable, undetectable chronological log.</td></tr>
+      <tr><td class="id">SR-F37</td><td>The system shall support audit filtering by staff, date, and transaction type.</td></tr>
+      <tr><td class="id">SR-F38</td><td>The system shall implement hash chaining for tamper detection.</td></tr>
+    </tbody>
+  </table>
+
+  <h4>Administrator Functions</h4>
+  <table>
+    <thead><tr><th style="width:80px;">ID</th><th>System Requirement</th></tr></thead>
+    <tbody>
+      <tr><td class="id">SR-F39</td><td>The system shall allow Admin to manage item categories, storage locations, and alert thresholds.</td></tr>
+      <tr><td class="id">SR-F40</td><td>The system shall allow Admin to configure low-stock thresholds and expiration warning periods.</td></tr>
+      <tr><td class="id">SR-F41</td><td>The system shall provide a dashboard for Admin to view and monitor all system activity.</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ---------- NON-FUNCTIONAL ---------- -->
+  <div class="page-break"></div>
+  <h3>3.2.2 Non-Functional Requirements</h3>
+
+  <h4>Usability</h4>
+  <table>
+    <thead><tr><th style="width:80px;">ID</th><th>System Requirement</th></tr></thead>
+    <tbody>
+      <tr><td class="id">SR-N1</td><td>The system shall provide an intuitive interface for all user roles (Admin, Staff).</td></tr>
+      <tr><td class="id">SR-N2</td><td>The system shall use simple navigation with a clean, organized dashboard layout.</td></tr>
+      <tr><td class="id">SR-N3</td><td>The system shall display role-based tab navigation showing only relevant modules per user.</td></tr>
+      <tr><td class="id">SR-N4</td><td>The system shall maintain consistent modern styling with clear prompts and status labels.</td></tr>
+      <tr><td class="id">SR-N5</td><td>The system shall require minimal learning curve for staff performing checkout operations.</td></tr>
+    </tbody>
+  </table>
+
+  <h4>Security</h4>
+  <table>
+    <thead><tr><th style="width:80px;">ID</th><th>System Requirement</th></tr></thead>
+    <tbody>
+      <tr><td class="id">SR-N6</td><td>The system shall enforce RBAC restricting functions per user role.</td></tr>
+      <tr><td class="id">SR-N7</td><td>The system shall protect user credentials at rest using scrypt key derivation with a per-user random salt and constant-time comparison.</td></tr>
+      <tr><td class="id">SR-N8</td><td>The system shall encrypt data transmission using TLS 1.3, configured at the hosting or reverse-proxy layer in production deployments.</td></tr>
+      <tr><td class="id">SR-N9</td><td>The system shall enforce automatic session timeout after 15 minutes of inactivity.</td></tr>
+      <tr><td class="id">SR-N10</td><td>The system shall protect system-critical actions from disruption by non-Admin users.</td></tr>
+    </tbody>
+  </table>
+
+  <h4>Performance</h4>
+  <table>
+    <thead><tr><th style="width:80px;">ID</th><th>System Requirement</th></tr></thead>
+    <tbody>
+      <tr><td class="id">SR-N11</td><td>The system shall process barcode scans with near-instant stock deduction under 1 second.</td></tr>
+      <tr><td class="id">SR-N12</td><td>The system shall refresh the dashboard with real-time data under 2 seconds.</td></tr>
+      <tr><td class="id">SR-N13</td><td>The system shall support simultaneous scanning and checkout transactions.</td></tr>
+      <tr><td class="id">SR-N14</td><td>The system shall complete database reads for item lookup in under 100 milliseconds.</td></tr>
+      <tr><td class="id">SR-N15</td><td>The system shall perform efficient filtering, sorting, and search across large inventories.</td></tr>
+    </tbody>
+  </table>
+
+  <h4>Reliability</h4>
+  <table>
+    <thead><tr><th style="width:80px;">ID</th><th>System Requirement</th></tr></thead>
+    <tbody>
+      <tr><td class="id">SR-N16</td><td>The system shall persist data across sessions with reliable database storage.</td></tr>
+      <tr><td class="id">SR-N17</td><td>The system shall apply validation locks on records after finalization.</td></tr>
+      <tr><td class="id">SR-N18</td><td>The system shall implement exception handling and error recovery mechanisms.</td></tr>
+      <tr><td class="id">SR-N19</td><td>The system shall enforce policy-based constraints preventing negative stock.</td></tr>
+      <tr><td class="id">SR-N20</td><td>The system shall provide backup and restore capability for inventory data.</td></tr>
+      <tr><td class="id">SR-N21</td><td>The system shall maintain 99.5% uptime during operating hours.</td></tr>
+    </tbody>
+  </table>
+
+  <h4>Scalability</h4>
+  <table>
+    <thead><tr><th style="width:80px;">ID</th><th>System Requirement</th></tr></thead>
+    <tbody>
+      <tr><td class="id">SR-N22</td><td>The system shall support multiple item categories and storage locations.</td></tr>
+      <tr><td class="id">SR-N23</td><td>The system shall handle thousands of item records efficiently.</td></tr>
+      <tr><td class="id">SR-N24</td><td>The system shall use modular architecture supporting feature expansion.</td></tr>
+      <tr><td class="id">SR-N25</td><td>The system shall accommodate additional branches or expanded menu items.</td></tr>
+    </tbody>
+  </table>
+
+  <h4>Maintainability</h4>
+  <table>
+    <thead><tr><th style="width:80px;">ID</th><th>System Requirement</th></tr></thead>
+    <tbody>
+      <tr><td class="id">SR-N26</td><td>The system shall use modular architecture enabling easy feature updates.</td></tr>
+      <tr><td class="id">SR-N27</td><td>The system shall apply a layered architecture for separation of concerns: a presentation layer, an API layer of route handlers (auth, inventory, audit, and reporting concerns), and a data layer of atomic PostgreSQL functions.</td></tr>
+      <tr><td class="id">SR-N28</td><td>The system shall provide configurable system settings for policy adaptation.</td></tr>
+      <tr><td class="id">SR-N29</td><td>The system shall maintain a domain model with clear entity relationships.</td></tr>
+      <tr><td class="id">SR-N30</td><td>The system shall be documented to support future developers.</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ============================================================ -->
+  <!-- 4. DESIGN AND DEVELOPMENT                                     -->
+  <!-- ============================================================ -->
+  <div class="page-break"></div>
+  <h1 class="section">4. Design and Development</h1>
+
+  <h2>User Interface (UI) Design</h2>
+  <p>The CafeTrack system features a clean, modern interface designed for both administrative and staff users. The UI follows a dashboard-based layout with role-specific navigation.</p>
+
+  <h2>Planned Screens</h2>
+  <ol>
+    <li><strong>Login Page</strong> — barcode scan input field with password verification for staff; username/password form for admin.</li>
+    <li><strong>Admin Dashboard</strong> — Overview of current stock levels, low-stock alerts, near-expiry alerts, and recent transactions.</li>
+    <li><strong>Item Management Page</strong> — Add/edit/delete ingredients with fields for category, physical form, quantity, and expiration date; barcode generation and print functionality.</li>
+    <li><strong>Checkout/Restock Page</strong> — barcode scanner input, multi-item scan list, and final confirmation button. Three movement modes: Checkout (deduct used stock), Restock (add received stock), and Log Waste (deduct spoiled, spilled, or expired stock). All three require a password confirmation and are recorded with the staff member responsible.</li>
+    <li><strong>Reports Page</strong> — Tab-based interface with usage reports, waste tracking, and export options.</li>
+    <li><strong>Audit Trail Page</strong> — Chronological log with filters for staff, date, and transaction type.</li>
+    <li><strong>User Management Page</strong> — Create/edit/disable user accounts, assign roles, and generate barcode credentials.</li>
+    <li><strong>Alert Center</strong> — Dashboard showing active low-stock, near-expiry, out-of-stock, and expired item alerts with resolution options.</li>
+  </ol>
+
+  <!-- ============================================================ -->
+  <!-- 5. PROJECT PLAN                                               -->
+  <!-- ============================================================ -->
+  <h1 class="section">5. Project Plan</h1>
+
+  <h2>Development Timeline</h2>
+  <p>The schedule below is the plan agreed with Merrylane Cafe Foodhub. Completion status reflects the state of the delivered system: the application is feature-complete and verified against the test suites described in Section 6.</p>
+  <div class="info-block">
+    <p><strong>To be completed by the project team before submission:</strong> the <em>Actual Completion</em> column. These dates could not be derived from the repository history, which records all commits on a single day, and an approximate date in an official document is worse than an obvious gap. Please enter the real dates from the team's records.</p>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th style="width:50px;">Week</th>
+        <th>Planned Task</th>
+        <th style="width:100px;">Status</th>
+        <th style="width:110px;">Planned Completion</th>
+        <th style="width:110px;">Actual Completion</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>1</td><td>Requirements gathering and analysis; client interview with Merrylane Cafe Foodhub</td><td>Completed</td><td>Nov 23, 2025</td><td class="id">—</td></tr>
+      <tr><td>2</td><td>System design: ERD, DFD, UI wireframes; barcode library research</td><td>Completed</td><td>Nov 30, 2025</td><td class="id">—</td></tr>
+      <tr><td>3</td><td>Planning system execution; distributing tasks among members; setting up development environment</td><td>Completed</td><td>Dec 7, 2025</td><td class="id">—</td></tr>
+      <tr><td>4</td><td>Documentation defense; start of system development (item management, barcode generation)</td><td>Completed</td><td>Dec 14, 2025</td><td class="id">—</td></tr>
+      <tr><td>5</td><td>System development phase (barcode authentication, checkout/restock, real-time updates)</td><td>Completed</td><td>Jan 11, 2026</td><td class="id">—</td></tr>
+      <tr><td>6</td><td>Final system completion; developer testing; integration testing</td><td>Completed</td><td>Jan 25, 2026</td><td class="id">—</td></tr>
+      <tr><td>7</td><td>Final project presentation and user acceptance testing</td><td>In progress</td><td>Feb 8, 2026</td><td class="id">—</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ============================================================ -->
+  <!-- 6. TESTING AND QUALITY ASSURANCE                              -->
+  <!-- ============================================================ -->
+  <div class="page-break"></div>
+  <h1 class="section">6. Testing and Quality Assurance</h1>
+
+  <h2>Unit Testing (Developer Team)</h2>
+  <ul>
+    <li>Barcode generation and validation logic</li>
+    <li>Staff authentication (barcode scan + password)</li>
+    <li>Item checkout and restock deduction logic</li>
+    <li>Real-time stock update triggers</li>
+    <li>Low-stock and near-expiry alert thresholds</li>
+    <li>Audit trail logging and immutability</li>
+    <li>Role-based access control enforcement</li>
+    <li>Report generation and filtering</li>
+  </ul>
+
+  <h2>Integration Testing (QA Team + Developers)</h2>
+  <ul>
+    <li>End-to-end staff login → scan items → checkout → stock deduction → audit log</li>
+    <li>Admin item creation → barcode generation → print → staff scan</li>
+    <li>Restock workflow → stock update → alert clearance</li>
+    <li>Multi-item checkout with confirmation step</li>
+    <li>Expiration alert triggering → admin notification</li>
+    <li>Low-stock alert triggering → reorder suggestion</li>
+    <li>Audit trail retrieval and filtering</li>
+  </ul>
+
+  <h2>System Testing</h2>
+  <ul>
+    <li>Verify all traced requirements (UR-1 to UR-23, SR-F1 to SR-F41, SR-N1 to SR-N30) function correctly</li>
+    <li>Validate real-world workflows match business processes</li>
+    <li>Test usability for all user roles</li>
+    <li>Verify compliance with food safety and inventory standards</li>
+    <li>Performance testing with realistic item volumes (e.g., 500+ items)</li>
+    <li>Barcode scanning reliability under various conditions (lighting, angle, distance)</li>
+  </ul>
+
+  <h2>User Acceptance Testing (UAT)</h2>
+  <ul>
+    <li>Conducted with Merrylane Cafe Foodhub staff and management</li>
+    <li>Confirm all requirements are met</li>
+    <li>Validate real-world workflows</li>
+    <li>Ensure usability and compliance with business rules</li>
+  </ul>
+
+  <h2>Testing Plan and Results</h2>
+  <p>Automated testing is executed against a running instance of the application using three repeatable test suites. The results below were produced on <strong>September 28, 2026</strong> against the current build on Next.js 16.3.6. Each suite is run through an npm command and exits with a non-zero status on any failure, making the results reproducible.</p>
+
+  <div class="info-block">
+    <p><strong>Overall result: 168 automated assertions passed, 0 failed.</strong></p>
+    <ul>
+      <li><code>npm run test:edge</code> — 83 passed, 0 failed (12 scenario groups)</li>
+      <li><code>npm run test:smoke</code> — 68 passed, 0 failed (every API route exercised)</li>
+      <li><code>npm run test:pages</code> — 17 passed, 0 failed (every page renders for both roles)</li>
+      <li><code>npm run perf</code> — 3 of 3 performance targets met</li>
+    </ul>
+  </div>
+
+  <h3>Automated Test Case Results</h3>
+  <table>
+    <thead>
+      <tr>
+        <th style="width:110px;">Category</th>
+        <th>Test Case</th>
+        <th style="width:80px;">Status</th>
+        <th style="width:70px;">Result</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>Authentication</td><td>Staff barcode login with valid credentials</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Authentication</td><td>Staff barcode login with invalid credentials</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Authentication</td><td>Admin username/password login</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Authentication</td><td>Unauthenticated access is refused</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Authentication</td><td>Sign-in throttling (5th attempt allowed, 6th refused)</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Item Management</td><td>Add new ingredient with all details</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Item Management</td><td>Generate and print barcode</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Item Management</td><td>Edit ingredient details</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Item Management</td><td>Delete ingredient</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Item Management</td><td>Invalid and out-of-range field values are rejected</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Checkout</td><td>Scan single item and deduct stock</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Checkout</td><td>Multi-item checkout with confirmation</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Checkout</td><td>Invalid barcode scan rejection</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Restock</td><td>Scan item and add stock</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Waste</td><td>Log waste for spoilage or spillage</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Real-Time Updates</td><td>Dashboard reflects stock changes immediately</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Alerts</td><td>Low-stock alert triggered at threshold</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Alerts</td><td>Near-expiry alert triggered</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Alerts</td><td>Out-of-stock and expired alerts triggered</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Alerts</td><td>Alerts resolve, reopen, and auto-clear after restock</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Audit Trail</td><td>All transactions logged with staff ID and timestamp</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Audit Trail</td><td>Hash chain remains intact after heavy activity</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Audit Trail</td><td>Audit records cannot be modified or deleted</td><td>Manual</td><td>By design</td></tr>
+      <tr><td>Reports</td><td>Inventory usage report generated</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Reports</td><td>Waste tracking report generated</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Concurrency</td><td>Overselling is rejected (insufficient stock)</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Concurrency</td><td>Simultaneous edits detected by optimistic version check</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Security</td><td>RBAC enforced across all modules</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Security</td><td>Last admin account protection</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Security</td><td>Deactivated account blocked even with a live session</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Security</td><td>Staff cannot resolve or force-recompute alerts (admin only)</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>User Interface</td><td>Every page renders without a server error, as admin and as staff</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>Security</td><td>Password hashes are never returned by any API</td><td>Tested</td><td>Pass</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Performance Test Results</h3>
+  <p>Measured with <code>npm run perf</code>, reporting the median of 5 samples per target so that a single cold request does not distort the result.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>Requirement</th>
+        <th style="width:110px;">Target</th>
+        <th style="width:100px;">Measured</th>
+        <th style="width:70px;">Result</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>SR-N11 — barcode scan to stock deduction</td><td>Under 1000 ms</td><td>115.4 ms</td><td>Pass</td></tr>
+      <tr><td>SR-N12 — dashboard refresh with real-time data</td><td>Under 2000 ms</td><td>53.2 ms</td><td>Pass</td></tr>
+      <tr><td>SR-N14 — item lookup database read</td><td>Under 100 ms</td><td>32.9 ms</td><td>Pass</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Manual and Pending Tests</h3>
+  <p>The following items require physical equipment, on-site access, or a production environment, and were therefore not covered by automated testing:</p>
+  <ul>
+    <li>Usability evaluation with real staff and administrators (User Acceptance Testing with Merrylane Cafe Foodhub management)</li>
+    <li>Barcode scanning reliability under varied physical conditions — lighting, angle, and distance</li>
+    <li>Physical printing and adhesion of labels on storage containers</li>
+    <li>Verification of TLS 1.3 enforcement in the production hosting environment</li>
+    <li>Compliance with food safety and inventory standards during an operational audit</li>
+  </ul>
+
+  <div class="info-block">
+    <p><strong>Known limitations of the security design, stated explicitly:</strong></p>
+    <ul>
+      <li><strong>Session invalidation on logout.</strong> Sessions are stateless signed tokens, so signing out clears the browser cookie but does not revoke a token that was already issued. A copied cookie remains usable until it expires (15 minutes by default). This is a deliberate trade-off for a low-traffic internal system.</li>
+      <li><strong>Audit immutability is enforced by the application, not the database.</strong> No code path exposes a way to edit or delete an audit entry, and the hash chain makes any undetected tampering evident. However, the table itself is not protected by a database-level rule blocking <code>UPDATE</code> or <code>DELETE</code>; a compromised database credential could alter history, which <code>verify_audit_chain()</code> would then detect.</li>
+      <li><strong>Staff can read the full transaction history.</strong> Any signed-in staff member may call the transaction history endpoint and see every recorded movement, including those made by other staff. This is a deliberate choice: in a small cafe, visible stock movement supports the transparency and accountability the project goals call for, and reading history is not a system-critical action. It is noted here so the decision is explicit — restricting staff to their own movements would be a straightforward change to the history filter if the client later prefers it.</li>
+    </ul>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- 7. IMPLEMENTATION DETAILS                                     -->
+  <!-- ============================================================ -->
+  <div class="page-break"></div>
+  <h1 class="section">7. Implementation Details</h1>
+
+  <h2>Environment Setup</h2>
+  <p>CafeTrack was developed as a web application and runs in a standard Node.js environment. The following tools and technologies are used:</p>
+  <ol>
+    <li><strong>Integrated Development Environment (IDE):</strong> Visual Studio Code, used for its integrated TypeScript support, ESLint integration, and Git version control.</li>
+    <li><strong>Programming Language:</strong> TypeScript 5.6, providing static type checking over JavaScript.</li>
+    <li><strong>Web Framework:</strong> Next.js 16.3 (App Router) with React 19, providing server-side rendering, API route handlers, and a build pipeline in one framework.</li>
+    <li><strong>Database:</strong> PostgreSQL via Supabase. A local development mode uses PGlite (PostgreSQL compiled to WebAssembly) so the system runs with no external account or network connection.</li>
+    <li><strong>Barcode Generation:</strong> jsbarcode, rendering Code 128 barcodes as SVG at exact integer module widths for reliable scanner reading and printing.</li>
+    <li><strong>Styling:</strong> Tailwind CSS 3.4 with a custom design system.</li>
+    <li><strong>Scanner Integration:</strong> USB barcode/barcode scanners are supported through standard keyboard-input handling, so no dedicated driver is required.</li>
+  </ol>
+
+  <h2>Libraries and Dependencies</h2>
+  <ul>
+    <li><strong>next</strong> (16.3.6) — web framework, routing, and API route handlers</li>
+    <li><strong>react / react-dom</strong> (19.3.0) — user interface</li>
+    <li><strong>jose</strong> (5.9.6) — JSON Web Token signing and verification for sessions</li>
+    <li><strong>@supabase/supabase-js</strong> (2.45.4) — PostgreSQL access in hosted mode</li>
+    <li><strong>@electric-sql/pglite</strong> (0.5.8) — embedded PostgreSQL for local development</li>
+    <li><strong>jsbarcode</strong> (3.12.3) — Code 128 barcode and label generation</li>
+    <li><strong>node:crypto</strong> — scrypt password hashing, salt generation, and constant-time comparison</li>
+  </ul>
+
+  <h2>Architecture</h2>
+  <p>Business logic is separated across three layers:</p>
+  <ul>
+    <li><strong>Presentation layer</strong> — React page components under <code>src/app</code>, with shared UI elements in <code>src/components</code>.</li>
+    <li><strong>API layer</strong> — Next.js route handlers under <code>src/app/api</code>, each enforcing authentication and role checks before delegating.</li>
+    <li><strong>Data layer</strong> — PostgreSQL functions (<code>process_transaction</code>, <code>append_audit</code>, <code>verify_audit_chain</code>, <code>refresh_alerts</code>) that execute stock movements and audit writes atomically, guaranteeing that the audit trail cannot break under concurrent access.</li>
+  </ul>
+
+  <h2>Backup and Restore</h2>
+  <p>The system provides database backup and restore capability through the commands <code>npm run db:backup</code> and <code>npm run db:restore</code>, satisfying SR-N20. Additional maintenance commands are available: <code>npm run db:reset</code> and <code>npm run db:wipe</code>.</p>
+
+  <!-- ============================================================ -->
+  <!-- 8. SDG REFLECTION                                             -->
+  <!-- ============================================================ -->
+  <div class="page-break"></div>
+  <h1 class="section">8. Reflection on Sustainable Development Goals (SDGs)</h1>
+
+  <h2>SDG Alignment Summary</h2>
+  <p>The development of CafeTrack supports several United Nations Sustainable Development Goals by promoting efficiency, sustainability, and responsible management practices within the food service industry. Although it is a digital system, its features contribute to broader social, economic, and environmental goals.</p>
+
+  <h2>SDG 8 — Decent Work and Economic Growth</h2>
+  <p>CafeTrack makes cafe tasks easier, helping staff work faster and with fewer mistakes. This leads to better service, smoother operations, and improved business growth. By automating inventory tracking and reducing manual errors, the system supports decent work conditions through:</p>
+  <ul>
+    <li>Reduced physical and mental strain on staff</li>
+    <li>Transparent and fair inventory accountability</li>
+    <li>Improved operational efficiency and business sustainability</li>
+    <li>Enhanced workplace transparency and trust</li>
+  </ul>
+
+  <h2>SDG 9 — Industry, Innovation, and Infrastructure</h2>
+  <p>CafeTrack modernizes cafe operations by digitalizing inventory management, Barcode-based checkout, and real-time stock monitoring. This reduces errors, makes operations more efficient, and strengthens the cafe's digital infrastructure through:</p>
+  <ul>
+    <li>Adoption of barcode technology for authentication and tracking</li>
+    <li>Real-time data synchronization and dashboard analytics</li>
+    <li>Automated alerts and reporting for proactive decision-making</li>
+    <li>Scalable architecture supporting future expansion</li>
+  </ul>
+
+  <h2>Impact and Future Enhancements</h2>
+  <p>In the future, CafeTrack can be improved to create a bigger impact on the selected SDGs. Possible enhancements include:</p>
+  <ul>
+    <li>AI-powered demand forecasting to further reduce waste</li>
+    <li>Integration with POS systems for automated sales-based inventory deduction</li>
+    <li>Mobile application for remote monitoring and alerts</li>
+    <li>Multi-branch support with centralized dashboard</li>
+    <li>Supplier management and automated reordering</li>
+    <li>Sustainability metrics and eco-friendly reporting</li>
+  </ul>
+  <p>These improvements will make operations more efficient, support sustainable growth, and further modernize cafe services.</p>
+
+  <!-- ============================================================ -->
+  <!-- PREPARED BY                                                   -->
+  <!-- ============================================================ -->
+  <div class="prepared">
+    <strong>Prepared by:</strong><br>
+    Maquinto, Mark Jahevy &nbsp;·&nbsp; Obedencio, Mark Andrei &nbsp;·&nbsp; Rodriguez, Prince Deano<br>
+    Batangas State University — Lipa Campus<br>
+    College of Informatics and Computing Sciences
+  </div>
+
+</div>
+</body>
+</html>
