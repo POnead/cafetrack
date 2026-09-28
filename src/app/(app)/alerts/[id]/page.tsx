@@ -52,6 +52,10 @@ export default function AlertDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Resolving is admin-only (SR-F30). Staff can open this page to see why an
+  // item is unavailable, so the controls are hidden for them rather than the
+  // page being blocked.
+  const [isAdmin, setIsAdmin] = useState(false);
   const [toast, setToast] = useState<{
     msg: string;
     tone: "info" | "error" | "success";
@@ -78,6 +82,21 @@ export default function AlertDetailPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/auth/me")
+      .then((r) => r.json())
+      .then((d) => {
+        if (alive) setIsAdmin(d?.user?.role === "admin");
+      })
+      .catch(() => {
+        /* leaves the controls hidden, which is the safe default */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   async function setResolved(resolved: boolean) {
     setBusy(true);
@@ -149,17 +168,23 @@ export default function AlertDetailPage() {
             </p>
           </div>
 
-          <button
-            className={
-              alert.resolved
-                ? "btn-primary !px-4 !py-2 text-sm"
-                : "btn-danger !px-4 !py-2 text-sm"
-            }
-            disabled={busy}
-            onClick={() => setResolved(!alert.resolved)}
-          >
-            {busy ? "Saving..." : alert.resolved ? "Re-open alert" : "Resolve alert"}
-          </button>
+          {isAdmin ? (
+            <button
+              className={
+                alert.resolved
+                  ? "btn-primary !px-4 !py-2 text-sm"
+                  : "btn-danger !px-4 !py-2 text-sm"
+              }
+              disabled={busy}
+              onClick={() => setResolved(!alert.resolved)}
+            >
+              {busy ? "Saving..." : alert.resolved ? "Re-open alert" : "Resolve alert"}
+            </button>
+          ) : (
+            <p className="max-w-xs text-xs text-cocoa-400">
+              Only an administrator can resolve or re-open an alert.
+            </p>
+          )}
         </div>
 
         <p className="border-t border-cream-100 pt-3 text-xs text-cocoa-400">
@@ -190,9 +215,11 @@ export default function AlertDetailPage() {
                 <Field label="Counts in" value={item.unit} />
               </dl>
 
-              <Link href="/items" className="btn-ghost !px-3 !py-1.5 text-xs">
-                Open inventory
-              </Link>
+              {isAdmin && (
+                <Link href="/items" className="btn-ghost !px-3 !py-1.5 text-xs">
+                  Open inventory
+                </Link>
+              )}
             </>
           ) : (
             <Empty>This item has since been deleted.</Empty>

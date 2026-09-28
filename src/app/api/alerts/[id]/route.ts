@@ -1,6 +1,6 @@
 import { db } from "@/lib/supabase";
 import { handler, ok, fail, badId, readBody } from "@/lib/api";
-import { requireUser } from "@/lib/auth";
+import { requireAdmin, requireUser } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 
 export const runtime = "nodejs";
@@ -70,7 +70,10 @@ export const GET = handler(
 /** Resolve or re-open a single alert. */
 export const PATCH = handler(
   async (req: Request, { params }: { params: Promise<{ id: string }> }) => {
-    const user = await requireUser();
+    // Resolving is an admin action (SR-F30). The GET above stays open to staff so
+    // they can see why an item is unavailable, but a barista must not be able to
+    // silence a low-stock or expiry alert that an admin still needs to act on.
+    const user = await requireAdmin();
     const { id } = await params;
 
     const malformed = badId(id, "alert");

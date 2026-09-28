@@ -75,6 +75,26 @@ export default function AlertsPage() {
 
   const inFlight = useRef(false);
 
+  // Recompute is an admin action (the API rejects staff with 403), so the button
+  // is hidden rather than left visible and failing. Staff still get the full
+  // read-only alert list — the /alerts link is in their nav on purpose.
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/auth/me")
+      .then((r) => r.json())
+      .then((d) => {
+        if (alive) setIsAdmin(d?.user?.role === "admin");
+      })
+      .catch(() => {
+        /* a failed session read just leaves the button hidden */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   async function load() {
     if (inFlight.current) return;
     inFlight.current = true;
@@ -134,16 +154,20 @@ export default function AlertsPage() {
           </p>
         </div>
         <div className="flex gap-2">
-          <button
-            className="btn-ghost"
-            onClick={recompute}
-            disabled={recomputing}
-          >
-            {recomputing ? "Recomputing..." : "Recompute"}
-          </button>
-          <Link href="/items" className="btn-primary">
-            Manage items
-          </Link>
+          {isAdmin && (
+            <button
+              className="btn-ghost"
+              onClick={recompute}
+              disabled={recomputing}
+            >
+              {recomputing ? "Recomputing..." : "Recompute"}
+            </button>
+          )}
+          {isAdmin && (
+            <Link href="/items" className="btn-primary">
+              Manage items
+            </Link>
+          )}
         </div>
       </div>
 

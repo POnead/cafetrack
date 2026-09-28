@@ -1,6 +1,6 @@
 import { db } from "@/lib/supabase";
 import { handler, ok, fail } from "@/lib/api";
-import { requireUser } from "@/lib/auth";
+import { requireAdmin, requireUser } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -31,8 +31,12 @@ export const GET = handler(async (req: Request) => {
 
 /* ---------------- force a recompute ---------------- */
 // refresh_alerts is idempotent, so this is safe to fire from the UI button.
+//
+// Admin-only: recomputing rewrites open alerts across the whole inventory, so
+// it is a supervisory action, not something a barista can trigger. Staff can
+// still *read* alerts (GET above) — only this mutation is gated.
 export const POST = handler(async () => {
-  await requireUser();
+  await requireAdmin();
 
   const { error } = await db().rpc("refresh_alerts");
   if (error) return fail(error.message, 500);
