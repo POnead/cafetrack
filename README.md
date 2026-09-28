@@ -183,11 +183,20 @@ start `npm run dev` first:
 npm run test:smoke    # full API walk-through; makes and cleans up its own data
 npm run test:edge     # hostile and edge-case inputs
 npm run test:pages    # every page renders, for an admin and a staff session
+npm run test:journeys # six end-to-end user stories, asserted on their outcomes
 npm run perf          # measures the spec's performance targets
 ```
 
 `test:smoke` currently reports **68 passed, 0 failed**. `test:edge` reports
-**83 passed, 0 failed**, and `test:pages` reports **17 passed, 0 failed**.
+**83 passed, 0 failed**, `test:pages` **17 passed, 0 failed**, and
+`test:journeys` **65 passed, 0 failed**.
+
+`test:journeys` is the one to read for behaviour rather than status codes: it
+drives whole stories (a new hire's first day, an ingredient running out and
+being restocked, a full shift's arithmetic, the expiry and session settings
+actually changing behaviour, and the in-use reference guard) and asserts on the
+end result. It expects a freshly seeded database — run `npm run db:wipe` first —
+and removes everything it creates, so the other suites still pass after it.
 
 The page suite is the reason the alert pages carry a role check: it renders
 `/alerts` and `/alerts/[id]` under both an admin and a staff session, so a
