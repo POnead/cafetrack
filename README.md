@@ -209,19 +209,21 @@ npm run test:smoke    # full API walk-through; makes and cleans up its own data
 npm run test:edge     # hostile and edge-case inputs
 npm run test:pages    # every page renders, for an admin and a staff session
 npm run test:journeys # six end-to-end user stories, asserted on their outcomes
+npm run test:ui       # drives the real UI in Chrome; writes ui-screenshots/
 npm run perf          # measures the spec's performance targets
 ```
 
 `test:smoke` currently reports **68 passed, 0 failed**. `test:edge` reports
-**83 passed, 0 failed**, `test:pages` **17 passed, 0 failed**, and
-`test:journeys` **73 passed, 0 failed**.
+**83 passed, 0 failed**, `test:pages` **17 passed, 0 failed**,
+`test:journeys` **73 passed, 0 failed**, and `test:ui` **35 passed, 0 failed**.
 
-`test:journeys` is the one to read for behaviour rather than status codes: it
-drives whole stories (a new hire's first day, an ingredient running out and
-being restocked, a full shift's arithmetic, the expiry and session settings
-actually changing behaviour, and the in-use reference guard) and asserts on the
-end result. It expects a freshly seeded database — run `npm run db:wipe` first —
-and removes everything it creates, so the other suites still pass after it.
+`test:ui` is the only one that opens a browser. It uses `playwright-core`
+against the Chrome already installed on the machine, so nothing is downloaded,
+and it is the only way to check what a person actually experiences: that the
+scan field takes focus on its own (a USB scanner types and presses Enter with no
+click), that a button is reachable and does what its label says, that staff
+genuinely do not see admin controls, and that no page throws JavaScript. It also
+writes screenshots to `ui-screenshots/`, which is gitignored.
 
 The page suite is the reason the alert pages carry a role check: it renders
 `/alerts` and `/alerts/[id]` under both an admin and a staff session, so a

@@ -585,8 +585,9 @@
   <p>Automated testing is executed against a running instance of the application using three repeatable test suites. The results below were produced on <strong>September 28, 2026</strong> against the current build on Next.js 16.3.6. Each suite is run through an npm command and exits with a non-zero status on any failure, making the results reproducible.</p>
 
   <div class="info-block">
-    <p><strong>Overall result: 241 automated assertions passed, 0 failed.</strong></p>
+    <p><strong>Overall result: 276 automated assertions passed, 0 failed.</strong></p>
     <ul>
+      <li><code>npm run test:ui</code> — 35 passed, 0 failed (drives the real interface in Chrome)</li>
       <li><code>npm run test:journeys</code> — 73 passed, 0 failed (six end-to-end user stories)</li>
       <li><code>npm run test:edge</code> — 83 passed, 0 failed (12 scenario groups)</li>
       <li><code>npm run test:smoke</code> — 68 passed, 0 failed (every API route exercised)</li>
@@ -640,6 +641,13 @@
       <tr><td>Security</td><td>Deactivated account blocked even with a live session</td><td>Tested</td><td>Pass</td></tr>
       <tr><td>Security</td><td>Staff cannot resolve or force-recompute alerts (admin only)</td><td>Tested</td><td>Pass</td></tr>
       <tr><td>User Interface</td><td>Every page renders without a server error, as admin and as staff</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>User Interface</td><td>Sign-in completed by typing into the real form, both roles</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>User Interface</td><td>Ingredient added through the on-screen form, with a generated barcode</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>User Interface</td><td>Barcode scan field reclaims keyboard focus without being clicked (USB scanner behaviour)</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>User Interface</td><td>Full checkout completed in the browser, ending in the stock actually deducted</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>User Interface</td><td>Admin-only controls are absent, not merely disabled, on staff screens</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>User Interface</td><td>No horizontal overflow at phone width (390 px)</td><td>Tested</td><td>Pass</td></tr>
+      <tr><td>User Interface</td><td>No uncaught JavaScript errors on any page</td><td>Tested</td><td>Pass</td></tr>
       <tr><td>End-to-End</td><td>New staff member: account created, barcode sign-in, first checkout, then locked out on deactivation</td><td>Tested</td><td>Pass</td></tr>
       <tr><td>End-to-End</td><td>Stock cycle: depletion raises an alert, restocking clears it automatically</td><td>Tested</td><td>Pass</td></tr>
       <tr><td>End-to-End</td><td>Shift arithmetic balances across checkout, waste, and restock</td><td>Tested</td><td>Pass</td></tr>
@@ -672,6 +680,7 @@
   <p>The following items require physical equipment, on-site access, or a production environment, and were therefore not covered by automated testing:</p>
   <ul>
     <li>Usability evaluation with real staff and administrators (User Acceptance Testing with Merrylane Cafe Foodhub management)</li>
+    <li>Physical USB barcode scanner hardware — the keyboard-wedge input path is tested in a browser, but the device itself has not been connected</li>
     <li>Barcode scanning reliability under varied physical conditions — lighting, angle, and distance</li>
     <li>Physical printing and adhesion of labels on storage containers</li>
     <li>Verification of TLS 1.3 enforcement in the production hosting environment</li>

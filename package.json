@@ -18,7 +18,8 @@
     "test:smoke": "node scripts/smoke-test.mjs",
     "test:edge": "node scripts/_edge-tests.mjs",
     "test:pages": "node scripts/_pages.mjs",
-    "test:journeys": "node scripts/_journeys.mjs"
+    "test:journeys": "node scripts/_journeys.mjs",
+    "test:ui": "node scripts/_ui.mjs"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.8",
@@ -36,6 +37,7 @@
     "autoprefixer": "^10.4.20",
     "eslint": "^8.57.1",
     "eslint-config-next": "^15.5.24",
+    "playwright-core": "^1.63.0",
     "postcss": "8.5.23",
     "tailwindcss": "^3.4.14",
     "typescript": "^5.6.3"

@@ -14,3 +14,4 @@ next-env.d.ts
 .pglite.manifest.json
 backups/
 .pglite.replaced/
+ui-screenshots/
