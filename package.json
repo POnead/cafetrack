@@ -16,7 +16,8 @@
     "perf": "node scripts/perf-check.mjs",
     "test:smoke": "node scripts/smoke-test.mjs",
     "test:edge": "node scripts/_edge-tests.mjs",
-    "test:pages": "node scripts/_pages.mjs"
+    "test:pages": "node scripts/_pages.mjs",
+    "test:journeys": "node scripts/_journeys.mjs"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.8",
