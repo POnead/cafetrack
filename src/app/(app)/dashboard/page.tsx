@@ -110,11 +110,13 @@ export default function DashboardPage() {
   );
 
   /* Soonest expiries, including already-expired */
+  // An unparseable date sorts last rather than being treated as 0 days, which
+  // would put it at the top of "soonest expiring" wearing an "Expired" label.
   const expiring = useMemo(
     () =>
       items
         .filter((i) => i.expiration_date)
-        .map((i) => ({ ...i, days: daysUntil(i.expiration_date) ?? 0 }))
+        .map((i) => ({ ...i, days: daysUntil(i.expiration_date) ?? Number.POSITIVE_INFINITY }))
         .sort((a, b) => a.days - b.days)
         .slice(0, 4),
     [items]

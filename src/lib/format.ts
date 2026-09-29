@@ -26,7 +26,32 @@ export function fmtDateTime(d: string | null | undefined): string {
 
 export function daysUntil(dateStr: string | null | undefined): number | null {
   if (!dateStr) return null;
-  const target = new Date(dateStr + "T00:00:00");
+
+  // Two shapes reach this function, and only one of them used to work:
+  //
+  //   - "2026-09-28"                            from an <input type="date">
+  //   - "2026-09-28T00:00:00.000Z"              from an API response, because a
+  //                                              Postgres `date` column
+  //                                              serialises to a full ISO instant
+  //
+  // Appending "T00:00:00" to the second shape produced an Invalid Date, so
+  // every caller reading an item's expiry from the API got NaN. NaN then failed
+  // *both* guards — `d < 0` and `d <= warningDays` are both false — so every
+  // dated item silently fell through to "In Date", and the UI contradicted
+  // refresh_alerts(), which computes the same thing correctly in SQL.
+  //
+  // An expiry is a calendar day, not an instant, so the time part is dropped
+  // and the day is read as local midnight: the same basis `today` is set to
+  // below. Parsing the instant directly would happen to round correctly in most
+  // zones, but at a large positive offset (UTC+14) an item expiring *today*
+  // rounds to 1, claiming a day is left on the day it expires.
+  const day = String(dateStr).slice(0, 10);
+  const target = new Date(`${day}T00:00:00`);
+
+  // An unparseable date reports "unknown" (null) rather than NaN. Callers treat
+  // null as a defined, visible state; NaN would fail open and read as "fine".
+  if (Number.isNaN(target.getTime())) return null;
+
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   return Math.round((target.getTime() - today.getTime()) / 86400000);

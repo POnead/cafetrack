@@ -1,6 +1,21 @@
-﻿const BASE = process.env.BASE_URL || "http://localhost:3000";
+﻿import { daysUntil } from "../src/lib/format.ts";
+
+const BASE = process.env.BASE_URL || "http://localhost:3000";
 let pass = 0, fail = 0;
 const failures = [];
+
+/**
+ * A YYYY-MM-DD day `n` days from today, for POSTing an expiration_date.
+ * Local calendar arithmetic, so it lines up with the current_date the
+ * database compares against rather than with UTC.
+ */
+function isoDay(n) {
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate()
+  ).padStart(2, "0")}`;
+}
 function check(label, ok, detail = "") {
   if (ok) { pass++; console.log(`  PASS  ${label}${detail ? "  " + detail : ""}`); }
   else { fail++; failures.push(label); console.log(`  FAIL  ${label}${detail ? "  " + detail : ""}`); }
@@ -309,8 +324,96 @@ async function rawCall(method, path, rawBody, cookie) {
   r = await call("POST", "/api/alerts", undefined, A2);
   check("recompute after manual resolve does not crash", r.status === 200, `${r.status}`);
 
+  /* ============ 7b. Expiry: the browser and the database must agree ===== */
+  /* The one business rule implemented twice. refresh_alerts() decides
+   * "expired" in SQL against current_date; the UI recomputes the same thing in
+   * JS via daysUntil(). They once disagreed: daysUntil() appended "T00:00:00"
+   * to a value the API had already serialised as a full ISO instant, yielding
+   * an Invalid Date, and NaN fails both `d < 0` and `d <= window` — so the UI
+   * showed "In Date" for an item the database had already raised an expired
+   * alert for. Checking one implementation alone would not have caught it; the
+   * only thing that catches this class of bug is comparing the two. */
+  section("expiry: the UI's arithmetic agrees with the database's");
+
+  // A throwaway item, dated in the past, so the comparison has something to
+  // disagree about regardless of what the seeded data happens to contain.
+  const pastIso = await call(
+    "POST",
+    "/api/items",
+    { name: "Edge Expired Probe", quantity: 1, expiration_date: isoDay(-1) },
+    A2
+  );
+  const probe = pastIso.data?.item ?? null;
+  check("created a probe item that expires yesterday", pastIso.status === 201 && Boolean(probe), `${pastIso.status}`);
+
+  const probeAlerts = (await call("POST", "/api/alerts", undefined, A2)).status;
+  check("recompute so the probe is classified", probeAlerts === 200, `${probeAlerts}`);
+
+  if (probe) {
+    const stillExpired = new Set(
+      ((await call("GET", "/api/alerts?status=open", null, A2)).data.alerts ?? [])
+        .filter((a) => a.type === "expired")
+        .map((a) => a.item?.sku)
+        .filter(Boolean)
+    );
+    check("the database raised an expired alert for the probe", stillExpired.has(probe.sku));
+
+    // The same question, answered the way the browser answers it: take the raw
+    // string the API handed out and run the function the UI actually calls.
+    const days = daysUntil(probe.expiration_date);
+    check(
+      "daysUntil() on the API's own date string says expired",
+      typeof days === "number" && days < 0,
+      `days=${days} raw=${probe.expiration_date}`
+    );
+    check(
+      "the UI's verdict matches the database's",
+      (days < 0) === stillExpired.has(probe.sku),
+      `js_expired=${days < 0} db_expired=${stillExpired.has(probe.sku)}`
+    );
+  }
+
+  // The broad version: every dated item in the database, not just the probe.
+  // The two implementations must partition the inventory identically, or some
+  // item somewhere is being shown as fine while the database alerts on it.
+  const allItems = ((await call("GET", "/api/items", null, A2)).data.items ?? []).filter(
+    (i) => i.expiration_date
+  );
+  const dbExpired = new Set(
+    ((await call("GET", "/api/alerts?status=open", null, A2)).data.alerts ?? [])
+      .filter((a) => a.type === "expired")
+      .map((a) => a.item?.sku)
+      .filter(Boolean)
+  );
+  const mismatched = allItems
+    .filter((i) => (daysUntil(i.expiration_date) < 0) !== dbExpired.has(i.sku))
+    .map((i) => i.name);
+  check(
+    "every dated item's expiry verdict matches the database's",
+    mismatched.length === 0,
+    mismatched.length
+      ? `${mismatched.length} disagree: ${mismatched.slice(0, 3).join(", ")}`
+      : `${allItems.length} dated item(s) agree`
+  );
+  check("at least one item is dated, so the comparison means something", allItems.length > 0, `${allItems.length} dated`);
+
+  // Both shapes must agree, since the app produces both: a date input yields a
+  // bare day, an API response yields a full instant.
+  const bare = daysUntil("2026-09-28");
+  const instant = daysUntil("2026-09-28T00:00:00.000Z");
+  check("a bare date and the same date as an instant agree", bare === instant, `${bare} vs ${instant}`);
+  check("neither shape returns NaN", !Number.isNaN(bare) && !Number.isNaN(instant), `${bare} / ${instant}`);
+  check("an unparseable date reports unknown, not NaN", daysUntil("not-a-date") === null, `${daysUntil("not-a-date")}`);
+  check("an absent date reports unknown", daysUntil(null) === null && daysUntil("") === null);
+
+  if (probe) await call("DELETE", `/api/items/${probe.id}`, {}, A2);
+  await call("POST", "/api/alerts", undefined, A2);
+  const leftover = (await call("GET", "/api/alerts?status=open", null, A2)).data.alerts ?? [];
+  check("the probe left no alert behind", !leftover.some((a) => a.item?.sku === probe?.sku));
+
   /* ============ 8. Inactive account with live session ============ */
   section("deactivated account, live session");
+
   const newUser = await call("POST", "/api/users", { username: `tempstaff${Date.now().toString(36)}`, full_name: "Temp Staff", password: "password1", role: "staff" }, A2);
   const temp = newUser.data.user;
   const ts = await fetch(BASE + "/api/auth/staff", {
