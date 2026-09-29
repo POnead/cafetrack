@@ -34,6 +34,11 @@ const nextConfig = {
   outputFileTracingRoot: here,
   // Development only — `next build` ignores it. See the note above.
   allowedDevOrigins,
+  // A second dev server cannot share `.next`: Next takes a lock at
+  // .next/dev/lock and refuses to start if another one holds it. So the
+  // test-isolated server (scripts/dev-test.mjs) points this at its own
+  // directory. Unset, nothing changes.
+  ...(process.env.NEXT_DIST_DIR ? { distDir: process.env.NEXT_DIST_DIR } : {}),
 };
 
 export default nextConfig;

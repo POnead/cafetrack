@@ -4,6 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:test": "node scripts/dev-test.mjs",
+    "db:test:wipe": "node -e \"require('fs').rmSync(process.env.CAFETRACK_DB_DIR||'.pglite-test',{recursive:true,force:true});console.log('removed the test database')\"",
     "build": "next build",
     "start": "next start",
     "lint": "eslint src --ext .ts,.tsx",
@@ -21,6 +23,7 @@
     "test:journeys": "node scripts/_journeys.mjs",
     "test:ui": "node scripts/_ui.mjs",
     "test:tour": "node scripts/_usertour.mjs",
+    "test:isolated": "node scripts/test-isolated.mjs",
     "test:all": "npm run test:smoke && npm run test:edge && npm run test:pages && npm run test:journeys && npm run test:ui && npm run test:tour && npm run perf"
   },
   "dependencies": {

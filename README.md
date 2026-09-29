@@ -239,15 +239,46 @@ npm run perf          # measures the spec's performance targets
 npm run test:all      # all seven in order, stopping at the first failure
 ```
 
+**Prefer `npm run test:isolated` — see below. It keeps the suites off your
+working data.**
+
 `test:smoke` currently reports **68 passed, 0 failed**. `test:edge` reports
-**83 passed, 0 failed**, `test:pages` **17 passed, 0 failed**,
+**95 passed, 0 failed**, `test:pages` **17 passed, 0 failed**,
 `test:journeys` **117 passed, 0 failed**, `test:ui` **36 passed, 0 failed**,
-and `test:tour` **145 passed, 0 failed**.
+and `test:tour` **147 passed, 0 failed**.
 
 `test:smoke` and `test:ui` need a **freshly seeded** database — both assert
 against the seeded items. `npm run db:reset` clears and re-seeds;
 `npm run db:wipe` is not enough, because it removes the items and the users
 those suites count.
+
+### Running the suites without polluting your data
+
+The suites write: they check stock out, restock it, create and delete
+accounts, and add to the movement ledger. They clean up the stock and the
+reference rows, but **not the transactions** — the ledger is append-only by
+design (`transaction_items` keeps a name snapshot, and `item_id` is
+`on delete set null`), so the history of a deleted item deliberately survives.
+Run repeatedly against your working database, that history piles up and
+eventually tops the dashboard's *In-Demand Items* and the report's *Most
+checked out* with ingredients that no longer exist.
+
+So give the suites a database of their own:
+
+```bash
+npm run dev:test        # terminal 1 — a second server on :3001
+npm run test:isolated   # terminal 2 — all seven suites against it
+```
+
+`dev:test` points `CAFETRACK_DB_DIR` at `.pglite-test/` and gives itself its
+own `.next-test/` build directory, because Next locks `.next/dev` and a second
+server in the same folder refuses to start. Your `.pglite/` is never opened.
+`npm run db:test:wipe` throws the throwaway database away.
+
+The plumbing already existed — `local-db.ts` and all five `db:*` scripts read
+`CAFETRACK_DB_DIR`, and every suite reads `BASE_URL`. These two scripts just
+connect them, and `test:isolated` refuses to run against port 3000 so it
+cannot point at your real server by accident.
 
 ### `test:tour` — the whole site, driven as a person
 
