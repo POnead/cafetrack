@@ -1,8 +1,43 @@
 import { NextResponse } from "next/server";
+import { join } from "node:path";
 import { HttpError } from "./auth";
 
+/**
+ * Whether this server is pointed at a throwaway database.
+ *
+ * `dev:test` sets CAFETRACK_DB_DIR so the suites get a database of their own;
+ * unset, the app uses ./.pglite, which is real working data. The suites read
+ * this header and refuse to write to a live one, because the movement ledger is
+ * append-only: a suite that checks stock out against ./.pglite leaves history
+ * there that nothing in the app can remove, and it then shows up on the
+ * dashboard as in-demand items that no longer exist.
+ */
+const DB_IS_TEST =
+  Boolean(process.env.CAFETRACK_DB_DIR) &&
+  process.env.CAFETRACK_DB_DIR !== join(process.cwd(), ".pglite");
+
+/**
+ * "test" when this server is pointed at a throwaway database, "live" otherwise.
+ *
+ * Exported because proxy.ts stamps the header on its own 401s too — a denied
+ * request never reaches a route handler, and the suites probe unauthenticated.
+ * One definition, so the two cannot disagree about which database is in use.
+ */
+export const dbMode = () => (DB_IS_TEST ? "test" : "live");
+
+/**
+ * Tags a response with which database it came from.
+ *
+ * `ok` and `fail` are the only two functions every route returns through, so
+ * stamping here covers the whole API.
+ */
+function withDbMode(res: Response) {
+  res.headers.set("x-cafetrack-db", dbMode());
+  return res;
+}
+
 export function ok(data: unknown, status = 200) {
-  return NextResponse.json(data, { status });
+  return withDbMode(NextResponse.json(data, { status }));
 }
 
 /**
@@ -15,7 +50,7 @@ export function fail(
   status = 400,
   extra?: Record<string, unknown>
 ) {
-  return NextResponse.json({ error: message, ...(extra ?? {}) }, { status });
+  return withDbMode(NextResponse.json({ error: message, ...(extra ?? {}) }, { status }));
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -78,7 +113,9 @@ export async function readBody(req: Request): Promise<any> {
 export function handler(fn: (...args: any[]) => Promise<Response>) {
   return async (...args: any[]) => {
     try {
-      return await fn(...args);
+      // Stamped here as well as in ok/fail, so a route that returns a
+      // NextResponse of its own still declares which database answered.
+      return withDbMode(await fn(...args));
     } catch (e: any) {
       // Framework control-flow signal (route read cookies during prerender) —
       // re-throw so Next.js can mark the route dynamic instead of us

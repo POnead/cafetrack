@@ -280,6 +280,36 @@ The plumbing already existed — `local-db.ts` and all five `db:*` scripts read
 connect them, and `test:isolated` refuses to run against port 3000 so it
 cannot point at your real server by accident.
 
+#### The suites refuse to write to a live database
+
+Every API response carries `x-cafetrack-db: test|live`, set in `lib/api.ts` and
+on the proxy's own 401s. Each suite that writes calls `assertTestTarget()` from
+`scripts/_guard.mjs` before it does anything, and **stops** if the target is
+`live`:
+
+```
+Refusing to run against http://127.0.0.1:3000.
+
+That server reports a live database (x-cafetrack-db: live).
+This suite writes to the movement ledger, which is append-only, so what it
+records cannot be removed afterwards.
+
+Use the throwaway database instead:
+    npm run dev:test          (terminal 1)
+    npm run test:isolated     (terminal 2)
+
+Or, if you really mean to test against real data:
+    CAFETRACK_ALLOW_LIVE_DB=1 npm run <this suite>
+```
+
+That covers `smoke`, `edge`, `journeys`, `ui`, `tour` and `perf`. `_pages` is
+read-only, so it is not guarded. The override prints a `!!!!` banner and then
+runs, which is the record of having used it.
+
+Without this, `npm run test:all` against a normal `npm run dev` was enough to
+put deleted test ingredients at the top of the dashboard's *In-Demand Items*
+permanently — the items get cleaned up, their name snapshots do not.
+
 ### `test:tour` — the whole site, driven as a person
 
 `test:ui` and `test:tour` are the two that open a browser. Both use

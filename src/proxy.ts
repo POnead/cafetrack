@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { jwtVerify } from "jose";
 import { resolveAuthSecret } from "@/lib/secret";
+import { dbMode } from "@/lib/api";
 
 const COOKIE_NAME = "cafetrack_session";
 
@@ -49,7 +50,12 @@ export async function proxy(req: NextRequest) {
 
 function deny(req: NextRequest, pathname: string) {
   if (pathname.startsWith("/api/")) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    // Tagged here as well as in lib/api.ts: a 401 from the proxy never reaches
+    // a route handler, so without this the test suites' unauthenticated probe
+    // would get no database-mode header and could not tell live from test.
+    const res = NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    res.headers.set("x-cafetrack-db", dbMode());
+    return res;
   }
   const url = req.nextUrl.clone();
   url.pathname = "/login";

@@ -1,4 +1,6 @@
 /**
+
+/**
  * CafeTrack smoke test — exercises every API route against a running server.
  *
  *   npm run dev                     (in one terminal)
@@ -7,6 +9,8 @@
  * Works in both local (PGlite) and Supabase modes. It creates one test item
  * and one test staff account, then removes them again.
  */
+
+import { assertTestTarget } from "./_guard.mjs";
 const BASE = process.env.BASE_URL || "http://localhost:3000";
 
 const ADMIN = {
@@ -53,6 +57,7 @@ function section(title) {
 }
 
 async function main() {
+  await assertTestTarget(BASE);
   console.log(`CafeTrack smoke test against ${BASE}\n`);
 
   section("unauthenticated access is refused");

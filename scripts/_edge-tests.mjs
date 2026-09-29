@@ -1,4 +1,5 @@
-﻿import { daysUntil } from "../src/lib/format.ts";
+import { daysUntil } from "../src/lib/format.ts";
+import { assertTestTarget } from "./_guard.mjs";
 
 const BASE = process.env.BASE_URL || "http://localhost:3000";
 let pass = 0, fail = 0;
@@ -54,6 +55,7 @@ async function rawCall(method, path, rawBody, cookie) {
 }
 
 (async () => {
+  await assertTestTarget(BASE);
   const admin = await login("admin", "admin123");
   const A = admin.cookie;
   check("admin login", admin.status === 200);

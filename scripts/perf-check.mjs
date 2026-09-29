@@ -1,4 +1,6 @@
 /**
+
+/**
  * Measures the three performance targets from the project spec against a
  * running server and reports pass/fail:
  *
@@ -16,6 +18,8 @@
  * Run with:  node scripts/perf-check.mjs          (server must be running)
  *            BASE_URL=http://localhost:3001 node scripts/perf-check.mjs
  */
+
+import { assertTestTarget } from "./_guard.mjs";
 const BASE = process.env.BASE_URL || "http://localhost:3000";
 const SAMPLES = Number(process.env.SAMPLES || 5);
 const ADMIN = { username: "admin", password: "admin123" };
@@ -62,6 +66,8 @@ function report(label, ms, budget) {
     `  ${flag}  ${label.padEnd(34)} ${ms.toFixed(1).padStart(7)} ms  (budget ${budget} ms)`
   );
 }
+
+await assertTestTarget(BASE);
 
 /* Warm the routes so the first compile is not counted as a slow request. */
 await call("GET", "/login");

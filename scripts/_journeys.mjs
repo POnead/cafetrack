@@ -1,4 +1,6 @@
 /**
+
+/**
  * CafeTrack user-journey tests.
  *
  *   npm run dev                     (in one terminal)
@@ -12,6 +14,8 @@
  * Expects a freshly seeded database (npm run db:wipe, then npm run dev).
  * Everything it creates it removes again, so a run leaves no residue.
  */
+
+import { assertTestTarget } from "./_guard.mjs";
 const BASE = process.env.BASE_URL || "http://127.0.0.1:3000";
 
 let pass = 0;
@@ -104,6 +108,7 @@ async function expiryOf(sku, cookie) {
 }
 
 (async () => {
+  await assertTestTarget(BASE);
   console.log(`CafeTrack user journeys against ${BASE}\n`);
   const A = await signInAdmin();
   check("admin signed in", Boolean(A));
@@ -812,4 +817,3 @@ async function expiryOf(sku, cookie) {
   }
   process.exit(fail ? 1 : 0);
 })();
-

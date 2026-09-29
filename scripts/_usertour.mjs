@@ -1,4 +1,4 @@
-﻿/**
+/**
  * CafeTrack full user tour â€” the whole application the way a person uses it.
  *
  *   npm run dev                     (in one terminal)
@@ -31,6 +31,7 @@
  */
 import { chromium } from "playwright-core";
 import { mkdirSync } from "node:fs";
+import { assertTestTarget } from "./_guard.mjs";
 
 // "localhost", not "127.0.0.1": Next 16 blocks cross-origin access to its dev
 // resources (the HMR socket) from any origin not in allowedDevOrigins, and
@@ -84,6 +85,11 @@ const LOCATION = `Tour Locker ${stamp}`;
 const SHELF_DAYS = 30; // the rule this suite puts on LOCATION
 
 mkdirSync(SHOTS, { recursive: true });
+
+// Before the launch, deliberately: the guard calls process.exit when the target
+// is a live database, and exiting from inside the try/finally below would skip
+// the finally and orphan a headless Chrome.
+await assertTestTarget(BASE);
 
 const browser = await chromium.launch({ channel: "chrome", headless: true });
 

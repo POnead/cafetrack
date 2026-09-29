@@ -20,6 +20,7 @@
  */
 import { chromium } from "playwright-core";
 import { mkdirSync } from "node:fs";
+import { assertTestTarget } from "./_guard.mjs";
 
 // "localhost", not "127.0.0.1": Next 16 blocks cross-origin access to its dev
 // resources (the HMR socket) from any origin not listed in allowedDevOrigins,
@@ -60,6 +61,11 @@ function section(t) {
 }
 
 mkdirSync(SHOTS, { recursive: true });
+
+// Before the launch, deliberately: the guard calls process.exit when the target
+// is a live database, and exiting from inside the try/finally below would skip
+// the finally and orphan a headless Chrome.
+await assertTestTarget(BASE);
 
 const browser = await chromium.launch({ channel: "chrome", headless: true });
 
