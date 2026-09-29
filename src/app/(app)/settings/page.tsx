@@ -16,7 +16,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Card, Spinner, Toast, Empty } from "@/components/ui";
 
-type Ref = { id: string; name: string };
+type Ref = { id: string; name: string; min_shelf_life_days?: number | null };
 type Tone = "info" | "error" | "success";
 
 const NUMERIC_FIELDS = [
@@ -141,6 +141,43 @@ export default function SettingsPage() {
     }
   }
 
+  /**
+   * Save a location's minimum shelf life.
+   *
+   * A blank clears the rule rather than storing 0, so "no rule" and "a rule of
+   * zero days" stay the same thing in the database and there is one code path
+   * for "this location has no minimum" instead of two that mean the same thing.
+   */
+  async function saveShelfLife(loc: Ref, raw: string) {
+    setBusyId(loc.id);
+    try {
+      const res = await fetch("/api/refs/locations", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: loc.id,
+          min_shelf_life_days: raw.trim() === "" ? null : raw,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not save");
+
+      setLocations((prev) =>
+        prev.map((l) =>
+          l.id === loc.id
+            ? { ...l, min_shelf_life_days: data.item.min_shelf_life_days }
+            : l
+        )
+      );
+      setToast({ msg: "Saved", tone: "success" });
+    } catch (e: any) {
+      setToast({ msg: e.message, tone: "error" });
+      await load();
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   async function removeRef(kind: "category" | "location", ref: Ref) {
     setBusyId(ref.id);
     try {
@@ -206,18 +243,50 @@ export default function SettingsPage() {
               {rows.map((r) => (
                 <li
                   key={r.id}
-                  className="flex items-center justify-between gap-3 py-2.5"
+                  className="flex flex-wrap items-center justify-between gap-3 py-2.5"
                 >
                   <span className="text-sm font-medium text-cocoa-700">
                     {r.name}
                   </span>
-                  <button
-                    className="btn-danger"
-                    onClick={() => removeRef(kind, r)}
-                    disabled={busyId === r.id}
-                  >
-                    {busyId === r.id ? "Removing..." : "Remove"}
-                  </button>
+
+                  <div className="flex items-center gap-2">
+                    {/* Locations carry a minimum shelf life on arrival; categories
+                        are just labels and have no equivalent rule, so the field
+                        is shown for one list and not the other. */}
+                    {kind === "location" && (
+                      <label className="flex items-center gap-1.5 text-[11px] text-cocoa-400">
+                        <span>min shelf life</span>
+                        <input
+                          className="input w-20 !py-1 text-center text-xs"
+                          type="number"
+                          min="0"
+                          step="1"
+                          defaultValue={r.min_shelf_life_days ?? ""}
+                          placeholder="none"
+                          disabled={busyId === r.id}
+                          onBlur={(e) => {
+                            const next = e.target.value.trim();
+                            const current =
+                              r.min_shelf_life_days == null
+                                ? ""
+                                : String(r.min_shelf_life_days);
+                            if (next === current) return;
+                            saveShelfLife(r, next);
+                          }}
+                          aria-label={`Minimum shelf life in days for ${r.name}`}
+                        />
+                        <span>days</span>
+                      </label>
+                    )}
+
+                    <button
+                      className="btn-danger"
+                      onClick={() => removeRef(kind, r)}
+                      disabled={busyId === r.id}
+                    >
+                      {busyId === r.id ? "Removing..." : "Remove"}
+                    </button>
+                  </div>
                 </li>
               ))}
             </ul>

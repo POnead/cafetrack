@@ -11,7 +11,7 @@ import {
   DataField,
 } from "@/components/ui";
 import { ScanInput } from "@/components/ScanInput";
-import { fmtQty, fmtDate } from "@/lib/format";
+import { fmtQty, fmtDate, daysUntil } from "@/lib/format";
 import { expiryStatus } from "@/lib/status";
 
 type Mode = "checkout" | "restock" | "waste";
@@ -25,15 +25,34 @@ type CartLine = {
   /** Mirrors items.low_stock_threshold, kept so warnings work after a commit. */
   threshold: number;
   expiry: string | null;
+  /**
+   * Expiry being entered for this restock, as YYYY-MM-DD. Empty means "leave
+   * the item's existing date alone". Only ever sent for a restock — a checkout
+   * or a waste log has no new batch to date, and must not overwrite one.
+   */
+  newExpiry: string;
+  /**
+   * Restock counted in boxes rather than in the item's own unit. null means the
+   * line is counted normally. The conversion to the item's unit happens in the
+   * database, which owns `units_per_box` — a browser-side guess would put the
+   * wrong figure into stock.
+   */
+  byBox: boolean;
+  /** The item's packaging factor, shown so the conversion is not a surprise. */
+  unitsPerBox: number | null;
+  /** Minimum shelf life the item's location demands, in days, or null. */
+  minShelfLife: number | null;
 };
 
 type Looked = {
   sku: string;
   name: string;
   unit: string;
+  units_per_box: number | null;
   quantity: number;
   low_stock_threshold: number;
   expiration_date: string | null;
+  location: { id: string; name: string; min_shelf_life_days: number | null } | null;
 };
 
 /** An inline, dismissible message about the item that was just scanned. */
@@ -111,6 +130,15 @@ export default function CheckoutPage() {
     const onHand = Number(item.quantity);
     const threshold = Number(item.low_stock_threshold) || 0;
     const expiry = item.expiration_date ?? null;
+    // Counted by the box only when the item actually has a packaging factor.
+    // Offering the option for an item without one would let someone enter a box
+    // count that the database then rejects.
+    const unitsPerBox =
+      item.units_per_box == null ? null : Number(item.units_per_box);
+    const minShelfLife =
+      item.location?.min_shelf_life_days == null
+        ? null
+        : Number(item.location.min_shelf_life_days);
 
     setCart((prev) => {
       const existing = prev.find((l) => l.sku === item.sku);
@@ -126,6 +154,10 @@ export default function CheckoutPage() {
             onHand,
             threshold,
             expiry,
+            newExpiry: "",
+            byBox: false,
+            unitsPerBox,
+            minShelfLife,
           },
         ];
       }
@@ -140,6 +172,12 @@ export default function CheckoutPage() {
               onHand,
               threshold,
               expiry,
+              // Re-scanning must not wipe a date the operator already typed, or
+              // flip the box toggle they chose.
+              newExpiry: l.newExpiry,
+              byBox: l.byBox && unitsPerBox !== null,
+              unitsPerBox,
+              minShelfLife,
               qty: deducting ? Math.min(next, onHand) : next,
             }
           : l
@@ -158,6 +196,40 @@ export default function CheckoutPage() {
         return { ...l, qty: q };
       })
     );
+  }
+
+  function setNewExpiry(sku: string, value: string) {
+    setCart((prev) => prev.map((l) => (l.sku === sku ? { ...l, newExpiry: value } : l)));
+  }
+
+  function setByBox(sku: string, byBox: boolean) {
+    setCart((prev) =>
+      prev.map((l) => {
+        if (l.sku !== sku) return l;
+        // Switching back to loose counting must not leave a stale box figure
+        // behind, and switching on starts the count again at 1 rather than
+        // inheriting whatever the loose quantity happened to be.
+        return { ...l, byBox, qty: byBox ? 1 : l.qty };
+      })
+    );
+  }
+
+  /**
+   * Catch an impossible date (2026-02-30) in the browser rather than paying a
+   * round-trip to be told. The API re-checks this — a client is not a trust
+   * boundary — but the native date input makes a bad value unlikely in the
+   * first place, and an inline message beats a modal full-screen error.
+   */
+  function expiryProblem(line: CartLine): string | null {
+    if (!line.newExpiry) return null;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(line.newExpiry)) {
+      return "Use the date picker — YYYY-MM-DD.";
+    }
+    const d = new Date(`${line.newExpiry}T00:00:00Z`);
+    if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== line.newExpiry) {
+      return `${line.newExpiry} is not a real date.`;
+    }
+    return null;
   }
 
   function removeLine(sku: string) {
@@ -259,6 +331,17 @@ export default function CheckoutPage() {
       return;
     }
 
+    // A restock with an impossible date is refused here, before the request, so
+    // the operator is told which line is wrong instead of losing the whole cart
+    // to a single rejected date.
+    const badExpiry = lines.find((l) => expiryProblem(l));
+    if (badExpiry) {
+      setSubmitError(
+        `${badExpiry.name}: ${expiryProblem(badExpiry)} The cart was not submitted.`
+      );
+      return;
+    }
+
     setSubmitting(true);
     setSubmitError(null);
 
@@ -270,7 +353,17 @@ export default function CheckoutPage() {
           type: mode,
           password,
           note: note.trim() || null,
-          items: lines.map((l) => ({ sku: l.sku, qty: l.qty })),
+          items: lines.map((l) => ({
+            sku: l.sku,
+            // A by-box line sends `boxes` and no `qty`: the database converts
+            // using the item's own units_per_box, so the browser never has to
+            // agree with the server about the factor.
+            qty: l.byBox ? 0 : l.qty,
+            boxes: l.byBox ? l.qty : null,
+            // Sent for a restock only, and only when a date was actually typed —
+            // an absent date tells the database to keep the item's existing one.
+            exp: mode === "restock" && l.newExpiry ? l.newExpiry : null,
+          })),
         }),
       });
 
@@ -354,6 +447,129 @@ export default function CheckoutPage() {
     Math.max(0, deducting ? line.onHand - line.qty : line.onHand + line.qty);
 
   const modeLabel = MODES.find((m) => m.key === mode)?.label ?? mode;
+
+  /**
+   * The per-line restock controls: the "counted by the box" checkbox and the new
+   * batch's expiry date. Both are restock-only, because both describe stock
+   * arriving rather than stock leaving.
+   *
+   * `variant` tells the two copies apart. The cart is rendered twice — a
+   * stacked card for phones and a table row for desktop — and only a CSS
+   * breakpoint hides one of them, so both are always in the DOM and the same
+   * SKU legitimately appears twice. The ids therefore carry the variant.
+   *
+   * Without it the id is duplicated, and a duplicated id is not merely untidy:
+   * a <label for> activates the *first* element with that id, which is always
+   * the copy hidden by the current breakpoint. So on a desktop, clicking
+   * "New expiry date" did nothing at all, because the date picker it pointed
+   * at was display:none in the phone card. The same ambiguity hit anything
+   * resolving the field by id, including browser tests.
+   */
+  function restockFields(line: CartLine, variant: "card" | "row") {
+    if (mode !== "restock") return null;
+    const problem = expiryProblem(line);
+    const boxed = line.byBox && line.unitsPerBox != null;
+    const converted = boxed ? line.qty * Number(line.unitsPerBox!) : null;
+
+    // Unique per SKU *and* per copy, so the label, the input and the error
+    // message it describes always refer to each other.
+    const expId = `exp-${line.sku}-${variant}`;
+    const errId = `exp-err-${line.sku}-${variant}`;
+
+    return (
+      <>
+        {/* Offered only for an item that actually has a packaging factor —
+            otherwise a box count could not be converted and the request would
+            be refused. */}
+        {line.unitsPerBox != null && (
+          <div className="min-w-0">
+            <label className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-wide text-cocoa-400">
+              <input
+                type="checkbox"
+                className="h-4 w-4 accent-cocoa-700"
+                checked={line.byBox}
+                onChange={(e) => setByBox(line.sku, e.target.checked)}
+              />
+              Count by the box
+            </label>
+            {boxed && (
+              <p className="mt-1 text-[11px] text-cocoa-400">
+                {line.qty} box{line.qty === 1 ? "" : "es"} × {line.unitsPerBox}{" "}
+                {line.unit} ={" "}
+                <span className="font-semibold text-cocoa-700">
+                  {converted} {line.unit}
+                </span>{" "}
+                added
+              </p>
+            )}
+          </div>
+        )}
+
+        <div className="min-w-0">
+          <label
+            htmlFor={expId}
+            className="mb-1 block text-[11px] font-bold uppercase tracking-wide text-cocoa-400"
+          >
+            New expiry date
+          </label>
+          <input
+            id={expId}
+            type="date"
+            className="input w-full"
+            value={line.newExpiry}
+            onChange={(e) => setNewExpiry(line.sku, e.target.value)}
+            aria-invalid={problem ? true : undefined}
+            aria-describedby={problem ? errId : undefined}
+          />
+          {problem ? (
+            <p id={errId} className="mt-1 text-[11px] font-semibold text-red-600">
+              {problem}
+            </p>
+          ) : (
+            <ShelfLifeHint line={line} />
+          )}
+        </div>
+      </>
+    );
+  }
+
+  /**
+   * Tells the operator what the date will have to satisfy before they commit,
+   * rather than only refusing afterwards. A line with no date shows what it
+   * currently is, so a blank box is never read as "clear it".
+   */
+  function ShelfLifeHint({ line }: { line: CartLine }) {
+    if (line.minShelfLife) {
+      if (!line.newExpiry) {
+        return (
+          <p className="mt-1 text-[11px] text-cocoa-400">
+            This location needs at least {line.minShelfLife} day(s) of shelf life on
+            arrival.
+          </p>
+        );
+      }
+      const days = daysUntil(line.newExpiry);
+      const ok = days !== null && days >= (line.minShelfLife ?? 0);
+      return (
+        <p
+          className={`mt-1 text-[11px] font-semibold ${ok ? "text-cocoa-400" : "text-red-600"}`}
+        >
+          {ok
+            ? `Meets the ${line.minShelfLife}-day shelf life minimum.`
+            : `Too close to expiry — this location needs ${line.minShelfLife} day(s) left, so the restock will be refused.`}
+        </p>
+      );
+    }
+
+    if (!line.newExpiry && line.expiry) {
+      return (
+        <p className="mt-1 text-[11px] text-cocoa-400">
+          Blank keeps the current date, {fmtDate(line.expiry)}.
+        </p>
+      );
+    }
+    return null;
+  }
 
   return (
     <div className="space-y-5">
@@ -574,6 +790,8 @@ export default function CheckoutPage() {
                     </span>
                   </DataField>
 
+                  {restockFields(l, "card")}
+
                   <button
                     className="btn-danger min-h-[40px] w-full !py-1.5 text-sm"
                     onClick={() => removeLine(l.sku)}
@@ -592,6 +810,7 @@ export default function CheckoutPage() {
                   <th className="th">SKU</th>
                   <th className="th text-right">On hand</th>
                   <th className="th text-center">Quantity</th>
+                  {mode === "restock" && <th className="th">Received</th>}
                   <th className="th text-right">Projected</th>
                   <th className="th text-right">Remove</th>
                 </tr>
@@ -630,6 +849,9 @@ export default function CheckoutPage() {
                         </button>
                       </div>
                     </td>
+                    {mode === "restock" && (
+                      <td className="td min-w-[12rem]">{restockFields(l, "row")}</td>
+                    )}
                     <td className="td text-right font-semibold tabular-nums text-cocoa-900">
                       {fmtQty(projected(l), l.unit)}
                     </td>

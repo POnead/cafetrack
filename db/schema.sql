@@ -47,8 +47,17 @@ create table if not exists categories (
 
 create table if not exists locations (
   id   uuid primary key default gen_random_uuid(),
-  name text unique not null
+  name text unique not null,
+  -- Minimum shelf life a batch must still have when it is received, in days.
+  -- 7 means "refuse a delivery expiring in under a week"; null (the default)
+  -- means this location has no such rule, which is right for dry storage where
+  -- shelf life is not the deciding factor. Set per location rather than per
+  -- item so the rule is a property of the storage, not of the stock.
+  min_shelf_life_days integer check (min_shelf_life_days is null or min_shelf_life_days >= 0)
 );
+
+-- Migration for locations created before the minimum shelf life rule existed.
+alter table locations add column if not exists min_shelf_life_days integer;
 
 -- ---------- items (ingredients) ----------
 create table if not exists items (
@@ -59,6 +68,11 @@ create table if not exists items (
   location_id        uuid references locations(id) on delete set null,
   physical_form      text not null default 'solid' check (physical_form in ('liquid','powder','solid')),
   unit               text not null default 'pcs',
+  -- How many `unit`s arrive in one box of this item, when it is supplied in
+  -- boxes rather than loose. 12 means a delivery of 3 boxes is 36 pcs. null
+  -- (the default) means the item is counted by its own unit only, which is the
+  -- right answer for anything not actually supplied in cartons.
+  units_per_box      numeric(12,3) check (units_per_box is null or units_per_box > 0),
   quantity           numeric(12,3) not null default 0 check (quantity >= 0),
   low_stock_threshold numeric(12,3) not null default 5,
   expiration_date    date,
@@ -66,6 +80,9 @@ create table if not exists items (
   created_at         timestamptz not null default now(),
   updated_at         timestamptz not null default now()
 );
+
+-- Migration for items created before per-box packaging existed.
+alter table items add column if not exists units_per_box numeric(12,3);
 
 -- ---------- transactions ----------
 create table if not exists transactions (
@@ -214,7 +231,7 @@ create or replace function process_transaction(
   p_type       text,
   p_actor_id   uuid,
   p_actor_name text,
-  p_items      jsonb,   -- [{"sku":"CT-COF-1234","qty":2}, ...]
+  p_items      jsonb,   -- [{"sku":"CT-COF-1234","qty":2,"exp":"2026-04-01"}, ...]
   p_note       text default null
 ) returns jsonb
 language plpgsql
@@ -225,6 +242,9 @@ declare
   v_req     record;
   v_row     items;
   v_new_qty numeric(12,3);
+  v_exp     date;
+  v_min_days integer;
+  v_loc     text;
   v_results jsonb := '[]'::jsonb;
 begin
   if p_type not in ('checkout','restock','waste') then
@@ -240,16 +260,81 @@ begin
   returning id into v_txn_id;
 
   for v_req in
-    select (e->>'sku') as sku, (e->>'qty')::numeric as qty
+    select (e->>'sku') as sku, (e->>'qty')::numeric as qty,
+           nullif(btrim(e->>'exp'), '') as exp_text,
+           (e->>'boxes')::numeric as boxes
     from jsonb_array_elements(p_items) e
   loop
-    if v_req.qty is null or v_req.qty <= 0 then
-      raise exception 'invalid quantity for %', v_req.sku;
+    -- The quantity is checked at the END of this block, not here. A line that
+    -- gives `boxes` instead of `qty` arrives with no quantity at all, so a check
+    -- up front would reject every box restock as "invalid quantity" before the
+    -- conversion had a chance to fill it in.
+
+    -- Postgres rolls an impossible day like 2026-02-30 over into March rather
+    -- than rejecting it, so the expiry alerts would then be driven by a date
+    -- nobody entered. Cast to date and re-format to catch that, and reject
+    -- anything that is not YYYY-MM-DD outright.
+    v_exp := null;
+    if v_req.exp_text is not null then
+      if v_req.exp_text !~ '^\d{4}-\d{2}-\d{2}$' then
+        raise exception 'invalid expiry date for %', v_req.sku;
+      end if;
+      begin
+        v_exp := v_req.exp_text::date;
+      exception when others then
+        raise exception 'invalid expiry date for %', v_req.sku;
+      end;
+      if to_char(v_exp, 'YYYY-MM-DD') <> v_req.exp_text then
+        raise exception 'invalid expiry date for %', v_req.sku;
+      end if;
     end if;
 
     select * into v_row from items where sku = v_req.sku for update;
     if not found then
       raise exception 'item not found: %', v_req.sku;
+    end if;
+
+    -- Per-box packaging. A restock may be counted in boxes instead of the
+    -- item's own unit, which is what a supplier invoice actually says. The
+    -- conversion happens here rather than in the UI because the factor lives on
+    -- the item, and a client that guessed it would put the wrong number in
+    -- stock. Stock is always ultimately stored in the item's own unit.
+    if v_req.boxes is not null then
+      if p_type <> 'restock' then
+        raise exception 'boxes can only be given for a restock of %', v_req.sku;
+      end if;
+      if v_req.boxes <= 0 then
+        raise exception 'invalid box count for %', v_req.sku;
+      end if;
+      if v_row.units_per_box is null then
+        raise exception '% is not stocked by the box', v_row.name;
+      end if;
+      v_req.qty := v_req.boxes * v_row.units_per_box;
+    end if;
+
+    -- Now that any box count has been converted, there must be a real quantity
+    -- to move. This is the only place it is checked, so a line that gave neither
+    -- a quantity nor a box count is refused here rather than becoming a
+    -- zero-value movement.
+    if v_req.qty is null or v_req.qty <= 0 then
+      raise exception 'invalid quantity for %', v_req.sku;
+    end if;
+
+    -- Minimum shelf life on receipt. A location can refuse stock that arrives
+    -- already too close to its date — the point of a freezer is that things keep
+    -- for months, so a delivery with days left is not worth taking. Only a
+    -- restock with a date can be judged; a line with no date is not this
+    -- function's business, and a checkout or waste log never has new stock.
+    if p_type = 'restock' and v_exp is not null then
+      select l.min_shelf_life_days, l.name into v_min_days, v_loc
+        from locations l where l.id = v_row.location_id;
+
+      if v_min_days is not null
+         and v_exp < current_date + (v_min_days || ' days')::interval then
+        raise exception
+          '% expires on % — % needs at least % more day(s) of shelf life on arrival',
+          v_row.name, v_exp, coalesce(v_loc, 'that location'), v_min_days;
+      end if;
     end if;
 
     if p_type in ('checkout','waste') then
@@ -262,10 +347,19 @@ begin
       v_new_qty := v_row.quantity + v_req.qty;
     end if;
 
+    -- A restock may carry the new batch's expiry date. checkout and waste
+    -- deliberately do not: receiving stock is the only moment the date is
+    -- known, and leaving it alone everywhere else keeps a stale date from
+    -- being silently extended or cleared. A line with no date keeps whatever
+    -- the item already had, rather than nulling it.
     update items
        set quantity = v_new_qty,
            version = version + 1,
-           updated_at = now()
+           updated_at = now(),
+           expiration_date = case
+             when p_type = 'restock' and v_exp is not null then v_exp
+             else expiration_date
+           end
      where id = v_row.id and version = v_row.version;
 
     if not found then
@@ -282,7 +376,20 @@ begin
       'name', v_row.name,
       'unit', v_row.unit,
       'before', v_row.quantity,
-      'after', v_new_qty
+      'after', v_new_qty,
+      -- What was actually added, in the item's own unit. When the line was
+      -- given in boxes this is the converted figure, so the caller can show
+      -- "3 boxes = 36 pcs" rather than silently restocking the wrong amount.
+      'added', v_new_qty - v_row.quantity,
+      'boxes', case when v_req.boxes is not null then v_req.boxes end,
+      'units_per_box', v_row.units_per_box,
+      -- The date as it now stands, so a caller can see whether a supplied
+      -- expiry was applied or the previous one kept.
+      'expiration', case
+        when p_type = 'restock' and v_exp is not null
+          then to_char(v_exp, 'YYYY-MM-DD')
+        else to_char(v_row.expiration_date, 'YYYY-MM-DD')
+      end
     );
   end loop;
 

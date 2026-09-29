@@ -2,6 +2,7 @@ import { db } from "@/lib/supabase";
 import { handler, ok, fail, readBody } from "@/lib/api";
 import { requireUser, verifyPassword } from "@/lib/auth";
 import { audit } from "@/lib/audit";
+import { FieldError, parseExpiryDate, parseBoxCount } from "@/lib/item-validation";
 
 export const runtime = "nodejs";
 
@@ -76,15 +77,41 @@ export const POST = handler(async (req: Request) => {
   if (!TYPES.includes(type)) return fail("Invalid transaction type");
 
   const lines: unknown[] = Array.isArray(body.items) ? body.items : [];
-  const items = lines
-    .map((l) => {
-      const line = (l ?? {}) as { sku?: unknown; qty?: unknown };
-      return { sku: String(line.sku ?? "").trim(), qty: Number(line.qty) };
-    })
-    .filter(
-      (l: { sku: string; qty: number }) =>
-        l.sku.length > 0 && Number.isFinite(l.qty) && l.qty > 0
-    );
+
+  // A malformed date is a bad request, not a server fault, so it is answered
+  // as a 400 here — the same rule and the same wording that POST /api/items
+  // applies, rather than letting Postgres throw on it as a 409. A line with no
+  // date is left alone: the item keeps the expiry it already had.
+  let items: { sku: string; qty: number; exp: string | null; boxes: number | null }[];
+  try {
+    items = lines
+      .map((l) => {
+        const line = (l ?? {}) as {
+          sku?: unknown;
+          qty?: unknown;
+          exp?: unknown;
+          boxes?: unknown;
+        };
+        return {
+          sku: String(line.sku ?? "").trim(),
+          qty: Number(line.qty),
+          exp: parseExpiryDate(line.exp),
+          // `boxes` is an alternative to `qty` for a restock, not an addition to
+          // it — the database converts it using the item's own units_per_box, so
+          // the two are never both used. A blank or absent value means "not by
+          // the box" and is sent as null rather than 0, which would be rejected.
+          boxes: parseBoxCount(line.boxes),
+        };
+      })
+      .filter(
+        (l: { sku: string; qty: number; boxes: number | null }) =>
+          l.sku.length > 0 &&
+          ((Number.isFinite(l.qty) && l.qty > 0) || l.boxes !== null)
+      );
+  } catch (err) {
+    if (err instanceof FieldError) return fail(err.message, 400);
+    throw err;
+  }
 
   if (items.length === 0) return fail("Add at least one item before committing");
 

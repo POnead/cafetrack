@@ -147,7 +147,12 @@ try {
   check("a name field is present", await nameField.isVisible());
   await nameField.fill(itemName);
 
-  const qtyField = admin.locator('input[type="number"]').first();
+  // Targeted by label rather than by `input[type="number"]` position: the form
+  // has several number inputs, and "the first one" silently changed meaning when
+  // the units-per-box field was added above it. A positional selector here made
+  // the suite fill a quantity into the wrong field and then fail three steps
+  // later with an empty cart, which is a miserable thing to debug.
+  const qtyField = admin.getByLabel(/starting quantity|quantity on hand/i).first();
   check("a quantity field is present", await qtyField.isVisible());
   await qtyField.fill("10");
 
@@ -270,13 +275,33 @@ try {
     check("staff sees no Manage items button", (await staff.getByRole("button", { name: /manage items/i }).count()) === 0);
     check("staff can still read the alert page", (await staff.getByText(/alert/i).count()) > 0);
 
-    const alertLink = staff.getByRole("link", { name: /view|open/i }).first();
+    // Scoped to a *visible* link under /alerts/. The page renders the list twice
+    // — a mobile card and a desktop table — and both carry a View link, so a
+    // role-based `.first()` can land on the copy that is display:none. It also
+    // asserts the navigation actually happened, because a click that silently
+    // does nothing used to fail several lines later for the wrong reason.
+    const alertLink = staff.locator('a[href^="/alerts/"]:visible').first();
     if ((await alertLink.count()) > 0) {
       await alertLink.click();
-      await staff.waitForTimeout(1500);
+      const navigated = await staff
+        .waitForURL(/\/alerts\/[0-9a-f-]{36}/i, { timeout: 20000 })
+        .then(() => true)
+        .catch(() => false);
+      check("a View link opens the alert detail page", navigated, staff.url());
+
+      // Wait for the page's own loading state to clear rather than sleeping a
+      // fixed interval. The detail page fetches client-side, and on a cold dev
+      // server that first compile can outlast any fixed wait — which showed up
+      // as a false failure with the page still reading "Loading…".
+      await staff
+        .getByText(/loading/i)
+        .first()
+        .waitFor({ state: "hidden", timeout: 20000 })
+        .catch(() => {});
+      await staff.waitForLoadState("networkidle").catch(() => {});
       await staff.screenshot({ path: `${SHOTS}/13-alert-detail-staff.png`, fullPage: true });
       check("staff sees no Resolve alert button", (await staff.getByRole("button", { name: /resolve alert/i }).count()) === 0);
-      check("staff is told resolution is admin-only", (await staff.getByText(/only an administrator/i).count()) > 0);
+      check("staff is told resolution is admin-only", (await staff.getByText(/only an administrator/i).count()) > 0, staff.url());
     }
 
     const guard = await staff.evaluate(async (base) => {

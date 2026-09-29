@@ -24,8 +24,9 @@ export const GET = handler(async (req: Request) => {
   const { data, error } = await db()
     .from("items")
     .select(
-      `id, sku, name, unit, quantity, low_stock_threshold, expiration_date, physical_form,
-       category:categories(id, name), location:locations(id, name)`
+      `id, sku, name, unit, units_per_box, quantity, low_stock_threshold,
+       expiration_date, physical_form,
+       category:categories(id, name), location:locations(id, name, min_shelf_life_days)`
     )
     .eq("sku", sku)
     .maybeSingle();

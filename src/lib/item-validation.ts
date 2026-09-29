@@ -68,6 +68,65 @@ export function parseThreshold(raw: unknown, label: string): number {
 }
 
 /**
+ * A count of boxes for a restock line, or null for "not counted by the box".
+ *
+ * Distinct from requireQuantity on purpose: a blank is the normal case (the item
+ * is counted loose) and must stay null, where requireQuantity treats a blank as
+ * missing and rejects it. A negative or zero count is a mistake worth reporting
+ * rather than silently ignoring, so it is a 400 here instead of being dropped.
+ */
+export function parseBoxCount(raw: unknown): number | null {
+  if (raw === null || raw === undefined || raw === "") return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) {
+    throw new FieldError("Box count must be a number");
+  }
+  if (n <= 0) {
+    throw new FieldError("Box count must be greater than zero");
+  }
+  return n;
+}
+
+/**
+ * `units_per_box` on an item, or null when the item is not supplied in boxes.
+ *
+ * A blank clears the field, which is how an item stops being counted by the
+ * box. A non-positive value is refused rather than stored: it is a `check`
+ * constraint, so letting it through would turn a bad number into a 500 from
+ * Postgres when the insert is written.
+ */
+export function parseUnitsPerBox(raw: unknown): number | null {
+  if (raw === null || raw === undefined || raw === "") return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) {
+    throw new FieldError("Units per box must be a number");
+  }
+  if (n <= 0) {
+    throw new FieldError("Units per box must be greater than zero");
+  }
+  return n;
+}
+
+/**
+ * A location's minimum shelf life on arrival, in days, or null for no rule.
+ *
+ * Zero is meaningful and allowed — it means "no minimum", which is the same
+ * effect as no rule, and an admin setting a location back to zero should not
+ * be told it is invalid. A negative value is nonsense and is refused.
+ */
+export function parseMinShelfLifeDays(raw: unknown): number | null {
+  if (raw === null || raw === undefined || raw === "") return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) {
+    throw new FieldError("Minimum shelf life must be a number of days");
+  }
+  if (n < 0) {
+    throw new FieldError("Minimum shelf life cannot be negative");
+  }
+  return Math.round(n);
+}
+
+/**
  * A category_id / location_id that is present must be well-formed.
  *
  * The columns *do* have foreign keys (schema.sql), so Postgres already refuses

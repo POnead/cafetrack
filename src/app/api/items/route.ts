@@ -9,6 +9,7 @@ import {
   parseThreshold,
   parseExpiryDate,
   parsePhysicalForm,
+  parseUnitsPerBox,
   assertRefExists,
 } from "@/lib/item-validation";
 
@@ -26,10 +27,10 @@ export const GET = handler(async (req: Request) => {
   let query = db()
     .from("items")
     .select(
-      `id, sku, name, physical_form, unit, quantity, low_stock_threshold,
-       expiration_date, version, created_at, updated_at,
+      `id, sku, name, physical_form, unit, units_per_box, quantity,
+       low_stock_threshold, expiration_date, version, created_at, updated_at,
        category:categories(id, name),
-       location:locations(id, name)`
+       location:locations(id, name, min_shelf_life_days)`
     )
     .order("name", { ascending: true });
 
@@ -72,11 +73,13 @@ export const POST = handler(async (req: Request) => {
   let lowStock: number;
   let expiry: string | null;
   let physicalForm: string;
+  let unitsPerBox: number | null;
   try {
     quantity = requireQuantity(body.quantity, "Quantity");
     lowStock = parseThreshold(body.low_stock_threshold ?? 5, "Low-stock threshold");
     expiry = parseExpiryDate(body.expiration_date);
     physicalForm = parsePhysicalForm(body.physical_form);
+    unitsPerBox = parseUnitsPerBox(body.units_per_box);
   } catch (e: any) {
     if (e instanceof FieldError) return fail(e.message);
     throw e;
@@ -147,6 +150,7 @@ export const POST = handler(async (req: Request) => {
       location_id: locationId,
       physical_form: physicalForm,
       unit: body.unit || "pcs",
+      units_per_box: unitsPerBox,
       quantity,
       low_stock_threshold: lowStock,
       expiration_date: expiry,

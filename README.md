@@ -46,11 +46,28 @@ fallback when a label is damaged.
   your password. Waste has its own mode, so spoilage is never mixed into a
   normal checkout. While you scan you are told when an item is at or below its
   low-stock threshold, out of stock, or expiring, and again if the movement you
-  just recorded pushed something under its threshold.
+  just recorded pushed something under its threshold. **A restock can carry the
+  new batch's expiry date**, one date per cart line, because receiving stock is
+  the only moment that date is actually known. Leaving the field blank keeps
+  the item's existing date rather than clearing it, and only a restock ever sets
+  one — a checkout or a waste log cannot move an expiry, so discarding a spoiled
+  item never extends its life.
+- **Per-box packaging** — an item can record how many of its unit arrive in one
+  box. A restock can then be entered as a box count, and the conversion to the
+  item's own unit is done by the database, which owns the factor, so the browser
+  can never disagree with the server about it. 3 boxes of 12 lands as 36. A box
+  count is only accepted for a restock, and only for an item that actually has a
+  packaging factor.
+- **Minimum shelf life on arrival** — a storage location can refuse a delivery
+  that arrives too close to its date; a freezer set to 30 days will reject a
+  batch with 5 days left, naming the item, the date and the rule. It is stored
+  per location rather than hardcoded to "Freezer", so a chiller can carry the
+  same rule and dry storage can carry none. A line with no date is not its
+  business, and clearing the rule lets the same delivery through.
 - **Inventory** — items with SKU, category, location, physical form, unit,
-  quantity, low-stock threshold and expiry date. Search, filter by category, and
-  sort by clicking any column header. Barcode labels for the whole filtered
-  list or one at a time.
+  units per box, quantity, low-stock threshold and expiry date. Search, filter by
+  category, and sort by clicking any column header. Barcode labels for the whole
+  filtered list or one at a time.
 - **Alerts** — low stock, out of stock, expired and expiring soon, raised by a
   database function. Every alert has a detail page with the item, its current
   stock and its full alert history. An open alert **escalates in place** when
@@ -61,7 +78,8 @@ fallback when a label is damaged.
   re-open, or force a recompute** — the controls are hidden for staff and the
   API refuses them with `403`.
 - **Settings** — admins set the expiry-warning window, session timeout and
-  business name, and add or remove item categories and storage locations.
+  business name, and add or remove item categories and storage locations. Each
+  location also carries its minimum shelf life on arrival, editable in place.
   Changes take effect immediately, not after the settings cache expires.
 - **Staff accounts** — admins create staff and admin accounts, print a staff
   barcode, reset passwords, and deactivate an account **with a reason**. The
@@ -207,29 +225,70 @@ overwrites your change:
 
 ### Tests
 
-There is no unit-test runner. Two scripts drive a running server over HTTP, so
-start `npm run dev` first:
+There is no unit-test runner. The scripts drive a running server, so start
+`npm run dev` first:
 
 ```bash
 npm run test:smoke    # full API walk-through; makes and cleans up its own data
 npm run test:edge     # hostile and edge-case inputs
 npm run test:pages    # every page renders, for an admin and a staff session
 npm run test:journeys # six end-to-end user stories, asserted on their outcomes
-npm run test:ui       # drives the real UI in Chrome; writes ui-screenshots/
+npm run test:ui       # drives part of the real UI in Chrome; writes ui-screenshots/
+npm run test:tour     # drives the whole site in Chrome, as a café actually works
 npm run perf          # measures the spec's performance targets
+npm run test:all      # all seven in order, stopping at the first failure
 ```
 
 `test:smoke` currently reports **68 passed, 0 failed**. `test:edge` reports
 **83 passed, 0 failed**, `test:pages` **17 passed, 0 failed**,
-`test:journeys` **73 passed, 0 failed**, and `test:ui` **35 passed, 0 failed**.
+`test:journeys` **117 passed, 0 failed**, `test:ui` **36 passed, 0 failed**,
+and `test:tour` **145 passed, 0 failed**.
 
-`test:ui` is the only one that opens a browser. It uses `playwright-core`
-against the Chrome already installed on the machine, so nothing is downloaded,
-and it is the only way to check what a person actually experiences: that the
-scan field takes focus on its own (a USB scanner types and presses Enter with no
-click), that a button is reachable and does what its label says, that staff
-genuinely do not see admin controls, and that no page throws JavaScript. It also
-writes screenshots to `ui-screenshots/`, which is gitignored.
+`test:smoke` and `test:ui` need a **freshly seeded** database — both assert
+against the seeded items. `npm run db:reset` clears and re-seeds;
+`npm run db:wipe` is not enough, because it removes the items and the users
+those suites count.
+
+### `test:tour` — the whole site, driven as a person
+
+`test:ui` and `test:tour` are the two that open a browser. Both use
+`playwright-core` against the Chrome already installed on the machine, so
+nothing is downloaded, and both write screenshots to `ui-screenshots/`, which
+is gitignored.
+
+`test:ui` covers the till and the role split. **`test:tour` is the broad one**:
+it walks the entire application in the order a café works — sign in, take
+movements at the till, receive a delivery, spoil something, chase the alerts
+that fall out of it, read the report, onboard a hire, close the day — and
+records every console error, uncaught exception and 5xx response on every page
+it visits.
+
+It is the suite that covers the behaviour a real user actually depends on and
+that a request-level test cannot see:
+
+- **Per-box packaging** — tick *Count by the box*, enter 3, and watch the
+  operator-facing conversion read *3 boxes × 12 pcs = 36 pcs added*; then
+  confirm the database really stored 36, not 3.
+- **A restock that carries the new batch's expiry date** — and the guarantee
+  that checkout and waste can never move one. Spoiling a batch must not
+  resurrect its date.
+- **Minimum shelf life on arrival** — a location set to 30 days refuses a
+  delivery with 3 days left. The tour drives the whole arc: the client-side
+  warning, the server's refusal naming the item, the date and the rule, that
+  stock did not move, that the confirmation dialog stays open so the cart
+  survives, and that a corrected date then goes through.
+- **Validation** — a blank quantity, a zero units-per-box and an in-use
+  reference delete are each refused in words a person can act on, rather than
+  saving a silent zero or returning a raw constraint violation.
+- **Every page** — including `/reports`, `/users`, `/settings` and `/audit`,
+  which no browser test previously opened — for an admin *and* a staff
+  session, plus sign-out, the CSV download, and the restock controls at 390px.
+
+It cleans up after itself: the two test ingredients and both reference rows
+are deleted, the hire is parked inactive, and the settings it read are written
+back, so it is safe to run twice in a row. It reads the database back only
+where the UI cannot show the value being asserted — stock levels and the
+stored expiry date.
 
 The page suite is the reason the alert pages carry a role check: it renders
 `/alerts` and `/alerts/[id]` under both an admin and a staff session, so a

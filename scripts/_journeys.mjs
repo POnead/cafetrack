@@ -83,6 +83,26 @@ async function stockOf(sku, cookie) {
   return r.status === 200 ? Number(r.data.item.quantity) : null;
 }
 
+/**
+ * Stored expiry date for one SKU, or null if it has none.
+ *
+ * Normalised to YYYY-MM-DD: a Postgres `date` comes back over JSON as a full
+ * ISO instant ("2026-10-29T00:00:00.000Z"), so comparing it to a plain day
+ * would fail on the format rather than on the value. Every page already deals
+ * with the instant form via lib/format; here the day is what is being asserted.
+ */
+async function expiryOf(sku, cookie) {
+  const r = await call(
+    "GET",
+    `/api/items/lookup?code=${encodeURIComponent(sku)}`,
+    undefined,
+    cookie
+  );
+  if (r.status !== 200) return null;
+  const raw = r.data.item.expiration_date ?? null;
+  return raw ? String(raw).slice(0, 10) : null;
+}
+
 (async () => {
   console.log(`CafeTrack user journeys against ${BASE}\n`);
   const A = await signInAdmin();
@@ -233,6 +253,330 @@ async function stockOf(sku, cookie) {
   r = await call("GET", "/api/alerts?status=resolved", undefined, A);
   const autoResolved = (r.data?.alerts ?? []).find((a) => a.item?.sku === oats.sku);
   check("the alert is recorded as resolved", Boolean(autoResolved), autoResolved ? `by ${autoResolved.resolved_by}` : "none");
+
+  /* ================================================================= */
+  section("JOURNEY 2b - receiving a batch, and dating it");
+  /* ================================================================= */
+  // Receiving stock is the only moment a new batch's expiry is actually known.
+  // Before this existed the restock path carried no date at all, so an item
+  // kept whatever date it had and the expiry alerts were driven by a date
+  // nobody had entered. These assert the behaviours that matter: a supplied
+  // date is applied, an impossible one is refused rather than rolled over, and
+  // a blank leaves the existing date be.
+  r = await call(
+    "POST",
+    "/api/items",
+    { name: `Journey Perishable ${hire}`, quantity: 4, low_stock_threshold: 1 },
+    A
+  );
+  check("admin added a perishable ingredient", r.status === 201, `${r.status} ${r.data?.error ?? ""}`);
+  const perishable = r.data?.item ?? {};
+
+  const firstBatch = day(30);
+  r = await call(
+    "POST",
+    "/api/transactions",
+    {
+      type: "restock",
+      password: "admin123",
+      items: [{ sku: perishable.sku, qty: 10, exp: firstBatch }],
+    },
+    A
+  );
+  check("restocked with an expiry date", r.status === 201, `${r.status} ${r.data?.error ?? ""}`);
+  check(
+    "the date came back on the result",
+    r.data?.result?.items?.[0]?.expiration === firstBatch,
+    r.data?.result?.items?.[0]?.expiration ?? "none"
+  );
+  check(
+    "the stored expiry is the date that was entered",
+    (await expiryOf(perishable.sku, A)) === firstBatch,
+    `stored ${await expiryOf(perishable.sku, A)}, entered ${firstBatch}`
+  );
+
+  // Postgres rolls 2026-02-30 over into March instead of rejecting it, which
+  // would put the expiry alerts on a date nobody typed. It has to be a 400.
+  r = await call(
+    "POST",
+    "/api/transactions",
+    {
+      type: "restock",
+      password: "admin123",
+      items: [{ sku: perishable.sku, qty: 1, exp: "2026-02-30" }],
+    },
+    A
+  );
+  check("an impossible date is refused with a 400", r.status === 400, `${r.status} ${r.data?.error ?? ""}`);
+  check("the message is about the date", /date/i.test(r.data?.error ?? ""), r.data?.error ?? "");
+  check(
+    "the refused restock changed nothing",
+    (await expiryOf(perishable.sku, A)) === firstBatch,
+    `still ${await expiryOf(perishable.sku, A)}`
+  );
+
+  r = await call(
+    "POST",
+    "/api/transactions",
+    {
+      type: "restock",
+      password: "admin123",
+      items: [{ sku: perishable.sku, qty: 1, exp: "not-a-date" }],
+    },
+    A
+  );
+  check("a malformed date is refused with a 400", r.status === 400, `${r.status} ${r.data?.error ?? ""}`);
+
+  // A blank means "keep the date this item already has" — not "clear it".
+  r = await call(
+    "POST",
+    "/api/transactions",
+    { type: "restock", password: "admin123", items: [{ sku: perishable.sku, qty: 2 }] },
+    A
+  );
+  check("restocked again with no date", r.status === 201, `${r.status} ${r.data?.error ?? ""}`);
+  check(
+    "a blank date keeps the existing expiry",
+    (await expiryOf(perishable.sku, A)) === firstBatch,
+    `now ${await expiryOf(perishable.sku, A)}`
+  );
+  check("and the stock still went up", (await stockOf(perishable.sku, A)) === 16, `now ${await stockOf(perishable.sku, A)}`);
+
+  // Only a restock may date stock. A checkout or a waste log has no new batch
+  // arriving, so it must never move the date — otherwise discarding a spoiled
+  // item would silently extend its life.
+  r = await call(
+    "POST",
+    "/api/transactions",
+    {
+      type: "checkout",
+      password: "admin123",
+      items: [{ sku: perishable.sku, qty: 1, exp: day(3650) }],
+    },
+    A
+  );
+  check("a checkout carrying a date is accepted", r.status === 201, `${r.status} ${r.data?.error ?? ""}`);
+  check(
+    "but the checkout did not change the expiry",
+    (await expiryOf(perishable.sku, A)) === firstBatch,
+    `now ${await expiryOf(perishable.sku, A)}`
+  );
+
+  // Two lines in one restock, each with its own date: the date is per line,
+  // never per transaction, or a multi-item delivery is recorded wrongly.
+  r = await call(
+    "POST",
+    "/api/items",
+    { name: `Journey Second Perishable ${hire}`, quantity: 2, low_stock_threshold: 1 },
+    A
+  );
+  const second = r.data?.item ?? {};
+  const aDay = day(40);
+  const bDay = day(50);
+  r = await call(
+    "POST",
+    "/api/transactions",
+    {
+      type: "restock",
+      password: "admin123",
+      items: [
+        { sku: perishable.sku, qty: 1, exp: aDay },
+        { sku: second.sku, qty: 1, exp: bDay },
+      ],
+    },
+    A
+  );
+  check("restocked two items with different dates", r.status === 201, `${r.status} ${r.data?.error ?? ""}`);
+  check("line one kept its own date", (await expiryOf(perishable.sku, A)) === aDay, `now ${await expiryOf(perishable.sku, A)}`);
+  check("line two kept its own date", (await expiryOf(second.sku, A)) === bDay, `now ${await expiryOf(second.sku, A)}`);
+
+  // A date inside the warning window must raise an expiry alert, which is the
+  // whole point of recording it: the date is only useful if something reads it.
+  const soon = day(2);
+  await call(
+    "POST",
+    "/api/transactions",
+    { type: "restock", password: "admin123", items: [{ sku: second.sku, qty: 1, exp: soon }] },
+    A
+  );
+  await call("POST", "/api/alerts", undefined, A);
+  r = await call("GET", "/api/alerts?status=open", undefined, A);
+  const expiryAlert = (r.data?.alerts ?? []).find(
+    (a) => a.item?.sku === second.sku && a.type === "near_expiry"
+  );
+  check("a soon-to-expire batch raises an expiry alert", Boolean(expiryAlert), expiryAlert?.message ?? "none");
+
+  r = await call("DELETE", `/api/items/${perishable.id}`, undefined, A);
+  check("removed the first perishable ingredient", r.status === 200, `${r.status} ${r.data?.error ?? ""}`);
+  r = await call("DELETE", `/api/items/${second.id}`, undefined, A);
+  check("removed the second perishable ingredient", r.status === 200, `${r.status} ${r.data?.error ?? ""}`);
+
+  /* ================================================================= */
+  section("JOURNEY 2c - a delivery in whole boxes, into a freezer");
+  /* ================================================================= */
+  // Suppliers ship cartons, and a freezer is the one place where shelf life on
+  // arrival is the deciding factor. Both rules are per-location or per-item
+  // data rather than hardcoded, so this journey sets them up explicitly and
+  // then takes them back off again, leaving the database as it was found.
+  r = await call("POST", "/api/refs/locations", { name: `Journey Freezer ${hire}` }, A);
+  check("admin created a freezer location", r.status === 201, `${r.status} ${r.data?.error ?? ""}`);
+  const freezer = r.data?.item ?? {};
+  check("a new location has no shelf-life rule by default", freezer.min_shelf_life_days == null, `${freezer.min_shelf_life_days}`);
+
+  r = await call(
+    "PATCH",
+    "/api/refs/locations",
+    { id: freezer.id, min_shelf_life_days: 30 },
+    A
+  );
+  check("admin set a 30-day minimum shelf life on it", r.status === 200, `${r.status} ${r.data?.error ?? ""}`);
+  check("the rule was stored", r.data?.item?.min_shelf_life_days === 30, `${r.data?.item?.min_shelf_life_days}`);
+
+  r = await call(
+    "PATCH",
+    "/api/refs/locations",
+    { id: freezer.id, min_shelf_life_days: -5 },
+    A
+  );
+  check("a negative minimum shelf life is refused with a 400", r.status === 400, `${r.status} ${r.data?.error ?? ""}`);
+
+  r = await call(
+    "POST",
+    "/api/items",
+    {
+      name: `Journey Frozen Peas ${hire}`,
+      quantity: 0,
+      low_stock_threshold: 10,
+      unit: "pcs",
+      units_per_box: 12,
+      location_id: freezer.id,
+    },
+    A
+  );
+  check("admin added a frozen item supplied by the box", r.status === 201, `${r.status} ${r.data?.error ?? ""}`);
+  const frozen = r.data?.item ?? {};
+  check("the packaging factor was saved", Number(frozen.units_per_box) === 12, `${frozen.units_per_box}`);
+
+  // The core of the box feature: 3 boxes of 12 must land as 36, not 3.
+  r = await call(
+    "POST",
+    "/api/transactions",
+    { type: "restock", password: "admin123", items: [{ sku: frozen.sku, boxes: 3 }] },
+    A
+  );
+  check("restocked 3 boxes", r.status === 201, `${r.status} ${r.data?.error ?? ""}`);
+  check("3 boxes of 12 became 36 in stock", (await stockOf(frozen.sku, A)) === 36, `now ${await stockOf(frozen.sku, A)}`);
+  check(
+    "the result reports the converted amount",
+    Number(r.data?.result?.items?.[0]?.added) === 36,
+    `added ${r.data?.result?.items?.[0]?.added}`
+  );
+
+  // A box count is only meaningful for stock arriving.
+  r = await call(
+    "POST",
+    "/api/transactions",
+    { type: "checkout", password: "admin123", items: [{ sku: frozen.sku, boxes: 1 }] },
+    A
+  );
+  check("a checkout cannot be counted by the box", r.status === 409, `${r.status} ${r.data?.error ?? ""}`);
+
+  r = await call(
+    "POST",
+    "/api/items",
+    { name: `Journey Loose Item ${hire}`, quantity: 5, low_stock_threshold: 1 },
+    A
+  );
+  const loose = r.data?.item ?? {};
+  r = await call(
+    "POST",
+    "/api/transactions",
+    { type: "restock", password: "admin123", items: [{ sku: loose.sku, boxes: 2 }] },
+    A
+  );
+  check("an item with no packaging factor refuses a box count", r.status === 409, `${r.status} ${r.data?.error ?? ""}`);
+
+  r = await call(
+    "POST",
+    "/api/transactions",
+    { type: "restock", password: "admin123", items: [{ sku: loose.sku, boxes: 0 }] },
+    A
+  );
+  check("a zero box count is refused with a 400", r.status === 400, `${r.status} ${r.data?.error ?? ""}`);
+
+  // The freezer rule: a batch with too little life left is not worth taking.
+  r = await call(
+    "POST",
+    "/api/transactions",
+    {
+      type: "restock",
+      password: "admin123",
+      items: [{ sku: frozen.sku, qty: 1, exp: day(5) }],
+    },
+    A
+  );
+  check("a batch 5 days from expiry is refused by a 30-day freezer", r.status === 409, `${r.status} ${r.data?.error ?? ""}`);
+  check("the refusal explains itself", /shelf life/i.test(r.data?.error ?? ""), r.data?.error ?? "");
+  check("the refused delivery changed no stock", (await stockOf(frozen.sku, A)) === 36, `now ${await stockOf(frozen.sku, A)}`);
+
+  r = await call(
+    "POST",
+    "/api/transactions",
+    {
+      type: "restock",
+      password: "admin123",
+      items: [{ sku: frozen.sku, qty: 1, exp: day(45) }],
+    },
+    A
+  );
+  check("a batch 45 days out is accepted", r.status === 201, `${r.status} ${r.data?.error ?? ""}`);
+  check("and the stock went up", (await stockOf(frozen.sku, A)) === 37, `now ${await stockOf(frozen.sku, A)}`);
+  check("and the date was recorded", (await expiryOf(frozen.sku, A)) === day(45), `now ${await expiryOf(frozen.sku, A)}`);
+
+  // The rule is on the location, so a line with no date is not its business —
+  // there is no date to judge, and refusing it would block ordinary restocking.
+  r = await call(
+    "POST",
+    "/api/transactions",
+    { type: "restock", password: "admin123", items: [{ sku: frozen.sku, qty: 1 }] },
+    A
+  );
+  check("a restock with no date is not blocked by the rule", r.status === 201, `${r.status} ${r.data?.error ?? ""}`);
+
+  // Turning the rule off must let the same short-dated delivery through.
+  await call("PATCH", "/api/refs/locations", { id: freezer.id, min_shelf_life_days: null }, A);
+  r = await call(
+    "POST",
+    "/api/transactions",
+    {
+      type: "restock",
+      password: "admin123",
+      items: [{ sku: frozen.sku, qty: 1, exp: day(5) }],
+    },
+    A
+  );
+  check("with the rule cleared the short batch is accepted", r.status === 201, `${r.status} ${r.data?.error ?? ""}`);
+
+  // And an item outside the freezer is unaffected by a freezer's rule.
+  await call("PATCH", "/api/refs/locations", { id: freezer.id, min_shelf_life_days: 30 }, A);
+  r = await call(
+    "POST",
+    "/api/transactions",
+    {
+      type: "restock",
+      password: "admin123",
+      items: [{ sku: loose.sku, qty: 1, exp: day(1) }],
+    },
+    A
+  );
+  check("an item not in the freezer is unaffected by its rule", r.status === 201, `${r.status} ${r.data?.error ?? ""}`);
+
+  r = await call("DELETE", `/api/items/${frozen.id}`, undefined, A);
+  check("removed the frozen item", r.status === 200, `${r.status} ${r.data?.error ?? ""}`);
+  r = await call("DELETE", `/api/items/${loose.id}`, undefined, A);
+  check("removed the loose item", r.status === 200, `${r.status} ${r.data?.error ?? ""}`);
+  r = await call("DELETE", `/api/refs/locations/${freezer.id}`, undefined, A);
+  check("removed the journey freezer", r.status === 200, `${r.status} ${r.data?.error ?? ""}`);
 
   /* ================================================================= */
   section("JOURNEY 3 - a full shift, then what the history says");

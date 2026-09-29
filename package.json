@@ -19,7 +19,9 @@
     "test:edge": "node scripts/_edge-tests.mjs",
     "test:pages": "node scripts/_pages.mjs",
     "test:journeys": "node scripts/_journeys.mjs",
-    "test:ui": "node scripts/_ui.mjs"
+    "test:ui": "node scripts/_ui.mjs",
+    "test:tour": "node scripts/_usertour.mjs",
+    "test:all": "npm run test:smoke && npm run test:edge && npm run test:pages && npm run test:journeys && npm run test:ui && npm run test:tour && npm run perf"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.8",

@@ -8,6 +8,7 @@ import {
   parseThreshold,
   parseExpiryDate,
   parsePhysicalForm,
+  parseUnitsPerBox,
   assertRefExists,
 } from "@/lib/item-validation";
 
@@ -131,6 +132,10 @@ export const PATCH = handler(
         patch.quantity = requireQuantity(body.quantity, "Quantity");
         // Quantity edits here are corrections, not movements — still versioned.
         patch.version = Number(before.version) + 1;
+      }
+      if (body.units_per_box !== undefined) {
+        // A blank clears it, which is how an item stops being counted by the box.
+        patch.units_per_box = parseUnitsPerBox(body.units_per_box);
       }
     } catch (e: any) {
       if (e instanceof FieldError) return fail(e.message);

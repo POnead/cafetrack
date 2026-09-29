@@ -21,15 +21,16 @@ type Item = {
   name: string;
   physical_form: string;
   unit: string;
+  units_per_box: number | null;
   quantity: number;
   low_stock_threshold: number;
   expiration_date: string | null;
   version: number;
   category: { id: string; name: string } | null;
-  location: { id: string; name: string } | null;
+  location: { id: string; name: string; min_shelf_life_days: number | null } | null;
 };
 
-type Ref = { id: string; name: string };
+type Ref = { id: string; name: string; min_shelf_life_days?: number | null };
 
 type SortKey =
   | "name"
@@ -50,6 +51,7 @@ const EMPTY_FORM = {
   location_id: "",
   physical_form: "solid",
   unit: "pcs",
+  units_per_box: "",
   quantity: "0",
   low_stock_threshold: "5",
   expiration_date: "",
@@ -215,6 +217,7 @@ export default function ItemsPage() {
       location_id: item.location?.id ?? "",
       physical_form: item.physical_form,
       unit: item.unit,
+      units_per_box: item.units_per_box == null ? "" : String(item.units_per_box),
       quantity: String(item.quantity),
       low_stock_threshold: String(item.low_stock_threshold),
       expiration_date: item.expiration_date ?? "",
@@ -248,6 +251,14 @@ export default function ItemsPage() {
         setFormError("Low-stock threshold must be a number that is not negative");
         return;
       }
+      // Blank means the item is not supplied in boxes. A non-positive value is
+      // refused here for the same reason as the quantity: it is a `check`
+      // constraint, so it would otherwise come back as a 500.
+      const perBox = form.units_per_box.trim() === "" ? null : Number(form.units_per_box);
+      if (perBox !== null && (!Number.isFinite(perBox) || perBox <= 0)) {
+        setFormError("Units per box must be greater than zero, or left blank");
+        return;
+      }
 
       const payload = {
         name: form.name,
@@ -255,6 +266,7 @@ export default function ItemsPage() {
         location_id: form.location_id || null,
         physical_form: form.physical_form,
         unit: form.unit,
+        units_per_box: perBox,
         quantity: qty,
         low_stock_threshold:
           form.low_stock_threshold.trim() === "" ? 5 : Math.round(low),
@@ -575,9 +587,22 @@ export default function ItemsPage() {
                 {locations.map((l) => (
                   <option key={l.id} value={l.id}>
                     {l.name}
+                    {l.min_shelf_life_days
+                      ? ` — needs ${l.min_shelf_life_days}+ days of shelf life`
+                      : ""}
                   </option>
                 ))}
               </select>
+              {/* Spelled out rather than hidden in the dropdown, because it is a
+                  rule that will refuse a restock and the operator needs to know
+                  which locations carry one. */}
+              {locations.find((l) => l.id === form.location_id)?.min_shelf_life_days ? (
+                <p className="mt-1 text-[11px] text-cocoa-400">
+                  A restock into this location is refused if the batch has fewer than{" "}
+                  {locations.find((l) => l.id === form.location_id)?.min_shelf_life_days}{" "}
+                  day(s) of shelf life left.
+                </p>
+              ) : null}
             </div>
           </div>
 
@@ -607,10 +632,15 @@ export default function ItemsPage() {
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="label">
+              {/* Associated with htmlFor rather than merely sitting beside the
+                  input: an unassociated label is announced as unlabelled by a
+                  screen reader, and it is the only thing that lets the browser
+                  test find this exact field instead of guessing by position. */}
+              <label className="label" htmlFor="item-quantity">
                 {editing ? "Quantity on hand (correction)" : "Starting quantity"}
               </label>
               <input
+                id="item-quantity"
                 className="input"
                 type="number"
                 min="0"
@@ -620,8 +650,11 @@ export default function ItemsPage() {
               />
             </div>
             <div>
-              <label className="label">Low-stock threshold</label>
+              <label className="label" htmlFor="item-threshold">
+                Low-stock threshold
+              </label>
               <input
+                id="item-threshold"
                 className="input"
                 type="number"
                 min="0"
@@ -633,6 +666,26 @@ export default function ItemsPage() {
               />
             </div>
           </div>
+
+        <div>
+          <label className="label" htmlFor="item-units-per-box">
+            Units per box (optional)
+          </label>
+          <input
+            id="item-units-per-box"
+            className="input"
+            type="number"
+            min="0"
+            step="1"
+            value={form.units_per_box}
+            onChange={(e) => setForm({ ...form, units_per_box: e.target.value })}
+            placeholder="Leave blank if not supplied in boxes"
+          />
+          <p className="mt-1 text-[11px] text-cocoa-400">
+            Fill this in if the supplier delivers whole boxes — a restock can then
+            be entered as a box count and converted to {form.unit || "units"}.
+          </p>
+        </div>
 
           <div>
             <label className="label">Expiration date</label>
