@@ -340,7 +340,7 @@ export default function ItemsPage() {
       </div>
 
       {error && (
-        <div className="rounded-xl bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
+        <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
           {error}
         </div>
       )}
@@ -391,7 +391,7 @@ export default function ItemsPage() {
                   <DataField label="On hand">
                     <span
                       className={
-                        status.key === "ok" ? "" : "font-semibold text-red-600"
+                        status.key === "ok" ? "" : "font-semibold text-terracotta-700"
                       }
                     >
                       {fmtQty(i.quantity, i.unit)}
@@ -407,9 +407,9 @@ export default function ItemsPage() {
                       <span
                         className={
                           expiry.key === "expired"
-                            ? "font-semibold text-red-600"
+                            ? "font-semibold text-terracotta-700"
                             : expiry.key === "soon"
-                            ? "text-amber-700"
+                            ? "text-ochre-700"
                             : ""
                         }
                       >
@@ -482,7 +482,7 @@ export default function ItemsPage() {
                       <td className="td text-right tabular-nums">
                         <span
                           className={
-                            status.key === "ok" ? "" : "font-semibold text-red-600"
+                            status.key === "ok" ? "" : "font-semibold text-terracotta-700"
                           }
                         >
                           {fmtQty(i.quantity, i.unit)}
@@ -493,9 +493,9 @@ export default function ItemsPage() {
                           <span
                             className={
                               expiry.key === "expired"
-                                ? "font-semibold text-red-600"
+                                ? "font-semibold text-terracotta-700"
                                 : expiry.key === "soon"
-                                ? "text-amber-700"
+                                ? "text-ochre-700"
                                 : "text-cocoa-500"
                             }
                           >
@@ -705,7 +705,7 @@ export default function ItemsPage() {
           )}
 
           {formError && (
-            <div className="rounded-xl bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
+            <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
               {formError}
             </div>
           )}

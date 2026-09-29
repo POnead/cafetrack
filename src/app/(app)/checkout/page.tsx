@@ -522,7 +522,7 @@ export default function CheckoutPage() {
             aria-describedby={problem ? errId : undefined}
           />
           {problem ? (
-            <p id={errId} className="mt-1 text-[11px] font-semibold text-red-600">
+            <p id={errId} className="mt-1 text-[11px] font-semibold text-terracotta-700">
               {problem}
             </p>
           ) : (
@@ -552,7 +552,7 @@ export default function CheckoutPage() {
       const ok = days !== null && days >= (line.minShelfLife ?? 0);
       return (
         <p
-          className={`mt-1 text-[11px] font-semibold ${ok ? "text-cocoa-400" : "text-red-600"}`}
+          className={`mt-1 text-[11px] font-semibold ${ok ? "text-cocoa-400" : "text-terracotta-700"}`}
         >
           {ok
             ? `Meets the ${line.minShelfLife}-day shelf life minimum.`
@@ -582,7 +582,7 @@ export default function CheckoutPage() {
 
       {/* ---------- waste warning ---------- */}
       {mode === "waste" && (
-        <div className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+        <div className="rounded-2xl border border-ochre-500/40 bg-ochre-50 px-4 py-3 text-sm text-ochre-700">
           <span className="font-bold">Logging waste.</span> Everything added
           here is deducted from stock as spoilage, spills or expired goods, and
           is recorded separately from a normal checkout in the audit trail.
@@ -639,8 +639,8 @@ export default function CheckoutPage() {
                   key={n.id}
                   className={`flex items-start justify-between gap-3 rounded-xl border px-3.5 py-2.5 text-sm ${
                     n.tone === "error"
-                      ? "border-red-200 bg-red-50 text-red-800"
-                      : "border-amber-200 bg-amber-50 text-amber-900"
+                      ? "border-terracotta-500/40 bg-terracotta-50 text-terracotta-700"
+                      : "border-ochre-500/40 bg-ochre-50 text-ochre-700"
                   }`}
                 >
                   <div className="min-w-0">
@@ -671,7 +671,7 @@ export default function CheckoutPage() {
           </p>
 
           {scanError && (
-            <div className="rounded-xl bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
+            <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
               {scanError}
             </div>
           )}
@@ -927,7 +927,7 @@ export default function CheckoutPage() {
           </div>
 
           {submitError && (
-            <div className="rounded-xl bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
+            <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
               {submitError}
             </div>
           )}

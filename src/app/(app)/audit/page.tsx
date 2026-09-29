@@ -201,8 +201,8 @@ export default function AuditPage() {
         <div
           className={`rounded-2xl border px-4 py-3 text-sm ${
             verify.intact
-              ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-              : "border-red-200 bg-red-50 text-red-700"
+              ? "border-sage-500/40 bg-sage-50 text-sage-700"
+              : "border-terracotta-500/40 bg-terracotta-50 text-terracotta-700"
           }`}
         >
           {verify.intact ? (
@@ -221,7 +221,7 @@ export default function AuditPage() {
       )}
 
       {error && (
-        <div className="rounded-xl bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
+        <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
           {error}
         </div>
       )}

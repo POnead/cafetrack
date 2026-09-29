@@ -305,7 +305,7 @@ export default function SettingsPage() {
         </p>
       </div>
 
-      {error && <div className="card p-4 text-sm text-red-700">{error}</div>}
+      {error && <div className="card p-4 text-sm text-terracotta-700">{error}</div>}
 
       <Card>
         <h2 className="text-lg font-semibold text-cocoa-800">

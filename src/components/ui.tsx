@@ -75,12 +75,15 @@ export function Stat({
   tone?: "default" | "warn" | "danger" | "good";
 }) {
   // Filled pill with white text so the three stock states read as one scale.
-  // amber-600 rather than amber-500: white on amber-500 is only ~2:1 contrast.
+  //
+  // The warm tones' 700 steps, not their 500s: white on sage-500 is only
+  // ~3.7:1 and on terracotta-500 ~4.5:1, both short of the 4.5:1 this 14px
+  // bold text needs. At 700 they land at 6.5:1, 8.1:1 and 5.5:1.
   const toneClass = {
     default: "bg-cream-300 text-cocoa-900",
-    warn: "bg-amber-600 text-white",
-    danger: "bg-red-500 text-white",
-    good: "bg-emerald-500 text-white",
+    warn: "bg-ochre-700 text-white",
+    danger: "bg-terracotta-700 text-white",
+    good: "bg-sage-700 text-white",
   }[tone];
 
   return (
@@ -255,10 +258,12 @@ export function Toast({
 
   if (!message) return null;
 
+  // 700 steps again — the toast is white text on a solid fill, the same
+  // contrast constraint as the Stat pill above.
   const tones = {
     info: "bg-cocoa-700",
-    error: "bg-red-600",
-    success: "bg-emerald-600",
+    error: "bg-terracotta-700",
+    success: "bg-sage-700",
   };
 
   return (

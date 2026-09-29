@@ -258,7 +258,7 @@ export default function UsersPage() {
       </div>
 
       {error && (
-        <div className="rounded-xl bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
+        <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
           {error}
         </div>
       )}
@@ -590,7 +590,7 @@ export default function UsersPage() {
           </div>
 
           {formError && (
-            <div className="rounded-xl bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
+            <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
               {formError}
             </div>
           )}

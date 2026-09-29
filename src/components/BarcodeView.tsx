@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useRef, useState } from "react";
 import JsBarcode from "jsbarcode";
@@ -145,12 +145,12 @@ export function BarcodeView({
       />
       <code className="font-mono text-xs text-cocoa-400">{value}</code>
       {tooLong && (
-        <p className="max-w-[16rem] text-[11px] text-amber-700">
+        <p className="max-w-[16rem] text-[11px] text-ochre-700">
           Long code: the bars cannot be made any thinner, so this label is
           wider than a standard sticker.
         </p>
       )}
-      {error && <p className="max-w-[16rem] text-[11px] text-red-600">{error}</p>}
+      {error && <p className="max-w-[16rem] text-[11px] text-terracotta-700">{error}</p>}
     </div>
   );
 }
@@ -186,7 +186,7 @@ export async function printBarcodeLabelsAsync(labels: BarcodeLabel[]) {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     draw(svg, label.value, fit.moduleWidth, fit.width);
 
-    // Vector, so the printer draws the bars itself — nothing is resampled.
+    // Vector, so the printer draws the bars itself â€” nothing is resampled.
     const markup = new XMLSerializer().serializeToString(svg);
 
     cards.push(`
@@ -224,7 +224,7 @@ export async function printBarcodeLabelsAsync(labels: BarcodeLabel[]) {
   win.document.write(`
     <html>
       <head>
-        <title>CafeTrack — Barcode Labels</title>
+        <title>CafeTrack â€” Barcode Labels</title>
         <style>
           body { font-family: system-ui, sans-serif; padding: 24px; color: #3D2B1F; }
           .grid { display: flex; flex-wrap: wrap; gap: 16px; }
@@ -235,7 +235,7 @@ export async function printBarcodeLabelsAsync(labels: BarcodeLabel[]) {
           .title { font-weight: 700; font-size: 13px; margin-bottom: 2px; }
           .sub { font-size: 11px; color: #8B5E3C; margin-bottom: 8px; }
           .code { font-family: ui-monospace, monospace; font-size: 11px; color: #96755A; margin-top: 6px; }
-          /* Never stretch the bars — the module width is already exact. */
+          /* Never stretch the bars â€” the module width is already exact. */
           .bars svg { display: block; margin: 0 auto; }
           .skipped { margin-bottom: 16px; font-size: 12px; color: #B42318; }
           @page { size: auto; margin: 8mm; }

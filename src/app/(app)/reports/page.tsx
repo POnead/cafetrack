@@ -417,7 +417,7 @@ export default function ReportsPage() {
       </Card>
 
       {error && (
-        <div className="rounded-xl bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
+        <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
           {error}
         </div>
       )}
@@ -552,7 +552,7 @@ export default function ReportsPage() {
                             <span className="text-xs">
                               {fmtDate(i.expiration_date)}
                               {d !== null && d < 0 && (
-                                <span className="text-red-600"> (expired)</span>
+                                <span className="text-terracotta-700"> (expired)</span>
                               )}
                             </span>
                           ) : (
@@ -610,7 +610,7 @@ export default function ReportsPage() {
                               <>
                                 {fmtDate(i.expiration_date)}
                                 {d !== null && d < 0 && (
-                                  <span className="text-red-600">
+                                  <span className="text-terracotta-700">
                                     {" "}
                                     (expired)
                                   </span>

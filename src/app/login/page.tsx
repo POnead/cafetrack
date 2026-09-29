@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
@@ -61,7 +61,7 @@ export default function LoginPage() {
 
   return (
     <div className="flex min-h-screen bg-white">
-      {/* ============ LEFT — peach panel ============ */}
+      {/* ============ LEFT â€” peach panel ============ */}
       <div className="relative hidden w-[52%] shrink-0 overflow-hidden bg-cream-300 lg:block">
         <div className="relative z-10 flex h-full flex-col px-12 py-10">
           <h1 className="script-logo text-4xl">CafeTrack</h1>
@@ -71,7 +71,7 @@ export default function LoginPage() {
           </div>
 
           <p className="text-xs font-medium text-cocoa-600/70">
-            Merrylane Cafe Foodhub · Lipa City
+            Merrylane Cafe Foodhub Â· Lipa City
           </p>
         </div>
 
@@ -89,7 +89,7 @@ export default function LoginPage() {
         </svg>
       </div>
 
-      {/* ============ RIGHT — form ============ */}
+      {/* ============ RIGHT â€” form ============ */}
       <div className="flex flex-1 items-center justify-center bg-white px-6 py-12">
         <div className="w-full max-w-[400px]">
           {/* mobile-only brand */}
@@ -165,7 +165,7 @@ export default function LoginPage() {
                 )}
 
                 {deactivated ? (
-                  <div className="rounded-xl bg-amber-50 px-3.5 py-3 text-center text-sm text-amber-900">
+                  <div className="rounded-xl bg-ochre-50 px-3.5 py-3 text-center text-sm text-ochre-700">
                     <div className="font-bold">This account is deactivated</div>
                     {deactivated.reason && (
                       <div className="mt-1 text-xs leading-snug">
@@ -173,17 +173,17 @@ export default function LoginPage() {
                       </div>
                     )}
                     {deactivated.when && (
-                      <div className="mt-1 text-[11px] text-amber-700">
+                      <div className="mt-1 text-[11px] text-ochre-700">
                         Deactivated {fmtDateTime(deactivated.when)}
                       </div>
                     )}
-                    <div className="mt-1.5 text-[11px] text-amber-700">
+                    <div className="mt-1.5 text-[11px] text-ochre-700">
                       Ask an administrator to re-activate it.
                     </div>
                   </div>
                 ) : (
                   error && (
-                    <div className="rounded-xl bg-red-50 px-3.5 py-2.5 text-center text-sm text-red-700">
+                    <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-center text-sm text-terracotta-700">
                       {error}
                     </div>
                   )

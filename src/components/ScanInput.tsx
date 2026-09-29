@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useRef, useState } from "react";
 
@@ -75,7 +75,7 @@ export function ScanInput({
           so the button becomes a normal flow item underneath instead. */}
       <div className="absolute right-2 top-1/2 hidden -translate-y-1/2 items-center gap-2 sm:flex">
         {lastScanAt > 0 && (
-          <span className="text-[11px] font-medium text-emerald-600">captured</span>
+          <span className="text-[11px] font-medium text-sage-700">captured</span>
         )}
         <button
           type="button"
@@ -88,7 +88,7 @@ export function ScanInput({
       </div>
       <div className="mt-2 flex items-center gap-2 sm:hidden">
         {lastScanAt > 0 && (
-          <span className="text-[11px] font-medium text-emerald-600">captured</span>
+          <span className="text-[11px] font-medium text-sage-700">captured</span>
         )}
         <button
           type="button"

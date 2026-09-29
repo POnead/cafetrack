@@ -145,7 +145,7 @@ export default function DashboardPage() {
         <h1 className="deco-title text-4xl">Inventory Dashboard</h1>
 
         {error && (
-          <div className="rounded-xl bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
+          <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
             {error}
           </div>
         )}
@@ -241,7 +241,7 @@ export default function DashboardPage() {
                         <td className="td !px-0 !py-1.5 text-cocoa-800">{i.name}</td>
                         <td
                           className={`td !px-0 !py-1.5 text-right font-semibold tabular-nums ${
-                            i.days < 0 ? "text-red-600" : "text-amber-700"
+                            i.days < 0 ? "text-terracotta-700" : "text-ochre-700"
                           }`}
                         >
                           {i.days < 0 ? "Expired" : `${i.days} Days`}
@@ -310,10 +310,17 @@ const TXN_LABEL: Record<string, string> = {
   waste: "Waste",
 };
 
+/* Movement dots on the Recent Activity card.
+ *
+ * Warm palette steps so they sit with the cocoa/cream around them, and so
+ * they agree with the Audit trail and the checkout badges for the same three
+ * movements (ochre/sage/terracotta). The 500 step is used rather than the 700
+ * the text tones use because nothing is written on top of these — a dot wants
+ * to read as a dot, not as a dark blob. */
 const TXN_DOT: Record<string, string> = {
   checkout: "bg-cream-500",
-  restock: "bg-emerald-500",
-  waste: "bg-red-500",
+  restock: "bg-sage-500",
+  waste: "bg-terracotta-500",
 };
 
 function TxnDot({ type }: { type: string }) {
