@@ -71,9 +71,11 @@ above — it is the fastest way to see which address the server expects. Restart
 `npm run dev` re-reads the interfaces and picks up a new address.
 
 **If the page is unstyled and unclickable, you are probably running the wrong
-copy of the project.** An older CafeTrack exists at `Documents\cafetrack`
-(Next 14, no origin allowlist, no mobile layout). It is not a git repository and
-is no longer maintained. Always run this one, from `Downloads\cafetrack`.
+copy of the project.** An older CafeTrack (Next 14, no origin allowlist, no mobile
+layout, not a git repository) was found at `Documents\cafetrack`. It has been
+renamed to `Documents\cafetrack-OLD-DELETE-ME` so it is no longer easy to open by
+accident, and it is safe to delete whenever you no longer need it. Always run this
+one, from `Downloads\cafetrack`.
 
 
 
