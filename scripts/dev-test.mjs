@@ -31,7 +31,7 @@ import { spawn } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
-const PORT = Number(process.env.TEST_PORT || 3001);
+const PORT = Number(process.env.TEST_PORT || 3101);
 const DB_DIR = process.env.CAFETRACK_DB_DIR || join(process.cwd(), ".pglite-test");
 const DIST_DIR = process.env.NEXT_DIST_DIR || ".next-test";
 

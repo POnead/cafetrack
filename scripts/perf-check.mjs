@@ -16,11 +16,11 @@
  * cold request (first compile in dev, a GC pause) is not representative.
  *
  * Run with:  node scripts/perf-check.mjs          (server must be running)
- *            BASE_URL=http://localhost:3001 node scripts/perf-check.mjs
+ *            BASE_URL=http://localhost:3101 node scripts/perf-check.mjs
  */
 
 import { assertTestTarget } from "./_guard.mjs";
-const BASE = process.env.BASE_URL || "http://localhost:3000";
+const BASE = process.env.BASE_URL || "http://localhost:3100";
 const SAMPLES = Number(process.env.SAMPLES || 5);
 const ADMIN = { username: "admin", password: "admin123" };
 

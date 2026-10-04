@@ -11,7 +11,7 @@
  */
 
 import { assertTestTarget } from "./_guard.mjs";
-const BASE = process.env.BASE_URL || "http://localhost:3000";
+const BASE = process.env.BASE_URL || "http://localhost:3100";
 
 const ADMIN = {
   username: "admin",

@@ -1,4 +1,4 @@
-const BASE = process.env.BASE_URL || "http://127.0.0.1:3000";
+const BASE = process.env.BASE_URL || "http://127.0.0.1:3100";
 
 let pass = 0;
 let fail = 0;

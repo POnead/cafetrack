@@ -1,7 +1,7 @@
 import { daysUntil } from "../src/lib/format.ts";
 import { assertTestTarget } from "./_guard.mjs";
 
-const BASE = process.env.BASE_URL || "http://localhost:3000";
+const BASE = process.env.BASE_URL || "http://localhost:3100";
 let pass = 0, fail = 0;
 const failures = [];
 

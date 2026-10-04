@@ -21,7 +21,13 @@ cp .env.example .env.local     # optional — the app runs without it
 npm run dev
 ```
 
-Open <http://localhost:3000> and sign in:
+Open <http://localhost:3100> and sign in:
+
+> **Note the port: CafeTrack runs on 3100, not 3000.** Port 3000 is used by
+> another project on this machine (HabitTrack, in `Downloads\adbmsproj1`). Pinning
+> CafeTrack to its own port means the two can never collide — without a pin,
+> `next dev` silently slides to the next free port and you end up looking at the
+> wrong project without any error being shown.
 
 | Role  | Username   | Password   |
 | ----- | ---------- | ---------- |
@@ -37,6 +43,39 @@ To see it work without typing anything: **Inventory → All Items → Print visi
 barcode labels**, print a sheet, then scan a label with the field on **Checkout
 & Restock**. Typing a SKU by hand works exactly the same way — that is also the
 fallback when a label is damaged.
+---
+
+## Opening it on a phone or tablet
+
+`npm run dev` prints the LAN address to use:
+
+```
+[cafetrack] LAN origins allowed: 192.168.1.7, mypc, mypc.local
+[cafetrack] open on a phone/tablet at http://192.168.1.7:3100
+```
+
+The phone has to be on the **same Wi-Fi** as this machine. Then browse to that
+address — or to `http://mypc.local:3100`, which survives the router handing out
+a different address.
+
+Both work without editing any file. Next blocks dev-only requests (including the
+hot-reload socket) from any address it does not recognise, and when it blocks one
+it fails *quietly*: the page loads but arrives unstyled and never hydrates, so
+nothing is clickable and it can look like a completely different website. To stop
+that, `next.config.mjs` reads this machine's real network addresses and its own
+computer name on every start, rather than trusting an address hardcoded earlier
+that the router has since changed.
+
+If it stops working after a reboot or a network change, check the printed line
+above — it is the fastest way to see which address the server expects. Restarting
+`npm run dev` re-reads the interfaces and picks up a new address.
+
+**If the page is unstyled and unclickable, you are probably running the wrong
+copy of the project.** An older CafeTrack exists at `Documents\cafetrack`
+(Next 14, no origin allowlist, no mobile layout). It is not a git repository and
+is no longer maintained. Always run this one, from `Downloads\cafetrack`.
+
+
 
 ---
 
@@ -201,7 +240,7 @@ overwrites your change:
 | `SEED_ADMIN_PASSWORD`        | no                   | Admin password created on first run. Defaults to `admin123`.       |
 | `SEED_STAFF_PASSWORD`        | no                   | Staff password created on first run. Defaults to `staff123`.       |
 | `CAFETRACK_BACKUP_KEEP`      | no                   | How many local backups to keep. Defaults to 3.                      |
-| `BASE_URL`                   | no                   | Target for the test scripts. Defaults to `http://localhost:3000`.  |
+| `BASE_URL`                   | no                   | Target for the test scripts. Defaults to `http://localhost:3100`.  |
 | `NEXT_PUBLIC_SUPABASE_*`     | Supabase only        | Project URL and anon key.                                         |
 | `SUPABASE_SERVICE_ROLE_KEY`  | Supabase only        | Server-side key. Never exposed to the browser.                    |
 
@@ -213,7 +252,7 @@ overwrites your change:
 
 | Command             | What it does                                          |
 | ------------------- | ----------------------------------------------------- |
-| `npm run dev`       | Development server on :3000                            |
+| `npm run dev`       | Development server on :3100                            |
 | `npm run build`     | Production build                                       |
 | `npm start`         | Serve the production build                             |
 | `npm run lint`      | ESLint                                                |
@@ -266,7 +305,7 @@ checked out* with ingredients that no longer exist.
 So give the suites a database of their own:
 
 ```bash
-npm run dev:test        # terminal 1 — a second server on :3001
+npm run dev:test        # terminal 1 — a second server on :3101
 npm run test:isolated   # terminal 2 — all seven suites against it
 ```
 
@@ -277,7 +316,7 @@ server in the same folder refuses to start. Your `.pglite/` is never opened.
 
 The plumbing already existed — `local-db.ts` and all five `db:*` scripts read
 `CAFETRACK_DB_DIR`, and every suite reads `BASE_URL`. These two scripts just
-connect them, and `test:isolated` refuses to run against port 3000 so it
+connect them, and `test:isolated` refuses to run against port 3100 so it
 cannot point at your real server by accident.
 
 #### The suites refuse to write to a live database
@@ -288,7 +327,7 @@ on the proxy's own 401s. Each suite that writes calls `assertTestTarget()` from
 `live`:
 
 ```
-Refusing to run against http://127.0.0.1:3000.
+Refusing to run against http://127.0.0.1:3100.
 
 That server reports a live database (x-cafetrack-db: live).
 This suite writes to the movement ledger, which is append-only, so what it

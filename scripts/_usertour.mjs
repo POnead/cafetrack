@@ -37,7 +37,7 @@ import { assertTestTarget } from "./_guard.mjs";
 // resources (the HMR socket) from any origin not in allowedDevOrigins, and
 // localhost is already permitted. Using the IP would log a blocked-request
 // warning and stop the page hydrating.
-const BASE = process.env.BASE_URL || "http://localhost:3000";
+const BASE = process.env.BASE_URL || "http://localhost:3100";
 const SHOTS = "ui-screenshots";
 const PREFIX = "tour-";
 

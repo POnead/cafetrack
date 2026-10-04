@@ -16,12 +16,15 @@
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 
-const PORT = Number(process.env.TEST_PORT || 3001);
+const PORT = Number(process.env.TEST_PORT || 3101);
 const BASE = `http://localhost:${PORT}`;
 
-if (PORT === 3000) {
+// 3100 is `npm run dev`, which runs against your real .pglite. The suites write
+// to the movement ledger, which is append-only, so pointing them at it would
+// leave test rows behind permanently.
+if (PORT === 3100) {
   console.error(
-    "Refusing to run: TEST_PORT is 3000, which is your normal dev server.\n" +
+    "Refusing to run: TEST_PORT is 3100, which is your normal dev server.\n" +
       "Point this at the server from `npm run dev:test`, or your real data\n" +
       "will take the test writes."
   );
