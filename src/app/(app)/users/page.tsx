@@ -22,6 +22,7 @@ type StaffUser = {
   role: "admin" | "staff";
   qr_token: string | null;
   can_manage_items: boolean;
+  approval_code: string | null;
   is_active: boolean;
   deactivation_reason: string | null;
   deactivated_at: string | null;
@@ -376,6 +377,36 @@ async function toggleItemPermission(user: StaffUser) {
                       >
                         {u.can_manage_items ? "Granted" : "Not granted"}
                       </button>
+                    </DataField>
+                  )}
+
+                  {u.role === "staff" && (
+                    <DataField label="Approval code">
+                      <span className="font-mono text-xs block">
+                        {u.approval_code ?? "—"}
+                      </span>
+                      <button
+                        className="btn-ghost min-h-[40px] !px-2 !py-1 text-xs mt-1"
+                        disabled={busyId === u.id}
+                        onClick={async () => {
+                          const updated = await patch(u, { regenerate_approval_code: true });
+                          if (updated) setToast({ msg: `New approval code for ${updated.full_name}: ${updated.approval_code}`, tone: "success" });
+                        }}
+                      >
+                        {u.approval_code ? "New code" : "Generate code"}
+                      </button>
+                      {u.approval_code && (
+                        <button
+                          className="btn-ghost min-h-[40px] !px-2 !py-1 text-xs mt-1"
+                          disabled={busyId === u.id}
+                          onClick={async () => {
+                            const updated = await patch(u, { approval_code: null });
+                            if (updated) setToast({ msg: `Approval code cleared for ${updated.full_name}`, tone: "success" });
+                          }}
+                        >
+                          Clear
+                        </button>
+                      )}
                     </DataField>
                   )}
 

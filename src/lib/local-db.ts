@@ -9,6 +9,7 @@
  * this module translates exactly the subset of that API they use:
  *
  *   from(t).select(str).eq(c,v).order(c,{ascending}).limit(n)   -> SELECT
+ *   .range(from, to)                                           -> paged SELECT
  *   .single() / .maybeSingle()                                  -> row shaping
  *   .select(c, { count: "exact" })  /  { head: true }          -> row count
  *   from(t).insert(obj).select(str).single()                    -> INSERT .. RETURNING
@@ -130,6 +131,12 @@ const RELATIONS: Record<
     many: false,
   },
   "alerts.item": {
+    table: "items",
+    localKey: "item_id",
+    foreignKey: "id",
+    many: false,
+  },
+  "item_change_requests.item": {
     table: "items",
     localKey: "item_id",
     foreignKey: "id",
@@ -355,6 +362,7 @@ class LocalQuery implements PromiseLike<DbResult> {
   private filters: Filter[] = [];
   private orders: string[] = [];
   private limitCount: number | null = null;
+  private offsetCount = 0;
   private shape: "many" | "single" | "maybe" = "many";
   private wantCount = false;
   private headOnly = false;
@@ -472,6 +480,12 @@ class LocalQuery implements PromiseLike<DbResult> {
 
   limit(count: number) {
     this.limitCount = count;
+    return this;
+  }
+
+  range(from: number, to: number) {
+    this.offsetCount = Math.max(0, Math.floor(from));
+    this.limitCount = Math.max(0, Math.floor(to) - this.offsetCount + 1);
     return this;
   }
 
@@ -621,6 +635,9 @@ class LocalQuery implements PromiseLike<DbResult> {
     if (this.orders.length) text += ` order by ${this.orders.join(", ")}`;
     if (this.limitCount !== null) {
       text += ` limit ${Math.max(0, Math.floor(this.limitCount))}`;
+    }
+    if (this.offsetCount > 0) {
+      text += ` offset ${this.offsetCount}`;
     }
 
     return { text, values: where.values, countOnly: false };
@@ -812,6 +829,15 @@ const RPC: Record<
     sql: `select to_jsonb(x) as out from review_item($1,$2,$3,$4) as x`,
     args: (p) => [
       p.p_item_id ?? null,
+      p.p_actor_id ?? null,
+      p.p_decision,
+      p.p_note ?? null,
+    ],
+  },
+  review_change_request: {
+    sql: `select to_jsonb(x) as out from review_change_request($1,$2,$3,$4) as x`,
+    args: (p) => [
+      p.p_request_id ?? null,
       p.p_actor_id ?? null,
       p.p_decision,
       p.p_note ?? null,

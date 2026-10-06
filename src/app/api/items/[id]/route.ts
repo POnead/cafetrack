@@ -1,7 +1,7 @@
 import { db } from "@/lib/supabase";
 import { handler, ok, fail, badId, readBody, clientIp } from "@/lib/api";
 import { requireUser } from "@/lib/auth";
-import { canManageItems } from "@/lib/permissions";
+import { canManageItems, approvalCodeMatches } from "@/lib/permissions";
 import { audit } from "@/lib/audit";
 import {
   FieldError,
@@ -44,12 +44,7 @@ export const PATCH = handler(
   async (req: Request, { params }: { params: Promise<{ id: string }> }) => {
     // FR-03: an admin, or a staff member granted item management.
     const user = await requireUser();
-    if (!(await canManageItems(user))) {
-      return fail(
-        "You need item management permission to change an item. Ask an admin to grant it.",
-        403
-      );
-    }
+    const canEdit = await canManageItems(user);
     const { id } = await params;
 
     const malformed = badId(id, "item");
@@ -68,6 +63,7 @@ export const PATCH = handler(
     const patch: Record<string, unknown> = {
       updated_at: new Date().toISOString(),
     };
+    let quantityCorrectionReason: string | null = null;
 
     if (body.name !== undefined) patch.name = String(body.name).trim();
     if (body.unit !== undefined) patch.unit = body.unit;
@@ -140,6 +136,18 @@ export const PATCH = handler(
         patch.quantity = requireQuantity(body.quantity, "Quantity");
         // Quantity edits here are corrections, not movements — still versioned.
         patch.version = Number(before.version) + 1;
+        if (Number(patch.quantity) !== Number(before.quantity)) {
+          if (typeof body.correction_reason !== "string") {
+            return fail("Enter a reason for the stock correction");
+          }
+          quantityCorrectionReason = body.correction_reason.trim();
+          if (!quantityCorrectionReason) {
+            return fail("Enter a reason for the stock correction");
+          }
+          if (quantityCorrectionReason.length > 500) {
+            return fail("Stock correction reason must be 500 characters or fewer");
+          }
+        }
       }
       if (body.units_per_box !== undefined) {
         // A blank clears it, which is how an item stops being counted by the box.
@@ -148,6 +156,56 @@ export const PATCH = handler(
     } catch (e: any) {
       if (e instanceof FieldError) return fail(e.message);
       throw e;
+    }
+
+    // FR-03: a staff member without the grant cannot change the live item,
+    // but they can ask for a change. The request keeps their proposed values
+    // until an admin decides; patch was already validated above, so the
+    // request carries the same rules as a direct edit.
+    if (!canEdit) {
+      const viaCode = await approvalCodeMatches(user, body.approval_code);
+      if (!viaCode) {
+        const proposal: Record<string, unknown> = {
+          item_id: id,
+          requested_by: user.id,
+          base_version: before.version,
+        };
+        for (const key of [
+          "name",
+          "category_id",
+          "location_id",
+          "physical_form",
+          "unit",
+          "units_per_box",
+          "quantity",
+          "low_stock_threshold",
+          "expiration_date",
+        ] as const) {
+          if (body[key] !== undefined) proposal[key] = patch[key];
+        }
+        if (quantityCorrectionReason) proposal.correction_reason = quantityCorrectionReason;
+
+        const { data, error } = await db()
+          .from("item_change_requests")
+          .insert(proposal)
+          .select()
+          .single();
+
+        if (error) return fail(error.message, 500);
+
+        await audit(user, "ITEM_CHANGE_REQUEST", "item", id, {
+          sku: before.sku,
+          name: before.name,
+          request_id: data.id,
+        }, { ip: clientIp(req) });
+
+        return ok({
+          pending_change: true,
+          request: data,
+          message: "Edit submitted for approval — an admin will review it before it takes effect.",
+        }, 201);
+      }
+      // With a valid code, fall through and apply the edit directly.
     }
 
     const { data, error } = await db()
@@ -173,6 +231,9 @@ export const PATCH = handler(
       sku: data.sku,
       name: data.name,
       changes,
+      ...(quantityCorrectionReason
+        ? { quantity_correction_reason: quantityCorrectionReason }
+        : {}),
     }, { ip: clientIp(req) });
 
     await db().rpc("refresh_alerts");

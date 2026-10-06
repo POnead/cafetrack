@@ -1,7 +1,7 @@
 import { db } from "@/lib/supabase";
 import { handler, ok, fail, readBody, clientIp } from "@/lib/api";
 import { requireUser } from "@/lib/auth";
-import { canManageItems } from "@/lib/permissions";
+import { canManageItems, approvalCodeMatches } from "@/lib/permissions";
 import { audit } from "@/lib/audit";
 import { randomBytes } from "node:crypto";
 import {
@@ -18,7 +18,7 @@ export const runtime = "nodejs";
 
 /* ---------------- list ---------------- */
 export const GET = handler(async (req: Request) => {
-  await requireUser();
+  const user = await requireUser();
 
   const { searchParams } = new URL(req.url);
   const q = searchParams.get("q")?.trim();
@@ -30,6 +30,7 @@ export const GET = handler(async (req: Request) => {
   // the approvals list, and `status=all` is the admin's view of everything
   // including rejected submissions.
   const status = searchParams.get("status") ?? "active";
+  const submittedByMe = searchParams.get("submitted_by") === "me";
 
   let query = db()
     .from("items")
@@ -45,6 +46,11 @@ export const GET = handler(async (req: Request) => {
 
   if (status === "active" || status === "pending" || status === "rejected") {
     query = query.eq("item_status", status);
+  }
+  // A staff member's own submissions, across every state — this is how they
+  // see whether a pending item was approved or rejected.
+  if (submittedByMe) {
+    query = query.eq("submitted_by", user.id);
   }
 
   if (q) {
@@ -84,6 +90,11 @@ export const POST = handler(async (req: Request) => {
   const user = await requireUser();
   const manages = await canManageItems(user);
   const body = await readBody(req);
+
+  // FR-03: a staff member with the admin-given code gets their submission
+  // through immediately, without a queue stop.
+  const viaCode = !manages && (await approvalCodeMatches(user, body.approval_code));
+  const trusted = manages || viaCode;
 
   const name = String(body.name || "").trim();
   if (!name) return fail("Item name is required");
@@ -162,7 +173,7 @@ export const POST = handler(async (req: Request) => {
   }
   if (!sku) return fail("Could not generate a unique SKU, try again", 500);
 
-  const itemStatus = manages ? "active" : "pending";
+  const itemStatus = trusted ? "active" : "pending";
 
   const { data, error } = await db()
     .from("items")
@@ -180,7 +191,9 @@ export const POST = handler(async (req: Request) => {
       item_status: itemStatus,
       // Only a submission needs provenance. An item added by someone who could
       // add it directly is not waiting on anyone, so recording it as submitted
-      // would imply a review that never happened.
+      // would imply a review that never happened. Exception: a code-verified
+      // staff submission skips the queue, but it was still their submission —
+      // the record keeps who did it.
       submitted_by: manages ? null : user.id,
       submitted_at: manages ? null : new Date().toISOString(),
     })
@@ -195,6 +208,7 @@ export const POST = handler(async (req: Request) => {
     quantity: data.quantity,
     unit: data.unit,
     item_status: itemStatus,
+    via_code: viaCode,
   }, { ip: clientIp(req) });
 
   // A pending item is invisible to refresh_alerts by design, so this is safe to
@@ -206,10 +220,12 @@ export const POST = handler(async (req: Request) => {
       item: data,
       // Spelled out rather than left for the client to infer, because the two
       // cases mean very different things to the person who just submitted.
-      pending_approval: !manages,
+      pending_approval: !trusted,
       message: manages
         ? `Item created — SKU ${data.sku}`
-        : `Submitted for approval — SKU ${data.sku}. An admin must approve it before it can be used.`,
+        : viaCode
+          ? `Item created — SKU ${data.sku}. Approved immediately via your code.`
+          : `Submitted for approval — SKU ${data.sku}. An admin must approve it before it can be used.`,
     },
     201
   );

@@ -25,6 +25,22 @@ export type ReportItem = {
 };
 
 export type ReportMovement = { type: string; count: number; qty: number };
+export type ReportMovementLine = {
+  date: string;
+  actorName: string;
+  type: string;
+  sku: string;
+  itemName: string;
+  category: string;
+  quantity: number;
+  note: string | null;
+};
+export type ReportWasteItem = {
+  sku: string;
+  name: string;
+  qty: number;
+  count: number;
+};
 
 const MOVEMENT_LABEL: Record<string, string> = {
   checkout: "Checked out",
@@ -45,10 +61,23 @@ export function printStockReport(opts: {
   items: ReportItem[];
   movement: ReportMovement[];
   topMovers: { sku: string; name: string; qty: number }[];
+  wasteByItem: ReportWasteItem[];
+  movementLines: ReportMovementLine[];
+  filterDescription: string;
   lowCount: number;
   outCount: number;
 }) {
-  const { businessName, items, movement, topMovers, lowCount, outCount } = opts;
+  const {
+    businessName,
+    items,
+    movement,
+    topMovers,
+    wasteByItem,
+    movementLines,
+    filterDescription,
+    lowCount,
+    outCount,
+  } = opts;
   const generated = new Date().toLocaleString("en-PH", {
     dateStyle: "medium",
     timeStyle: "short",
@@ -71,7 +100,7 @@ export function printStockReport(opts: {
     tile("Items tracked", items.length) +
     tile("Low stock", lowCount) +
     tile("Out of stock", outCount) +
-    tile("Movement lines", movement.reduce((n, m) => n + m.count, 0));
+    tile("Transactions", movement.reduce((n, m) => n + m.count, 0));
 
   /* --- inventory table --- */
   const rows = items
@@ -115,6 +144,36 @@ export function printStockReport(opts: {
         )
         .join("")
     : `<tr><td colspan="4" class="empty">No checkouts recorded yet.</td></tr>`;
+
+  const wasteRows = wasteByItem.length
+    ? wasteByItem
+        .map(
+          (item) => `<tr>
+            <td class="mono">${escapeHtml(item.sku)}</td>
+            <td><strong>${escapeHtml(item.name)}</strong></td>
+            <td class="num">${escapeHtml(fmtQty(item.qty))}</td>
+            <td class="num">${item.count}</td>
+          </tr>`
+        )
+        .join("")
+    : `<tr><td colspan="4" class="empty">No waste recorded in this report.</td></tr>`;
+
+  const movementDetailRows = movementLines.length
+    ? movementLines
+        .map(
+          (line) => `<tr>
+            <td>${escapeHtml(new Date(line.date).toLocaleString("en-PH"))}</td>
+            <td>${escapeHtml(line.actorName)}</td>
+            <td>${escapeHtml(MOVEMENT_LABEL[line.type] ?? line.type)}</td>
+            <td class="mono">${escapeHtml(line.sku)}</td>
+            <td>${escapeHtml(line.itemName)}</td>
+            <td>${escapeHtml(line.category)}</td>
+            <td class="num">${escapeHtml(fmtQty(line.quantity))}</td>
+            <td>${escapeHtml(line.note ?? "—")}</td>
+          </tr>`
+        )
+        .join("")
+    : `<tr><td colspan="8" class="empty">No movements match these filters.</td></tr>`;
 
   win.document.write(`
     <html>
@@ -176,7 +235,7 @@ export function printStockReport(opts: {
         </div>
 
         <h1>${escapeHtml(businessName)} — Stock Report</h1>
-        <div class="meta">Generated ${escapeHtml(generated)} · ${items.length} items</div>
+        <div class="meta">Generated ${escapeHtml(generated)} · ${items.length} items · ${escapeHtml(filterDescription)}</div>
 
         <div class="tiles">${summary}</div>
 
@@ -198,10 +257,22 @@ export function printStockReport(opts: {
           <tbody>${movementRows}</tbody>
         </table>
 
+        <h2>Waste tracking</h2>
+        <table>
+          <thead><tr><th>SKU</th><th>Item</th><th class="num">Quantity wasted</th><th class="num">Events</th></tr></thead>
+          <tbody>${wasteRows}</tbody>
+        </table>
+
         <h2>Top movers</h2>
         <table>
           <thead><tr><th class="num">#</th><th>SKU</th><th>Item</th><th class="num">Checked out</th></tr></thead>
           <tbody>${moverRows}</tbody>
+        </table>
+
+        <h2>Movement details</h2>
+        <table>
+          <thead><tr><th>Date</th><th>Staff</th><th>Type</th><th>SKU</th><th>Item</th><th>Category</th><th class="num">Quantity</th><th>Note</th></tr></thead>
+          <tbody>${movementDetailRows}</tbody>
         </table>
       </body>
     </html>

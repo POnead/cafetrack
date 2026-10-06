@@ -7,7 +7,7 @@ export const runtime = "nodejs";
 
 /** Never select password_hash — it must not leave the database. */
 const USER_COLUMNS =
-  "id, username, full_name, role, qr_token, can_manage_items, is_active, deactivation_reason, deactivated_at, created_at";
+  "id, username, full_name, role, qr_token, can_manage_items, approval_code, is_active, deactivation_reason, deactivated_at, created_at";
 
 /* ---------------- list ---------------- */
 export const GET = handler(async () => {

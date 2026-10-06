@@ -1,12 +1,13 @@
 import { db } from "@/lib/supabase";
 import { handler, ok, fail, badId, readBody } from "@/lib/api";
 import { hashPassword, newStaffToken, requireAdmin } from "@/lib/auth";
+import { randomBytes } from "node:crypto";
 import { audit } from "@/lib/audit";
 
 export const runtime = "nodejs";
 
 const USER_COLUMNS =
-  "id, username, full_name, role, qr_token, can_manage_items, is_active, deactivation_reason, deactivated_at, created_at";
+  "id, username, full_name, role, qr_token, can_manage_items, approval_code, is_active, deactivation_reason, deactivated_at, created_at";
 
 /** Update a staff/admin account: name, password, status, staff code. */
 export const PATCH = handler(
@@ -112,6 +113,17 @@ export const PATCH = handler(
     ) {
       patch.deactivation_reason = reason;
       changed.push("deactivation_reason");
+    }
+
+    // FR-03: per-person code for skipping the approval queue. Auto-generated
+    // so the admin does not invent a weak one; clearing is explicit.
+    if (body.regenerate_approval_code === true) {
+      patch.approval_code = "CT-" + randomBytes(3).toString("hex").toUpperCase();
+      changed.push("approval_code");
+    }
+    if (body.approval_code === null || body.approval_code === "") {
+      patch.approval_code = null;
+      changed.push("approval_code");
     }
 
     // FR-03: grant or revoke the right to add, edit and delete items directly.

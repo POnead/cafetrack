@@ -36,13 +36,17 @@ type Item = {
 
 export default function ApprovalsPage() {
   const [items, setItems] = useState<Item[]>([]);
+  const [changeRequests, setChangeRequests] = useState<any[]>([]);
+  const [mine, setMine] = useState<Item[]>([]);
+  const [myRequests, setMyRequests] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [isAdmin, setIsAdmin] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<{ msg: string; tone: any } | null>(null);
 
   const [busy, setBusy] = useState<string | null>(null);
-  const [rejecting, setRejecting] = useState<Item | null>(null);
+  const [rejecting, setRejecting] = useState<any | null>(null);
+  const [rejectKind, setRejectKind] = useState<"item" | "request">("item");
   const [note, setNote] = useState("");
 
   const inFlight = useRef(false);
@@ -51,14 +55,20 @@ export default function ApprovalsPage() {
     if (inFlight.current) return;
     inFlight.current = true;
     try {
-      const [me, res] = await Promise.all([
+      const [me, res, cr, mv, mr] = await Promise.all([
         fetch("/api/auth/me").then((r) => r.json()).catch(() => ({})),
         fetch("/api/items?status=pending").then((r) => r.json()),
+        fetch("/api/change-requests?status=pending").then((r) => r.json()),
+        fetch("/api/items?submitted_by=me&status=all").then((r) => r.json()),
+        fetch("/api/change-requests?requested_by=me&status=all").then((r) => r.json()),
       ]);
 
       setIsAdmin(me?.user?.role === "admin");
       if (res.error) throw new Error(res.error);
       setItems(res.items ?? []);
+      setChangeRequests(cr.requests ?? []);
+      setMine(mv.items ?? []);
+      setMyRequests(mr.requests ?? []);
       setError(null);
     } catch (e: any) {
       setError(e.message || "Could not load submissions");
@@ -96,6 +106,66 @@ export default function ApprovalsPage() {
     } finally {
       setBusy(null);
     }
+  }
+
+  async function decideRequest(req: any, decision: "approve" | "reject", why?: string) {
+    setBusy(req.id);
+    setError(null);
+    try {
+      const res = await fetch("/api/change-requests/review", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: req.id, decision, note: why ?? null }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data.error) throw new Error(data.error);
+
+      setToast({ msg: data.message || "Done", tone: "success" });
+      setRejecting(null);
+      setNote("");
+      await load();
+    } catch (e: any) {
+      setError(e.message || "Could not record that decision");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function resubmit(item: Item) {
+    setBusy(item.id);
+    setError(null);
+    try {
+      const res = await fetch("/api/items", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: item.name,
+          category_id: item.category?.id ?? null,
+          location_id: item.location?.id ?? null,
+          physical_form: item.physical_form,
+          unit: item.unit,
+          quantity: item.quantity,
+          low_stock_threshold: item.low_stock_threshold,
+          expiration_date: item.expiration_date,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data.error) throw new Error(data.error);
+      setToast({ msg: data.message || "Resubmitted", tone: "info" });
+      await load();
+    } catch (e: any) {
+      setError(e.message || "Could not resubmit");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function statusBadge(status: string) {
+    if (status === "approved" || status === "active")
+      return <Badge tone="green" variant="tag">Approved — now in stock</Badge>;
+    if (status === "rejected")
+      return <Badge tone="red" variant="tag">Rejected</Badge>;
+    return <Badge tone="amber" variant="tag">Awaiting approval</Badge>;
   }
 
   if (loading) return <Spinner label="Loading submissions..." />;
@@ -162,7 +232,7 @@ export default function ApprovalsPage() {
                     <button
                       className="btn-ghost flex-1"
                       disabled={busy === i.id}
-                      onClick={() => setRejecting(i)}
+                      onClick={() => { setRejecting(i); setRejectKind("item"); }}
                     >
                       Reject
                     </button>
@@ -216,7 +286,7 @@ export default function ApprovalsPage() {
                             <button
                               className="btn-ghost"
                               disabled={busy === i.id}
-                              onClick={() => setRejecting(i)}
+                              onClick={() => { setRejecting(i); setRejectKind("item"); }}
                             >
                               Reject
                             </button>
@@ -234,10 +304,106 @@ export default function ApprovalsPage() {
         </>
       )}
 
+      {/* Staff edit proposals, same decision flow as new submissions. */}
+      {changeRequests.length > 0 && (
+        <section className="space-y-3">
+          <h2 className="deco-title text-xl">Item change requests</h2>
+          {changeRequests.map((r) => (
+            <Card key={r.id} className="space-y-2">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <div className="font-semibold text-cocoa-900">
+                    {r.item?.name ?? "Unknown item"}
+                  </div>
+                  <div className="text-xs text-cocoa-500">{r.item?.sku}</div>
+                </div>
+                <Badge tone="amber" variant="tag">Awaiting approval</Badge>
+              </div>
+              <ul className="text-sm text-cocoa-600">
+                {r.name !== null && <li>Name → {r.name}</li>}
+                {r.category_id !== null && <li>Category changed</li>}
+                {r.location_id !== null && <li>Storage changed</li>}
+                {r.physical_form !== null && <li>Form → {r.physical_form}</li>}
+                {r.unit !== null && <li>Unit → {r.unit}</li>}
+                {r.units_per_box !== null && <li>Units per box → {r.units_per_box}</li>}
+                {r.quantity !== null && <li>Quantity → {r.quantity}{r.correction_reason ? ` (${r.correction_reason})` : ""}</li>}
+                {r.low_stock_threshold !== null && <li>Low-stock threshold → {r.low_stock_threshold}</li>}
+                {r.expiration_date !== null && <li>Expires → {fmtDate(r.expiration_date)}</li>}
+              </ul>
+              <div className="text-xs text-cocoa-400">{fmtDate(r.requested_at)}</div>
+              {isAdmin && (
+                <div className="flex gap-2 pt-1">
+                  <button
+                    className="btn-primary flex-1"
+                    disabled={busy === r.id}
+                    onClick={() => decideRequest(r, "approve")}
+                  >
+                    {busy === r.id ? "Working..." : "Approve"}
+                  </button>
+                  <button
+                    className="btn-ghost flex-1"
+                    disabled={busy === r.id}
+                    onClick={() => { setRejecting(r as any); setRejectKind("request"); }}
+                  >
+                    Reject
+                  </button>
+                </div>
+              )}
+            </Card>
+          ))}
+        </section>
+      )}
+
+      {/* A staff member's own trail: what they submitted and how it turned out. */}
+      {(mine.length > 0 || myRequests.length > 0) && (
+        <section className="space-y-3">
+          <h2 className="deco-title text-xl">My submissions</h2>
+          {mine.map((i) => (
+            <Card key={i.id} className="space-y-1">
+              <div className="flex items-start justify-between gap-2">
+                <div className="font-semibold text-cocoa-900">{i.name}</div>
+                {statusBadge(i.item_status)}
+              </div>
+              <div className="text-xs text-cocoa-500">
+                Submitted {fmtDate(i.submitted_at)}
+                {i.reviewed_at ? ` · Reviewed ${fmtDate(i.reviewed_at)}` : ""}
+              </div>
+              {i.review_note && (
+                <div className="text-sm text-cocoa-600">Note: {i.review_note}</div>
+              )}
+              {i.item_status === "rejected" && (
+                <button
+                  className="btn-ghost text-xs mt-1"
+                  disabled={busy === i.id}
+                  onClick={() => resubmit(i)}
+                >
+                  Resubmit for approval
+                </button>
+              )}
+            </Card>
+          ))}
+          {myRequests.map((r) => (
+            <Card key={r.id} className="space-y-1">
+              <div className="flex items-start justify-between gap-2">
+                <div className="font-semibold text-cocoa-900">Edit: {r.item?.name ?? "Unknown item"}</div>
+                {statusBadge(r.status)}
+              </div>
+              <div className="text-xs text-cocoa-500">
+                Requested {fmtDate(r.requested_at)}
+                {r.reviewed_at ? ` · Reviewed ${fmtDate(r.reviewed_at)}` : ""}
+              </div>
+              {r.review_note && (
+                <div className="text-sm text-cocoa-600">Note: {r.review_note}</div>
+              )}
+            </Card>
+          ))}
+        </section>
+      )}
+
       <Modal
         open={Boolean(rejecting)}
         onClose={() => { setRejecting(null); setNote(""); }}
-        title={`Reject ${rejecting?.name ?? ""}`}
+        title={`Reject ${rejecting?.name ?? rejecting?.item?.name ?? ""}`}
       >
         <p className="text-sm text-cocoa-600">
           The submission is kept with your reason, so whoever added it can see
@@ -259,7 +425,12 @@ export default function ApprovalsPage() {
           <button
             className="btn-primary"
             disabled={busy === rejecting?.id}
-            onClick={() => rejecting && decide(rejecting, "reject", note)}
+            onClick={() =>
+              rejecting &&
+              (rejectKind === "request"
+                ? decideRequest(rejecting, "reject", note)
+                : decide(rejecting, "reject", note))
+            }
           >
             {busy === rejecting?.id ? "Working..." : "Reject submission"}
           </button>

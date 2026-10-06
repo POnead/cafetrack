@@ -4,6 +4,7 @@ import { requireUser, verifyPassword } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { dispatchSoon } from "@/lib/email";
 import { FieldError, parseExpiryDate, parseBoxCount } from "@/lib/item-validation";
+import { eventBus, Events } from "@/lib/events";
 
 export const runtime = "nodejs";
 
@@ -26,6 +27,15 @@ export const GET = handler(async (req: Request) => {
     Math.max(Number.isFinite(requested) ? requested : 50, 1),
     500
   );
+  const offsetValue = searchParams.get("offset") ?? "0";
+  const offset = Number(offsetValue);
+  if (
+    !Number.isSafeInteger(offset) ||
+    offset < 0 ||
+    offset > Number.MAX_SAFE_INTEGER - limit + 1
+  ) {
+    return fail("Offset must be a non-negative whole number");
+  }
   const type = searchParams.get("type");
 
   // Date range. The spec asks for reports "filtered by date range", so `from`
@@ -47,7 +57,8 @@ export const GET = handler(async (req: Request) => {
        transaction_items(id, sku, item_name, quantity, qty_before, qty_after)`
     )
     .order("created_at", { ascending: false })
-    .limit(limit);
+    .order("id", { ascending: true })
+    .range(offset, offset + limit - 1);
 
   if (type) query = query.eq("type", type);
 
@@ -166,10 +177,21 @@ export const POST = handler(async (req: Request) => {
     { ip: clientIp(req), outcome: "success" }
   );
 
+  // Fire-and-forget: emit real-time event so connected clients update instantly.
+  // We don't await this — a slow connection must not hold up the till.
+  eventBus.emit(Events.STOCK_CHANGED, {
+    type,
+    transaction_id: data?.transaction_id ?? null,
+    actor_name: session.fullName,
+  });
+
   // refresh_alerts queues the emails this movement may have caused (an item
   // crossing its threshold, or a new batch arriving close to its date). Dispatch
   // is fired without awaiting so a slow mail server cannot hold up the till.
   await db().rpc("refresh_alerts");
+  // Fire-and-forget: emit alerts_changed event when new alerts fire.
+  eventBus.emit(Events.ALERTS_CHANGED, { type: "new", count: 0 });
+
   dispatchSoon();
 
   return ok({ result: data }, 201);

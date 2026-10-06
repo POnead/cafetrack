@@ -41,3 +41,25 @@ export async function canManageItems(user: SessionUser): Promise<boolean> {
   // write access until its cookie expires.
   return Boolean(data?.is_active && data?.can_manage_items);
 }
+
+/**
+ * Does this code unlock the submission for this user, for this one request?
+ *
+ * The code is per person (an admin sets it), not global, so it can be revoked
+ * for one staff member without changing everyone else's. A non-matching code
+ * is not an error from the submitter's point of view: the item simply goes
+ * through the normal admin queue.
+ */
+export async function approvalCodeMatches(user: SessionUser, code: unknown): Promise<boolean> {
+  const provided = typeof code === "string" ? code.trim() : "";
+  if (!provided) return false;
+
+  const { data } = await db()
+    .from("users")
+    .select("approval_code, is_active")
+    .eq("id", user.id)
+    .maybeSingle();
+
+  if (!data?.is_active || !data?.approval_code) return false;
+  return data.approval_code === provided;
+}

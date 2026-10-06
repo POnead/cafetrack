@@ -74,6 +74,8 @@ export default function ItemsPage() {
   const [editing, setEditing] = useState<Item | null>(null);
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({ ...EMPTY_FORM });
+  const [correctionReason, setCorrectionReason] = useState("");
+  const [approvalCode, setApprovalCode] = useState("");
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -222,6 +224,7 @@ export default function ItemsPage() {
       low_stock_threshold: String(item.low_stock_threshold),
       expiration_date: item.expiration_date ?? "",
     });
+    setCorrectionReason("");
     setFormError(null);
     setEditing(item);
     setCreating(false);
@@ -230,6 +233,8 @@ export default function ItemsPage() {
   function closeForm() {
     setCreating(false);
     setEditing(null);
+    setCorrectionReason("");
+    setApprovalCode("");
     setFormError(null);
   }
 
@@ -259,6 +264,11 @@ export default function ItemsPage() {
         setFormError("Units per box must be greater than zero, or left blank");
         return;
       }
+      const quantityChanged = editing !== null && qty !== Number(editing.quantity);
+      if (quantityChanged && !correctionReason.trim()) {
+        setFormError("Enter a reason for the stock correction");
+        return;
+      }
 
       const payload = {
         name: form.name,
@@ -271,6 +281,8 @@ export default function ItemsPage() {
         low_stock_threshold:
           form.low_stock_threshold.trim() === "" ? 5 : Math.round(low),
         expiration_date: form.expiration_date || null,
+        ...(quantityChanged ? { correction_reason: correctionReason.trim() } : {}),
+        ...(approvalCode.trim() ? { approval_code: approvalCode.trim() } : {}),
       };
 
       const res = await fetch(editing ? `/api/items/${editing.id}` : "/api/items", {
@@ -287,11 +299,15 @@ export default function ItemsPage() {
       // is watching for the barcode to stop working and assuming the save failed.
       setToast({
         msg: editing
-          ? "Item updated"
+          ? data.pending_change
+            ? "Edit submitted for approval — an admin will review it before it takes effect."
+            : "Item updated"
           : data.pending_approval
             ? `Submitted for approval — SKU ${data.item.sku}. An admin approves it before it can be used.`
-            : `Item created — SKU ${data.item.sku}`,
-        tone: data.pending_approval ? "info" : "success",
+            : data.message?.includes("via your code")
+              ? data.message
+              : `Item created — SKU ${data.item.sku}`,
+        tone: data.pending_approval || data.pending_change ? "info" : "success",
       });
       closeForm();
       load();
@@ -691,6 +707,23 @@ export default function ItemsPage() {
             </div>
           </div>
 
+          {editing && Number(form.quantity) !== Number(editing.quantity) && (
+            <div>
+              <label className="label" htmlFor="item-correction-reason">
+                Stock correction reason
+              </label>
+              <textarea
+                id="item-correction-reason"
+                className="input min-h-20"
+                maxLength={500}
+                value={correctionReason}
+                onChange={(e) => setCorrectionReason(e.target.value)}
+                placeholder="Explain why the recorded quantity is being corrected"
+                required
+              />
+            </div>
+          )}
+
         <div>
           <label className="label" htmlFor="item-units-per-box">
             Units per box (optional)
@@ -730,6 +763,24 @@ export default function ItemsPage() {
               encoded in the printed barcode label.
             </p>
           )}
+
+          <div>
+            <label className="label" htmlFor="item-approval-code">
+              Approval code (optional)
+            </label>
+            <input
+              id="item-approval-code"
+              className="input font-mono"
+              value={approvalCode}
+              onChange={(e) => setApprovalCode(e.target.value)}
+              placeholder="Enter your code to skip admin review"
+              maxLength={32}
+            />
+            <p className="mt-1 text-[11px] text-cocoa-400">
+              If an admin gave you a code, enter it here — your item or edit is
+              approved immediately. Without it, it goes to the admin for review.
+            </p>
+          </div>
 
           {formError && (
             <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">

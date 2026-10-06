@@ -66,6 +66,10 @@ create table if not exists users (
   -- having an admin approve each new ingredient first. Granted per person by an
   -- admin (FR-03). null/false means the submit-then-approve path.
   can_manage_items boolean not null default false,
+  -- Personal code a staff member can type when adding/editing an item, to
+  -- skip the admin approval queue for that one submission (FR-03). Set by an
+  -- admin; null means the staff member always goes through the queue.
+  approval_code text,
   is_active     boolean not null default true,
   -- Why and when an admin switched the account off. Surfaced to the person
   -- trying to sign in, so they know who to talk to.
@@ -80,6 +84,7 @@ create table if not exists users (
 alter table users add column if not exists deactivation_reason text;
 alter table users add column if not exists deactivated_at timestamptz;
 alter table users add column if not exists can_manage_items boolean not null default false;
+alter table users add column if not exists approval_code text;
 
 -- ---------- categories / locations ----------
 create table if not exists categories (
@@ -187,6 +192,93 @@ begin
   end if;
 
   return v_row;
+end;
+$$;
+
+-- ---------- item change requests (FR-03) ----------
+-- A staff member without item-management permission cannot edit a live item
+-- directly: their change is queued here and only lands on the item when an
+-- admin approves it. review_change_request applies that atomically, so an
+-- approved edit and its reviewer are recorded together.
+create table if not exists item_change_requests (
+  id                 uuid primary key default gen_random_uuid(),
+  item_id            uuid references items(id) on delete cascade,
+  requested_by       uuid references users(id) on delete set null,
+  requested_at       timestamptz not null default now(),
+  status             text not null default 'pending'
+    check (status in ('pending','approved','rejected')),
+  reviewed_by        uuid references users(id) on delete set null,
+  reviewed_at        timestamptz,
+  review_note        text,
+  -- What the item looked like when this was requested, so approving a stale
+  -- proposal is refused rather than silently overwriting a newer edit.
+  base_version       integer not null default 0,
+  -- Proposed values; null means "leave unchanged".
+  name               text,
+  category_id        uuid references categories(id) on delete set null,
+  location_id        uuid references locations(id) on delete set null,
+  physical_form      text check (physical_form in ('liquid','powder','solid')),
+  unit               text,
+  units_per_box      numeric(12,3),
+  quantity           numeric(12,3) check (quantity is null or quantity >= 0),
+  low_stock_threshold numeric(12,3),
+  expiration_date    date,
+  correction_reason  text
+);
+
+create or replace function review_change_request(
+  p_request_id uuid,
+  p_actor_id   uuid,
+  p_decision   text,     -- 'approve' | 'reject'
+  p_note       text default null
+) returns item_change_requests
+language plpgsql
+security definer
+as $$
+declare
+  v_req item_change_requests;
+  v_item items;
+begin
+  if p_decision not in ('approve','reject') then
+    raise exception 'decision must be approve or reject, got %', p_decision;
+  end if;
+
+  update item_change_requests
+     set status = case when p_decision = 'approve' then 'approved' else 'rejected' end,
+         reviewed_by = p_actor_id,
+         reviewed_at = now(),
+         review_note = p_note
+   where id = p_request_id
+     and status = 'pending'
+  returning * into v_req;
+
+  if not found then
+    raise exception 'change request is not awaiting approval';
+  end if;
+
+  if p_decision = 'approve' then
+    update items
+       set name = coalesce(v_req.name, name),
+           category_id = coalesce(v_req.category_id, category_id),
+           location_id = coalesce(v_req.location_id, location_id),
+           physical_form = coalesce(v_req.physical_form, physical_form),
+           unit = coalesce(v_req.unit, unit),
+           units_per_box = coalesce(v_req.units_per_box, units_per_box),
+           quantity = coalesce(v_req.quantity, quantity),
+           low_stock_threshold = coalesce(v_req.low_stock_threshold, low_stock_threshold),
+           expiration_date = coalesce(v_req.expiration_date, expiration_date),
+           version = version + case when v_req.quantity is not null then 1 else 0 end,
+           updated_at = now()
+     where id = v_req.item_id
+       and version = v_req.base_version
+    returning * into v_item;
+
+    if not found then
+      raise exception 'item was changed after this request was made — reject it and ask again';
+    end if;
+  end if;
+
+  return v_req;
 end;
 $$;
 

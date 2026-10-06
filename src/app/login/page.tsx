@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { StorefrontArt } from "@/components/BrandArt";
+import { ScanInput } from "@/components/ScanInput";
 import { fmtDateTime } from "@/lib/format";
 
 type Mode = "staff" | "admin";
@@ -23,8 +24,9 @@ export default function LoginPage() {
     when: string | null;
   } | null>(null);
 
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
+  async function submit(e?: React.FormEvent) {
+    e?.preventDefault();
+    if (busy) return;
     setError(null);
     setDeactivated(null);
     setBusy(true);
@@ -149,14 +151,16 @@ export default function LoginPage() {
                     required
                   />
                 ) : (
-                  <input
-                    aria-label="Staff barcode code"
-                    className="input font-mono"
-                    placeholder="Staff barcode code"
-                    value={staffCode}
-                    onChange={(e) => setStaffCode(e.target.value)}
-                    autoFocus
-                    required
+                  <ScanInput
+                    onScan={(code) => {
+                      setStaffCode(code);
+                      // Auto-submit when a scan lands — the scanner types the
+                      // code and presses Enter, so the form should just work.
+                      setTimeout(() => submit(), 0);
+                    }}
+                    placeholder="Scan your staff ID"
+                    label="Staff barcode code"
+                    autoFocus={true}
                   />
                 )}
 

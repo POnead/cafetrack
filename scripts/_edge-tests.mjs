@@ -97,12 +97,31 @@ async function rawCall(method, path, rawBody, cookie) {
   section("edit conflict (optimistic version)");
   const fresh = await call("GET", `/api/items/${target.id}`, null, A);
   const v0 = fresh.data.item.version;
+  const correctedQuantity = Number(fresh.data.item.quantity) + 1;
+  r = await call("PATCH", `/api/items/${target.id}`, { quantity: correctedQuantity }, A);
+  check("quantity correction requires a reason", r.status === 400, `${r.status} ${r.data?.error}`);
+
   // A quantity correction must bump the version, otherwise the version guard
   // has nothing to compare and a stale client could overwrite a newer edit.
-  r = await call("PATCH", `/api/items/${target.id}`, { quantity: 7 }, A);
+  r = await call(
+    "PATCH",
+    `/api/items/${target.id}`,
+    { quantity: correctedQuantity, correction_reason: "Edge test stock count" },
+    A
+  );
   check("quantity correction ok", r.status === 200, `${r.status} ${r.data?.error}`);
   check("quantity edit bumps version", r.data?.item?.version === Number(v0) + 1,
     `before=${v0} after=${r.data?.item?.version}`);
+  const audit = await call("GET", "/api/audit?limit=5", null, A);
+  check(
+    "quantity correction reason is audited",
+    audit.status === 200 &&
+      audit.data.entries.some(
+        (entry) =>
+          entry.action === "ITEM_UPDATE" &&
+          entry.details?.quantity_correction_reason === "Edge test stock count"
+      )
+  );
 
   // Two edits fired together is NOT a usable conflict test: PGlite runs them
   // one after another, so the second reads the version the first just wrote
@@ -323,6 +342,46 @@ async function rawCall(method, path, rawBody, cookie) {
   // repeatable — it asserts on an absolute quantity, not a delta.
   r = await call("POST", "/api/transactions", { type: "restock", password: "admin123", items: [{ sku: spillItem.sku, qty: 3 }] }, A);
   check("throwaway item restored for the next run", r.status === 201, `${r.status} ${r.data?.error}`);
+
+  for (let i = 0; i < 3; i++) {
+    await call(
+      "POST",
+      "/api/transactions",
+      { type: "checkout", password: "staff123", items: [{ sku: spillItem.sku, qty: 1 }] },
+      sc
+    );
+  }
+  const page1 = await call(
+    "GET",
+    "/api/transactions?type=checkout&staff=Juan%20Dela%20Cruz&limit=2&offset=0",
+    null,
+    A
+  );
+  const page2 = await call(
+    "GET",
+    "/api/transactions?type=checkout&staff=Juan%20Dela%20Cruz&limit=2&offset=2",
+    null,
+    A
+  );
+  check(
+    "transaction history pages beyond the first batch",
+    page1.status === 200 &&
+      page2.status === 200 &&
+      page1.data.transactions.length === 2 &&
+      page2.data.transactions.length >= 1 &&
+      !page1.data.transactions.some((row) =>
+        page2.data.transactions.some((next) => next.id === row.id)
+      )
+  );
+  r = await call("GET", "/api/transactions?offset=-1", null, A);
+  check("negative transaction offset rejected", r.status === 400, `${r.status} ${r.data?.error}`);
+  r = await call(
+    "POST",
+    "/api/transactions",
+    { type: "restock", password: "admin123", items: [{ sku: spillItem.sku, qty: 3 }] },
+    A
+  );
+  check("pagination fixtures restored", r.status === 201, `${r.status} ${r.data?.error}`);
 
   /* ============ 5. Users management ============ */
   section("user management validation");

@@ -103,7 +103,7 @@
 
 <!-- ============================================================ -->
 <div class="title-page">
-  <h1>CafeTrack: Real-Time Stock Monitoring with QR-Based Authentication for Merrylane Cafe Foodhub</h1>
+  <h1>CafeTrack: Real-Time Stock Monitoring with Barcode-Based Authentication for Merrylane Cafe Foodhub</h1>
   <h2 style="margin-top:20px;">A Comprehensive IT System Proposal</h2>
   <p class="spacer">Presented to the College of Informatics and Computing Sciences</p>
   <p>Batangas State University — Lipa Campus</p>
@@ -231,7 +231,7 @@
 <h2 class="sub">Scope and Delimitations</h2>
 
 <p>
-  The system covers item management with both admin and staff able to add items, barcode generation, barcode-based authentication, three types of barcode transactions (checkout, restock, and waste disposal), real-time stock updates, automated alerts, an immutable audit trail, and usage reports. It is designed for a single branch of Merrylane Cafe Foodhub and runs on the cafe's existing computer with a standard USB scanner.
+  The system covers role-based item management, barcode generation and authentication, three types of barcode transactions (checkout, restock, and waste disposal), real-time stock updates, automated alerts, an immutable audit trail, and filtered usage and waste reports. Admins and staff granted item-management permission can manage active items; other staff can submit new items for admin approval. Manual quantity corrections require a reason and are recorded in the audit trail. The system is designed for a single branch of Merrylane Cafe Foodhub and runs on the cafe's existing computer with a standard USB scanner.
 </p>
 
 <p>
@@ -247,13 +247,13 @@
 <ul>
   <li><strong>Role-Based Access Control (RBAC):</strong> Distinct permissions for Admins (owner/manager) who manage the system, and Staff (cooks/baristas) who perform checkout, restock, and waste disposal operations. Both roles can add new items to the system.</li>
   <li><strong>Barcode Authentication (Staff Login):</strong> Staff scan their personal barcode to log in and enter a password to verify their identity before performing any inventory transactions.</li>
-  <li><strong>Manual Item Management (Admin and Staff):</strong> Both admins and staff can manually add, edit, or delete ingredients through the web dashboard, inputting details like category, physical form (liquid/powder), quantity, and expiration dates.</li>
+  <li><strong>Role-Based Item Management:</strong> Admins and staff granted item-management permission can add, edit, and delete ingredients through the dashboard. Other staff can submit new items for admin approval. Item details include category, physical form (liquid/powder), quantity, and expiration dates.</li>
   <li><strong>Automatic Barcode Generation:</strong> The system automatically generates unique barcodes for each ingredient upon manual entry, which can be printed and affixed to storage containers.</li>
   <li><strong>Barcode-Based Item Transactions:</strong> Staff can scan item barcodes using connected scanner devices to record three types of transactions: checkout (items taken for use), restock (items added back to inventory), and waste disposal (items discarded due to spoilage or damage).</li>
   <li><strong>Multi-Item Transactions with Confirmation:</strong> Staff can scan multiple items in one transaction, with a final confirmation step (password/code) required to prevent accidental entries.</li>
   <li><strong>Real-Time Stock Updates:</strong> Inventory levels automatically adjust instantly in the database and reflect on the admin dashboard immediately after every transaction.</li>
   <li><strong>Automated Alerts and Reports:</strong> The system generates real-time alerts for low-stock levels and near-expiry items, plus historical reports for inventory usage and waste tracking.</li>
-  <li><strong>Immutable Audit Trail:</strong> A secure, uneditable chronological log records all system activities (item additions, checkouts, restocks, waste disposals, and adjustments) with user identification and timestamps for compliance and accountability.</li>
+  <li><strong>Immutable Audit Trail:</strong> A secure, uneditable chronological log records all system activities (item additions, checkouts, restocks, waste disposals, and adjustments) with user identification and timestamps for compliance and accountability. Manual quantity corrections include a required reason and the old and new values.</li>
   <li><strong>Expiration and Out-of-Stock Alert:</strong> The system alerts the admin user about items that are near expiration, out of stock, or already expired.</li>
 </ul>
 
@@ -352,14 +352,14 @@
   <tbody>
     <tr><td>FR-01</td><td>User Authentication</td><td>The system shall allow staff to log in by scanning their personal barcode and entering a password. Admins shall log in using username and password.</td></tr>
     <tr><td>FR-02</td><td>User Management</td><td>The system shall allow the admin to add, edit, disable, and enable user accounts, assign roles (Admin or Staff), and generate personal barcode credentials for each staff member.</td></tr>
-    <tr><td>FR-03</td><td>Item Management</td><td>The system shall allow both admin and staff to add, edit, or delete ingredients through the dashboard, entering details such as name, category, physical form, quantity, expiration date, and storage location.</td></tr>
+    <tr><td>FR-03</td><td>Item Management</td><td>The system shall allow admins and staff with item-management permission to add, edit, or delete ingredients through the dashboard. Other staff may submit new ingredients for admin approval. Item details include name, category, physical form, quantity, expiration date, and storage location.</td></tr>
     <tr><td>FR-04</td><td>Barcode Generation</td><td>The system shall automatically generate a unique barcode for each ingredient upon item creation. The barcode can be previewed on screen and printed on durable labels for storage containers.</td></tr>
     <tr><td>FR-05</td><td>Barcode Transactions</td><td>The system shall allow staff to scan item barcodes to record three types of transactions: checkout (items taken for use), restock (items added back to inventory), and waste disposal (items discarded due to spoilage or damage).</td></tr>
     <tr><td>FR-06</td><td>Multi-Item Checkout</td><td>The system shall allow staff to scan multiple items in a single transaction. A final confirmation step (re-entering password or PIN) shall be required before the transaction is committed.</td></tr>
     <tr><td>FR-07</td><td>Real-Time Stock Updates</td><td>The system shall update inventory levels in the database immediately after every transaction and reflect the change on the admin dashboard without requiring a manual page refresh.</td></tr>
     <tr><td>FR-08</td><td>Automated Alerts</td><td>The system shall generate real-time alerts for low-stock items, near-expiry items, out-of-stock items, and expired items. Alerts shall be displayed on the admin dashboard.</td></tr>
-    <tr><td>FR-09</td><td>Reports</td><td>The system shall generate inventory usage reports and waste tracking reports, with filters for date range, category, and user. Reports shall be exportable to PDF or CSV.</td></tr>
-    <tr><td>FR-10</td><td>Audit Trail</td><td>The system shall log every transaction and system action (item additions, checkouts, restocks, waste disposals, adjustments, logins, and failed logins) with user identification, timestamp, and outcome. The audit log shall be append-only.</td></tr>
+    <tr><td>FR-09</td><td>Reports</td><td>The system shall generate complete inventory usage and waste tracking reports, with filters for date range, category, and user. PDF and CSV exports shall include the filtered movement details and current stock snapshot.</td></tr>
+    <tr><td>FR-10</td><td>Audit Trail</td><td>The system shall log every transaction and system action (item additions, checkouts, restocks, waste disposals, adjustments, logins, and failed logins) with user identification, timestamp, and outcome. Manual quantity corrections shall include a reason and the old and new values. The audit log shall be append-only.</td></tr>
     <tr><td>FR-11</td><td>Email Integration</td><td>The system shall send email notifications to the admin for low-stock, near-expiry, out-of-stock, and expired items, plus a daily summary and a failed-login warning. The admin can manage email recipients and send any report by email.</td></tr>
   </tbody>
 </table>
@@ -388,11 +388,11 @@
 <h2 class="sub">System Architecture</h2>
 
 <p>
-  CafeTrack uses a three-tier architecture. The presentation layer is a web-based dashboard accessible through a standard browser, built with HTML, CSS, and JavaScript. The application layer handles all business logic, including authentication, checkout processing, alert generation, email dispatch, and report compilation. It is implemented using Node.js with Express. The data layer is a relational database, either PostgreSQL or MySQL, which stores items, users, transactions, and the audit trail. This separation keeps the interface independent of the backend, so the system can be updated or extended without rewriting everything.
+  CafeTrack uses a three-tier architecture. The presentation layer is a responsive browser-based interface built with React and TypeScript. The application layer uses the Next.js App Router: page components provide the interface, while server-side route handlers implement authentication, inventory and transaction operations, alert management, email dispatch, reporting, and auditing. The data layer is PostgreSQL, accessed through Supabase in hosted deployments or through the bundled PGlite PostgreSQL runtime in local mode. This separation keeps the interface independent of persistence details and supports local development without changing the application routes.
 </p>
 
 <p>
-  The application layer is divided into six services. AuthService handles login, role-based access control, and barcode verification. InventoryService manages items, stock levels, and storage locations. TransactionService processes checkout, restock, and waste disposal. ReportService generates usage and waste reports with PDF and CSV export. EmailService dispatches alerts and daily summaries to the admin. AuditService records every action in the append-only log. The barcode scanner is treated as an external device that behaves like a keyboard, so no driver or library is needed to capture its input.
+  Application responsibilities are organized around authentication and permissions, inventory management, transaction processing, reporting, email notifications, and auditing. These are implemented through Next.js route handlers, shared TypeScript libraries, and PostgreSQL functions rather than separate Express services. The barcode scanner is treated as an external device that behaves like a keyboard, so no driver or library is needed to capture its input.
 </p>
 
 <h2 class="sub">Data Flow Diagram</h2>
@@ -579,10 +579,9 @@
 
 <h3 class="subsub">QR vs Barcode</h3>
 <p>
-  The HTML paper body consistently uses the word "barcode." The PDF first three pages still say "QR code," "QR-based," and "QR generation." The title on both still says "QR-Based Authentication."
+  The HTML paper uses "barcode" throughout, including the corrected title. The progress PDF first three pages still say "QR code," "QR-based," and "QR generation," so those PDF references remain to be corrected.
 </p>
 <ul>
-  <li>Fix: Change the title to "Barcode-Based Authentication."</li>
   <li>Fix: Replace all QR references on PDF pages 1–3 with barcode.</li>
 </ul>
 
@@ -620,7 +619,7 @@
     </tr>
   </thead>
   <tbody>
-    <tr><td>HTML Paper</td><td>Update title to barcode. Confirm group number.</td></tr>
+    <tr><td>HTML Paper</td><td>Title and implementation details updated to match barcode authentication, role-based item permissions, correction auditing, reporting, and the Next.js architecture.</td></tr>
     <tr><td>PDF Pages 1–3</td><td>Replace all QR with barcode. Update General Objective and Specific Objectives.</td></tr>
     <tr><td>PDF Page 5 (ERD)</td><td>Confirm EMAIL_RECIPIENT and EMAIL_NOTIFICATION are shown, matching the HTML appendix.</td></tr>
     <tr><td>PDF Page 7 (DFD L1)</td><td>Add Process P7 (Dispatch Email Notifications) and data stores D6 and D7.</td></tr>

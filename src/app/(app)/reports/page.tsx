@@ -15,6 +15,8 @@ import { fmtQty, fmtDate, daysUntil, toCsv } from "@/lib/format";
 import { stockStatus } from "@/lib/status";
 import { printStockReport } from "@/lib/report-print";
 
+const TRANSACTION_PAGE_SIZE = 500;
+
 type Item = {
   id: string;
   sku: string;
@@ -35,7 +37,7 @@ type Txn = {
   actor_name: string;
   note: string | null;
   created_at: string;
-  transaction_items: { sku: string; item_name: string; quantity: number }[];
+  transaction_items: { sku: string; item_name: string; quantity: number }[] | null;
 };
 
 const MOVEMENT_LABEL: Record<string, string> = {
@@ -67,6 +69,10 @@ export default function ReportsPage() {
     msg: string;
     tone: "info" | "error" | "success";
   } | null>(null);
+
+  const [emailModalOpen, setEmailModalOpen] = useState(false);
+  const [emailTo, setEmailTo] = useState("");
+  const [emailSending, setEmailSending] = useState(false);
 
   const inFlight = useRef(false);
 
@@ -105,31 +111,48 @@ export default function ReportsPage() {
     inFlight.current = true;
 
     try {
-      // Date range / staff / type are applied server-side: the transactions
-      // endpoint caps at 500 newest-first, so filtering the returned page
-      // client-side would quietly omit anything older.
-      const qs = new URLSearchParams({ limit: "500" });
-      if (rangeParams.from) qs.set("from", rangeParams.from);
-      if (rangeParams.to) qs.set("to", rangeParams.to);
-      if (staff) qs.set("staff", staff);
-      if (typeFilter) qs.set("type", typeFilter);
+      const loadAllTransactions = async () => {
+        const all: Txn[] = [];
+        let offset = 0;
 
-      const [i, t, c] = await Promise.all([
+        while (true) {
+          const qs = new URLSearchParams({
+            limit: String(TRANSACTION_PAGE_SIZE),
+            offset: String(offset),
+          });
+          if (rangeParams.from) qs.set("from", rangeParams.from);
+          if (rangeParams.to) qs.set("to", rangeParams.to);
+          if (staff) qs.set("staff", staff);
+          if (typeFilter) qs.set("type", typeFilter);
+
+          const response = await fetch(`/api/transactions?${qs}`);
+          const data = await response.json();
+          if (!response.ok || data.error) {
+            throw new Error(data.error || "Could not load report transactions");
+          }
+
+          const page: Txn[] = data.transactions ?? [];
+          all.push(...page);
+          if (page.length < TRANSACTION_PAGE_SIZE) return all;
+          offset += page.length;
+        }
+      };
+
+      const [i, transactionRows, c] = await Promise.all([
         fetch("/api/items").then((r) => r.json()),
-        fetch(`/api/transactions?${qs}`).then((r) => r.json()),
+        loadAllTransactions(),
         // Advisory: the report still works if the reference list fails.
         fetch("/api/refs/categories")
           .then((r) => r.json())
           .catch(() => ({ items: [] })),
       ]);
-
       setCategories(c.items ?? []);
-
+      setCategories(c.items ?? []);
       if (i.error) throw new Error(i.error);
-      if (t.error) throw new Error(t.error);
+      if (i.error) throw new Error(i.error);
 
       setItems(i.items ?? []);
-      setTxns(t.transactions ?? []);
+      setTxns(transactionRows);
 
       // Advisory only: a failure here must not take the whole report down.
       fetch("/api/settings")
@@ -164,8 +187,28 @@ export default function ReportsPage() {
     return items.filter((i) => i.category?.id === catFilter);
   }, [items, catFilter]);
 
-  // Staff who actually appear in the loaded window, so the dropdown does not
-  // offer someone with no matching transactions.
+  const itemsBySku = useMemo(
+    () => new Map(items.map((item) => [item.sku, item])),
+    [items]
+  );
+
+  // Apply category filtering to movement lines as well as the stock snapshot.
+  // Transactions do not snapshot category, so historical lines use the item's
+  // current category; deleted items cannot be assigned to a category.
+  const filteredTransactions = useMemo(() => {
+    if (!catFilter) return txns;
+    return txns
+      .map((transaction) => ({
+        ...transaction,
+      transaction_items: (transaction.transaction_items ?? []).filter(
+          (line) => itemsBySku.get(line.sku)?.category?.id === catFilter
+        ),
+      }))
+      .filter((transaction) => transaction.transaction_items.length > 0);
+  }, [txns, catFilter, itemsBySku]);
+
+  // Keep staff choices based on the loaded date/type window, even while a
+  // category filter is active.
   const staffNames = useMemo(
     () => [...new Set(txns.map((t) => t.actor_name).filter(Boolean))].sort(),
     [txns]
@@ -179,7 +222,7 @@ export default function ReportsPage() {
   );
 
   const movement = (["checkout", "restock", "waste"] as const).map((type) => {
-    const rows = txns.filter((t) => t.type === type);
+    const rows = filteredTransactions.filter((t) => t.type === type);
     const qty = rows.reduce(
       (n, t) =>
         n + (t.transaction_items ?? []).reduce((m, li) => m + Number(li.quantity), 0),
@@ -190,7 +233,7 @@ export default function ReportsPage() {
 
   const topMovers = (() => {
     const tally = new Map<string, { name: string; qty: number }>();
-    for (const t of txns) {
+    for (const t of filteredTransactions) {
       if (t.type !== "checkout") continue;
       for (const li of t.transaction_items ?? []) {
         const cur = tally.get(li.sku) ?? { name: li.item_name, qty: 0 };
@@ -204,45 +247,130 @@ export default function ReportsPage() {
       .slice(0, 5);
   })();
 
+  // Waste tracking: total waste quantity and top wasted items
+  const wasteTotal = movement.find((m) => m.type === "waste")?.qty ?? 0;
+  const wasteCount = movement.find((m) => m.type === "waste")?.count ?? 0;
+  const wasteByItem = (() => {
+    const tally = new Map<string, { name: string; qty: number; count: number }>();
+    for (const t of filteredTransactions) {
+      if (t.type !== "waste") continue;
+      for (const li of t.transaction_items ?? []) {
+        const cur = tally.get(li.sku) ?? { name: li.item_name, qty: 0, count: 0 };
+        cur.qty += Number(li.quantity);
+        cur.count += 1;
+        tally.set(li.sku, cur);
+      }
+    }
+    return [...tally.entries()]
+      .map(([sku, v]) => ({ sku, ...v }))
+      .sort((a, b) => b.qty - a.qty)
+      .slice(0, 5);
+  })();
+  const wasteByCategory = (() => {
+    const tally = new Map<string, number>();
+    for (const t of filteredTransactions) {
+      if (t.type !== "waste") continue;
+      for (const li of t.transaction_items ?? []) {
+        const item = itemsBySku.get(li.sku);
+        const cat = item?.category?.name ?? "Uncategorized";
+        tally.set(cat, (tally.get(cat) ?? 0) + Number(li.quantity));
+      }
+    }
+    return [...tally.entries()]
+      .map(([name, qty]) => ({ name, qty }))
+      .sort((a, b) => b.qty - a.qty);
+  })();
+
+  const filterDescription = [
+    rangeParams.from || rangeParams.to
+      ? `Dates: ${rangeParams.from || "beginning"} to ${rangeParams.to || "today"}`
+      : "All dates",
+    staff ? `Staff: ${staff}` : null,
+    typeFilter ? `Movement: ${MOVEMENT_LABEL[typeFilter] ?? typeFilter}` : null,
+    catFilter
+      ? `Category: ${categories.find((category) => category.id === catFilter)?.name ?? "selected category"}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   function exportCsv() {
-    const rows = shownItems.map((i) => {
+    const stockRows: Record<string, unknown>[] = shownItems.map((i) => {
       const d = daysUntil(i.expiration_date);
       return {
+        Record: "Stock snapshot",
+        Date: "",
+        Staff: "",
+        Movement: "",
         SKU: i.sku,
         Item: i.name,
         Category: i.category?.name ?? "",
         Location: i.location?.name ?? "",
-        "On hand": Number(i.quantity),
+        Quantity: Number(i.quantity),
         Unit: i.unit,
         Threshold: Number(i.low_stock_threshold),
         Expiry: i.expiration_date ?? "",
         Status: stockStatus(i.quantity, i.low_stock_threshold).label,
         "Days to expiry": d === null ? "" : d,
+        Note: "",
       };
     });
 
+    const movementRows: Record<string, unknown>[] = filteredTransactions.flatMap(
+      (transaction) =>
+        (transaction.transaction_items ?? []).map((line) => {
+          const item = itemsBySku.get(line.sku);
+          return {
+            Record: "Movement",
+            Date: transaction.created_at,
+            Staff: transaction.actor_name,
+            Movement: MOVEMENT_LABEL[transaction.type] ?? transaction.type,
+            SKU: line.sku,
+            Item: line.item_name,
+            Category: item?.category?.name ?? "Uncategorized",
+            Location: item?.location?.name ?? "",
+            Quantity: Number(line.quantity),
+            Unit: item?.unit ?? "",
+            Threshold: "",
+            Expiry: "",
+            Status: "",
+            "Days to expiry": "",
+            Note: transaction.note ?? "",
+          };
+        })
+    );
+    const rows = [...stockRows, ...movementRows];
+
     const csv = toCsv(rows, [
+      "Record",
+      "Date",
+      "Staff",
+      "Movement",
       "SKU",
       "Item",
       "Category",
       "Location",
-      "On hand",
+      "Quantity",
       "Unit",
       "Threshold",
       "Expiry",
       "Status",
       "Days to expiry",
+      "Note",
     ]);
 
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `cafetrack-stock-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `cafetrack-report-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
 
-    setToast({ msg: `Exported ${rows.length} rows`, tone: "success" });
+    setToast({
+      msg: `Exported ${stockRows.length} stock rows and ${movementRows.length} movement rows`,
+      tone: "success",
+    });
   }
 
   function exportPdf() {
@@ -251,9 +379,44 @@ export default function ReportsPage() {
       items: shownItems,
       movement,
       topMovers,
+      wasteByItem,
+      movementLines: filteredTransactions.flatMap((transaction) =>
+        (transaction.transaction_items ?? []).map((line) => ({
+          date: transaction.created_at,
+          actorName: transaction.actor_name,
+          type: transaction.type,
+          sku: line.sku,
+          itemName: line.item_name,
+          category: itemsBySku.get(line.sku)?.category?.name ?? "Uncategorized",
+          quantity: Number(line.quantity),
+          note: transaction.note,
+        }))
+      ),
+      filterDescription,
       lowCount: low.length,
       outCount: out.length,
     });
+  }
+
+  async function sendEmailReport() {
+    if (!emailTo.trim()) return;
+    setEmailSending(true);
+    try {
+      const res = await fetch("/api/email/report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ to: emailTo.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not send the report");
+      setToast({ msg: `Report emailed to ${emailTo.trim()}`, tone: "success" });
+      setEmailModalOpen(false);
+      setEmailTo("");
+    } catch (e: any) {
+      setToast({ msg: e.message, tone: "error" });
+    } finally {
+      setEmailSending(false);
+    }
   }
 
   return (
@@ -262,12 +425,19 @@ export default function ReportsPage() {
         <div>
           <h1 className="deco-title text-3xl">Stock Report</h1>
           <p className="mt-1 text-sm text-cocoa-500">
-            Pantry snapshot plus the last {txns.length} recorded movements.
+            Current stock and all matching movement history.
           </p>
         </div>
         <div className="flex gap-2">
           <button className="btn-ghost" onClick={load}>
             Reload
+          </button>
+          <button
+            className="btn-ghost"
+            onClick={() => setEmailModalOpen(true)}
+            disabled={items.length === 0}
+          >
+            Email this report
           </button>
           <button
             className="btn-ghost"
@@ -426,7 +596,7 @@ export default function ReportsPage() {
         <Stat label="Items tracked" value={shownItems.length} />
         <Stat label="Low Stock" value={low.length} tone="warn" />
         <Stat label="Out of Stock" value={out.length} tone="danger" />
-        <Stat label="Movements loaded" value={txns.length} />
+        <Stat label="Movements in report" value={filteredTransactions.length} />
       </div>
 
       {loading ? (
@@ -634,7 +804,135 @@ export default function ReportsPage() {
               </>
             )}
           </Card>
+
+          {/* ---------- waste tracking ---------- */}
+          <div className="grid gap-5 lg:grid-cols-2">
+            <Card className="!p-0">
+              <div className="border-b border-cream-200 bg-cream-50 px-4 py-2.5">
+                <h2 className="text-sm font-bold text-cocoa-800">
+                  Waste Summary
+                </h2>
+              </div>
+              <div className="space-y-3 p-4">
+                <div className="grid grid-cols-2 gap-3">
+                  <Stat label="Total Waste" value={fmtQty(wasteTotal)} tone="danger" />
+                  <Stat label="Waste Events" value={wasteCount} tone="warn" />
+                </div>
+                {wasteByCategory.length > 0 && (
+                  <div>
+                    <div className="label">Waste by Category</div>
+                    <table className="w-full">
+                      <thead>
+                        <tr className="bg-cream-100/60">
+                          <th className="th">Category</th>
+                          <th className="th text-right">Quantity</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {wasteByCategory.map((w) => (
+                          <tr key={w.name}>
+                            <td className="td text-cocoa-700">{w.name}</td>
+                            <td className="td text-right tabular-nums">
+                              {fmtQty(w.qty)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </Card>
+
+            <Card className="!p-0">
+              <div className="border-b border-cream-200 bg-cream-50 px-4 py-2.5">
+                <h2 className="text-sm font-bold text-cocoa-800">
+                  Most Wasted Items
+                </h2>
+              </div>
+              {wasteByItem.length === 0 ? (
+                <Empty>No waste recorded yet.</Empty>
+              ) : (
+                <table className="w-full">
+                  <thead>
+                    <tr className="bg-cream-100/60">
+                      <th className="th">Item</th>
+                      <th className="th">SKU</th>
+                      <th className="th text-right">Total Waste</th>
+                      <th className="th text-right">Events</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {wasteByItem.map((w) => (
+                      <tr key={w.sku}>
+                        <td className="td text-cocoa-700">{w.name}</td>
+                        <td className="td font-mono text-xs text-cocoa-400">
+                          {w.sku}
+                        </td>
+                        <td className="td text-right tabular-nums">
+                          {fmtQty(w.qty)}
+                        </td>
+                        <td className="td text-right tabular-nums">{w.count}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </Card>
+          </div>
         </>
+      )}
+
+      {/* ---------- email report modal ---------- */}
+      {emailModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="card w-full max-w-md space-y-4 p-6">
+            <h2 className="text-lg font-bold text-cocoa-800">
+              Email this report
+            </h2>
+            <p className="text-sm text-cocoa-500">
+              Sends the current stock report to the email address below.
+            </p>
+            <div>
+              <label className="label" htmlFor="email-to">
+                Email address
+              </label>
+              <input
+                id="email-to"
+                className="input"
+                type="email"
+                placeholder="owner@example.com"
+                value={emailTo}
+                onChange={(e) => setEmailTo(e.target.value)}
+                autoFocus
+              />
+            </div>
+            {toast && (
+              <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
+                {toast.msg}
+              </div>
+            )}
+            <div className="flex justify-end gap-2">
+              <button
+                className="btn-ghost"
+                onClick={() => {
+                  setEmailModalOpen(false);
+                  setEmailTo("");
+                }}
+                disabled={emailSending}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn-primary"
+                onClick={sendEmailReport}
+                disabled={emailSending || !emailTo.trim()}
+              >
+                {emailSending ? "Sending..." : "Send report"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       <Toast

@@ -1,145 +1,147 @@
+import { db } from "@/lib/supabase";
 import { handler, ok, fail, readBody } from "@/lib/api";
 import { requireAdmin } from "@/lib/auth";
-import { queueDirectEmail, dispatchQueued } from "@/lib/email";
-import { db } from "@/lib/supabase";
+import { audit } from "@/lib/audit";
+import { queueDirectEmail } from "@/lib/email";
 
 export const runtime = "nodejs";
 
+type ReportTransaction = {
+  type: string;
+  transaction_items: {
+    sku: string;
+    item_name: string;
+    quantity: number | string;
+  }[] | null;
+};
+
 /**
- * Send the stock report to an address (FR-11: "the admin can send any report by
- * email").
+ * Email a stock report to a specified address (FR-11: "send any report by email").
  *
- * The report is built from the same snapshot the Reports page shows, so what
- * arrives is what was on screen — but it is built server-side from the database
- * rather than trusting a body from the browser. A caller cannot use this to ask
- * for every row in the database or for someone else's address list.
- *
- * Returns only aggregates, never raw user rows, and caps the length it will
- * build. A report for 500 items is already long enough to be an email.
+ * The report body is built from the same data the Reports page shows: current
+ * stock levels, movement summary, and top movers. The message goes through the
+ * same email queue as alerts, so it is retried on the same terms and appears
+ * in the delivery log.
  */
 export const POST = handler(async (req: Request) => {
-  await requireAdmin();
+  const session = await requireAdmin();
   const body = await readBody(req);
 
-  const to = String(body.to || "").trim();
-  if (!to) return fail("An email address is required");
+  const to = String(body.to ?? "").trim();
+  if (!to) return fail("Enter an email address");
 
-  const { data: settings } = await db()
-    .from("settings")
-    .select("value")
-    .eq("key", "business_name")
-    .maybeSingle();
-  const business = settings?.value || "CafeTrack";
-
-  const { data: items, error } = await db()
+  // Build the report body from current data
+  const { data: items, error: itemsErr } = await db()
     .from("items")
-    .select("sku, name, quantity, unit, low_stock_threshold, expiration_date")
+    .select(
+      `sku, name, quantity, unit, low_stock_threshold, expiration_date,
+       category(name), location(name)`
+    )
     .eq("item_status", "active")
-    .order("name", { ascending: true })
-    .limit(500);
+    .order("name", { ascending: true });
 
-  if (error) return fail(error.message, 500);
+  if (itemsErr) return fail(itemsErr.message, 500);
 
-  const rows = items ?? [];
-  const low = rows.filter(
-    (i: any) => Number(i.quantity) <= Number(i.low_stock_threshold)
-  );
-  const out = low.filter((i: any) => Number(i.quantity) <= 0);
+  const transactionRows: ReportTransaction[] = [];
+  const transactionPageSize = 500;
+  for (let offset = 0; ; offset += transactionPageSize) {
+    const { data, error } = await db()
+      .from("transactions")
+      .select(
+        `id, type, actor_name, created_at,
+         transaction_items(sku, item_name, quantity)`
+      )
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: true })
+      .range(offset, offset + transactionPageSize - 1);
 
-  const soon = rows
-    .filter((i: any) => i.expiration_date)
-    .map((i: any) => ({ ...i, days: daysUntil(i.expiration_date) }))
-    .filter((i: any) => i.days !== null && i.days <= 14)
-    .sort((a: any, b: any) => a.days - b.days);
+    if (error) return fail(error.message, 500);
+    const page: ReportTransaction[] = data ?? [];
+    transactionRows.push(...page);
+    if (page.length < transactionPageSize) break;
+  }
 
-  const lines = [
-    `${business} — stock report`,
-    `Sent ${new Date().toUTCString()}`,
-    "",
-    `Items tracked: ${rows.length}`,
-    `Low or out of stock: ${low.length} (out of stock: ${out.length})`,
-    `Expiring within 14 days: ${soon.length}`,
-    "",
-  ];
+  // Build movement summary
+  const movement = (["checkout", "restock", "waste"] as const).map((type) => {
+    const rows = transactionRows.filter((t) => t.type === type);
+    const qty = rows.reduce(
+      (n, t) =>
+        n + (t.transaction_items ?? []).reduce((m, li) => m + Number(li.quantity), 0),
+      0
+    );
+    return { type, count: rows.length, qty };
+  });
 
-  if (low.length) {
-    lines.push("NEEDS RESTOCKING", "-----------------");
-    for (const i of low) {
-      lines.push(
-        `  ${i.sku}  ${i.name}: ${i.quantity} ${i.unit} on hand (threshold ${i.low_stock_threshold})`
-      );
+  // Build top movers
+  const tally = new Map<string, { name: string; qty: number }>();
+  for (const t of transactionRows) {
+    if (t.type !== "checkout") continue;
+    for (const li of t.transaction_items ?? []) {
+      const cur = tally.get(li.sku) ?? { name: li.item_name, qty: 0 };
+      cur.qty += Number(li.quantity);
+      tally.set(li.sku, cur);
+    }
+  }
+  const topMovers = [...tally.entries()]
+    .map(([sku, v]) => ({ sku, ...v }))
+    .sort((a, b) => b.qty - a.qty)
+    .slice(0, 5);
+
+  // Build the email body
+  const lines: string[] = [];
+  lines.push("CafeTrack Stock Report");
+  lines.push(`Generated: ${new Date().toLocaleString()}`);
+  lines.push("");
+  lines.push(`Total items: ${items?.length ?? 0}`);
+  lines.push("");
+
+  lines.push("Movement Summary:");
+  for (const m of movement) {
+    const label =
+      m.type === "checkout"
+        ? "Checked out"
+        : m.type === "restock"
+          ? "Restocked"
+          : "Waste";
+    lines.push(`  ${label}: ${m.count} transactions, ${m.qty} units`);
+  }
+  lines.push("");
+
+  if (topMovers.length > 0) {
+    lines.push("Most Checked Out:");
+    for (const m of topMovers) {
+      lines.push(`  ${m.name} (${m.sku}): ${m.qty}`);
     }
     lines.push("");
   }
 
-  if (soon.length) {
-    lines.push("EXPIRING SOON", "-------------");
-    for (const i of soon) {
-      lines.push(`  ${i.sku}  ${i.name}: ${i.expiration_date} (${i.days} day(s))`);
-    }
-    lines.push("");
+  lines.push("Current Stock:");
+  for (const i of items ?? []) {
+    const qty = Number(i.quantity);
+    const threshold = Number(i.low_stock_threshold);
+    const status = qty <= 0 ? "OUT" : qty <= threshold ? "LOW" : "OK";
+    lines.push(
+      `  [${status}] ${i.name} (${i.sku}): ${qty} ${i.unit} (threshold: ${threshold})`
+    );
   }
 
-  if (!low.length && !soon.length) {
-    lines.push("Nothing needs attention right now.");
-    lines.push("");
-  }
-
-  // Movement counts for the day, to give the mail some context.
-  const { data: txns } = await db()
-    .from("transactions")
-    .select("type")
-    .gte("created_at", new Date(new Date().setUTCHours(0, 0, 0, 0)).toISOString());
-
-  const byType = { checkout: 0, restock: 0, waste: 0 };
-  for (const t of txns ?? []) {
-    if (t.type in byType) byType[t.type as keyof typeof byType]++;
-  }
-
-  lines.push(
-    "TODAY'S MOVEMENTS",
-    "-----------------",
-    `  checked out: ${byType.checkout}`,
-    `  restocked:   ${byType.restock}`,
-    `  waste:       ${byType.waste}`,
-    "",
-    "—",
-    `${business}, sent from CafeTrack`
-  );
+  const emailBody = lines.join("\n");
+  const subject = `CafeTrack Stock Report — ${new Date().toLocaleDateString()}`;
 
   try {
-    await queueDirectEmail(
-      to,
-      `${business} — stock report (${new Date().toISOString().slice(0, 10)})`,
-      lines.join("\n")
-    );
+    await queueDirectEmail(to, subject, emailBody);
   } catch (e: any) {
-    return fail(e?.message || "Could not queue the report");
+    return fail(e.message || "Could not queue the report email", 400);
   }
 
-  // Not awaited: the admin is looking at a screen, not waiting on SMTP. The
-  // status comes back so the UI can say queued vs sent, and the Email page's
-  // log shows what actually went out.
-  const result = await dispatchQueued(5);
+  await audit(
+    session,
+    "EMAIL_REPORT_SENT",
+    "report",
+    null,
+    { to, subject, itemCount: items?.length ?? 0 },
+    { ip: null, outcome: "success" }
+  );
 
-  return ok({
-    to,
-    sent: result.sent > 0,
-    queued: result.sent === 0,
-    items: rows.length,
-    low: low.length,
-    message:
-      result.sent > 0
-        ? `Report sent to ${to}`
-        : `Report queued for ${to}. Check the Email log — it will send when SMTP is reachable.`,
-  });
+  return ok({ queued: true, to });
 });
-
-/** Whole days from today until `date`. null for a missing or unparseable date. */
-function daysUntil(date: string): number | null {
-  const then = new Date(`${date}T00:00:00Z`).getTime();
-  if (Number.isNaN(then)) return null;
-  const today = new Date();
-  const start = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
-  return Math.round((then - start) / 86_400_000);
-}
