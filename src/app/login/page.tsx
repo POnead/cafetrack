@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { CafeIllustration } from "@/components/CafeIllustration";
+import { StorefrontArt } from "@/components/BrandArt";
 import { fmtDateTime } from "@/lib/format";
 
 type Mode = "staff" | "admin";
@@ -67,7 +67,17 @@ export default function LoginPage() {
           <h1 className="script-logo text-4xl">CafeTrack</h1>
 
           <div className="flex flex-1 items-center justify-center">
-            <CafeIllustration className="w-full max-w-md" />
+            {/* The illustration is a JPEG with an opaque white background, so it
+                gets its own white panel instead of sitting straight on the
+                peach. See the note at the top of @/components/BrandArt. */}
+            <div className="w-full max-w-[380px] rounded-[28px] bg-white p-6 shadow-warm-lg">
+              {/* Preloaded: this is the desktop LCP element. It costs a phone
+                  one small fetch for a panel it never shows, which is the
+                  cheaper mistake than a late-loading hero. The panel is 380px
+                  and p-6 leaves the image 332px, so 380px is the honest
+                  `sizes`; the next candidate down, 256px, would be too small. */}
+              <StorefrontArt preload sizes="380px" />
+            </div>
           </div>
 
           <p className="text-xs font-medium text-cocoa-600/70">
@@ -130,6 +140,7 @@ export default function LoginPage() {
               <form onSubmit={submit} className="space-y-3.5">
                 {mode === "admin" ? (
                   <input
+                    aria-label="Username"
                     className="input"
                     placeholder="Username"
                     value={username}
@@ -139,6 +150,7 @@ export default function LoginPage() {
                   />
                 ) : (
                   <input
+                    aria-label="Staff barcode code"
                     className="input font-mono"
                     placeholder="Staff barcode code"
                     value={staffCode}
@@ -149,6 +161,7 @@ export default function LoginPage() {
                 )}
 
                 <input
+                  aria-label="Password"
                   className="input"
                   type="password"
                   placeholder="Password"

@@ -14,8 +14,36 @@ create table if not exists settings (
 insert into settings (key, value) values
   ('expiry_warning_days', '7'),
   ('session_timeout_minutes', '15'),
-  ('business_name', 'Merrylane Cafe Foodhub')
+  ('business_name', 'Merrylane Cafe Foodhub'),
+  -- Email (FR-11). off by default: adding a feature must not start sending mail
+  -- from someone's cafe until they have asked for it. An admin turns it on and
+  -- adds a recipient from Settings > Email.
+  ('email_enabled', '0'),
+  ('email_dedupe_hours', '24'),
+  ('email_max_attempts', '3'),
+  ('email_from', 'CafeTrack <no-reply@cafetrack.local>'),
+  ('email_daily_summary_hour', '7')
 on conflict (key) do nothing;
+
+-- ---------- roles ----------
+-- The conceptual ERD carries ROLE as its own entity. It became a text column on
+-- USER first, because the system recognises exactly two roles and a join to look
+-- them up was cost without benefit. This table exists so the ERD matches the
+-- schema and so a third role can be added without a migration, but users.role
+-- stays the column the application reads: moving every query onto a role_id join
+-- would be a large change to the hot authentication path for no runtime gain.
+-- roles.name is the single source of truth for the vocabulary; users.role is
+-- constrained to it by the check below, so the two cannot drift apart.
+create table if not exists roles (
+  id          serial primary key,
+  name        text unique not null,
+  description text
+);
+
+insert into roles (name, description) values
+  ('admin', 'Owner or manager. Full access, including user and settings management.'),
+  ('staff', 'Cook or barista. Performs movements and submits new items.')
+on conflict (name) do nothing;
 
 -- ---------- users ----------
 create table if not exists users (
@@ -25,6 +53,10 @@ create table if not exists users (
   full_name     text not null,
   role          text not null check (role in ('admin','staff')),
   qr_token      text unique,
+  -- Whether this account may add, edit and delete items directly, instead of
+  -- having an admin approve each new ingredient first. Granted per person by an
+  -- admin (FR-03). null/false means the submit-then-approve path.
+  can_manage_items boolean not null default false,
   is_active     boolean not null default true,
   -- Why and when an admin switched the account off. Surfaced to the person
   -- trying to sign in, so they know who to talk to.
@@ -38,6 +70,7 @@ create table if not exists users (
 -- are added separately — and idempotently, which keeps this file re-runnable.
 alter table users add column if not exists deactivation_reason text;
 alter table users add column if not exists deactivated_at timestamptz;
+alter table users add column if not exists can_manage_items boolean not null default false;
 
 -- ---------- categories / locations ----------
 create table if not exists categories (
@@ -77,12 +110,76 @@ create table if not exists items (
   low_stock_threshold numeric(12,3) not null default 5,
   expiration_date    date,
   version            integer not null default 0,
-  created_at         timestamptz not null default now(),
-  updated_at         timestamptz not null default now()
+  -- 'active'  — counts as stock, appears everywhere.
+  -- 'pending' — submitted by staff without item-management permission; held for
+  --             an admin to approve or reject (FR-03). Excluded from stock
+  --             figures, alerts and transactions until approved, so an unapproved
+  --             ingredient can never be checked out or counted.
+  -- 'rejected'— refused by an admin, kept with the reason for the record.
+  item_status text not null default 'active'
+    check (item_status in ('active','pending','rejected')),
+  -- Who submitted it, and who decided. Both nullable: an item added by an admin
+  -- needs no approval, and a row predating this has neither.
+  submitted_by  uuid references users(id) on delete set null,
+  submitted_at  timestamptz,
+  reviewed_by   uuid references users(id) on delete set null,
+  reviewed_at   timestamptz,
+  review_note   text,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()
 );
 
 -- Migration for items created before per-box packaging existed.
 alter table items add column if not exists units_per_box numeric(12,3);
+
+-- Migration for the submit-then-approve flow (FR-03).
+alter table items add column if not exists item_status text not null default 'active';
+alter table items add column if not exists submitted_by uuid references users(id) on delete set null;
+alter table items add column if not exists submitted_at timestamptz;
+alter table items add column if not exists reviewed_by uuid references users(id) on delete set null;
+alter table items add column if not exists reviewed_at timestamptz;
+alter table items add column if not exists review_note text;
+
+-- Approving a submission or rejecting one is an ordinary item update with two
+-- things a plain UPDATE cannot do: it must refuse to run on an item that is not
+-- actually awaiting a decision, and it must stamp who decided. Both in one
+-- statement, so a route cannot mark an item reviewed and then fail before
+-- recording it.
+create or replace function review_item(
+  p_item_id  uuid,
+  p_actor_id uuid,
+  p_decision text,     -- 'approve' | 'reject'
+  p_note     text default null
+) returns items
+language plpgsql
+security definer
+as $$
+declare
+  v_row items;
+begin
+  if p_decision not in ('approve','reject') then
+    raise exception 'decision must be approve or reject, got %', p_decision;
+  end if;
+
+  update items
+     set item_status = case when p_decision = 'approve' then 'active' else 'rejected' end,
+         reviewed_by = p_actor_id,
+         reviewed_at = now(),
+         review_note = p_note,
+         updated_at = now()
+   where id = p_item_id
+     -- Only a pending item is awaiting a decision. Re-reviewing an active item
+     -- would silently overwrite its reviewer, so it is refused here.
+     and item_status = 'pending'
+  returning * into v_row;
+
+  if not found then
+    raise exception 'item is not awaiting approval';
+  end if;
+
+  return v_row;
+end;
+$$;
 
 -- ---------- transactions ----------
 create table if not exists transactions (
@@ -116,8 +213,24 @@ create table if not exists audit_log (
   details     jsonb not null default '{}'::jsonb,
   prev_hash   text not null,
   entry_hash  text not null,
+  -- Where the action came from, and how it turned out.
+  --
+  -- Deliberately NOT part of entry_hash. The digest is computed over the fields
+  -- above, which are the ones that were already covered when the chain started;
+  -- adding these two would make every existing row fail verify_audit_chain,
+  -- because the stored hash could not be recomputed under a formula that did not
+  -- exist at write time. A chain is only worth having if it verifies, so these
+  -- sit beside the hash rather than inside it. They are still append-only in
+  -- practice (nothing in the app updates audit_log) and they answer "where from"
+  -- and "did it work", which the action name alone cannot.
+  ip_address  text,
+  outcome     text,
   created_at  timestamptz not null default now()
 );
+
+-- Migration for chains created before these two columns existed.
+alter table audit_log add column if not exists ip_address text;
+alter table audit_log add column if not exists outcome text;
 
 -- ---------- alerts ----------
 create table if not exists alerts (
@@ -140,6 +253,57 @@ create table if not exists login_attempts (
   created_at timestamptz not null default now()
 );
 
+-- ---------- email (FR-11) ----------
+-- Recipients and the queue. Alerts are raised by refresh_alerts() as before;
+-- this only decides who hears about them.
+
+create table if not exists email_recipients (
+  id            uuid primary key default gen_random_uuid(),
+  email_address text unique not null,
+  display_name  text,
+  is_active     boolean not null default true,
+  -- Which alert families this address wants. Empty means "everything", which is
+  -- the right default for a single-owner cafe: a recipient added by the owner
+  -- should not silently miss the low-stock mail they signed up for by ticking
+  -- the wrong box. A non-empty list is an explicit opt-out from the rest.
+  --   low_stock | near_expiry | out_of_stock | expired | daily_summary
+  --   | failed_login | reports
+  subscriptions text[] not null default '{}',
+  created_at    timestamptz not null default now()
+);
+
+-- One row per queued message. Written when an alert fires, marked sent once
+-- SMTP accepts it. `attempts` and `last_error` drive the retry; `dedupe_key`
+-- is what stops the same alert becoming the same email repeatedly (NFR-07).
+create table if not exists email_notifications (
+  id           uuid primary key default gen_random_uuid(),
+  alert_id     uuid references alerts(id) on delete cascade,
+  recipient_id uuid references email_recipients(id) on delete cascade,
+  -- low_stock | near_expiry | out_of_stock | expired | daily_summary
+  -- | failed_login | report
+  kind         text not null,
+  subject      text not null,
+  body         text not null,
+  -- queued | sending | sent | failed
+  status       text not null default 'queued'
+    check (status in ('queued','sending','sent','failed')),
+  attempts     integer not null default 0,
+  last_error   text,
+  -- Identifies the trigger so a repeat within the suppression window is dropped.
+  -- Alerts use 'alert:<alert_id>', the daily summary uses the date.
+  dedupe_key   text,
+  queued_at    timestamptz not null default now(),
+  sent_at      timestamptz,
+  -- Set when a row was created but not sent because the same dedupe_key had
+  -- already gone out inside the window. Kept for the admin's own visibility.
+  suppressed   boolean not null default false
+);
+
+create index if not exists idx_email_notif_status on email_notifications(status);
+create index if not exists idx_email_notif_dedupe on email_notifications(dedupe_key);
+create index if not exists idx_items_status      on items(item_status);
+create index if not exists idx_items_submitted   on items(submitted_at desc);
+
 -- ---------- indexes ----------
 create index if not exists idx_items_sku       on items(sku);
 create index if not exists idx_items_expiry    on items(expiration_date);
@@ -157,7 +321,13 @@ create or replace function append_audit(
   p_action      text,
   p_entity_type text,
   p_entity_id   text,
-  p_details     jsonb
+  p_details     jsonb,
+  -- Optional, and deliberately outside the hash. See the column comments on
+  -- audit_log: adding these to the digest would invalidate every row written
+  -- under the earlier formula, and a chain that does not verify is worthless.
+  -- They have defaults so existing six-argument callers keep working unchanged.
+  p_ip_address  text default null,
+  p_outcome     text default null
 ) returns audit_log
 language plpgsql
 security definer
@@ -173,11 +343,13 @@ begin
   select entry_hash into v_prev from audit_log order by seq desc limit 1;
   v_prev := coalesce(v_prev, 'GENESIS');
 
-  insert into audit_log (actor_id, actor_name, action, entity_type, entity_id, details, prev_hash, entry_hash)
+  insert into audit_log (actor_id, actor_name, action, entity_type, entity_id, details, prev_hash, entry_hash, ip_address, outcome)
   values (p_actor_id, p_actor_name, p_action, p_entity_type, p_entity_id,
-          coalesce(p_details, '{}'::jsonb), v_prev, '')
+          coalesce(p_details, '{}'::jsonb), v_prev, '', p_ip_address, p_outcome)
   returning * into v_row;
 
+  -- Unchanged from the original formula on purpose. Do not add p_ip_address or
+  -- p_outcome here without reading the note above.
   v_hash := encode(digest(
       v_row.seq::text || '|' || v_prev || '|' || p_actor_name || '|' || p_action || '|' ||
       coalesce(p_entity_type,'') || '|' || coalesce(p_entity_id,'') || '|' ||
@@ -294,6 +466,18 @@ begin
       raise exception 'item not found: %', v_req.sku;
     end if;
 
+    -- A submitted-but-unapproved item is not stock (FR-03). It must not be
+    -- moved, restocked or written off before an admin has seen it, or the
+    -- approval step becomes decorative.
+    if v_row.item_status <> 'active' then
+      if v_row.item_status = 'pending' then
+        raise exception
+          '% is awaiting admin approval and cannot be used yet', v_row.name;
+      else
+        raise exception '% was rejected by an admin and is not in use', v_row.name;
+      end if;
+    end if;
+
     -- Per-box packaging. A restock may be counted in boxes instead of the
     -- item's own unit, which is what a supplier invoice actually says. The
     -- conversion happens here rather than in the UI because the factor lives on
@@ -402,6 +586,208 @@ end;
 $$;
 
 -- ============================================================
+-- FUNCTION: enqueue_email_alerts  (FR-11)
+-- Turns newly-open alerts into queued email_notifications rows.
+--
+-- Called from refresh_alerts() after the alert rows exist, and safe to call
+-- repeatedly: the dedupe_key below is what stops one alert becoming fifty
+-- emails, since refresh_alerts runs after every movement.
+--
+-- Returns the number of rows queued. Zero is the normal case on a cafe with no
+-- recipients configured, and is not an error.
+-- ============================================================
+create or replace function enqueue_email_alerts()
+returns integer
+language plpgsql
+security definer
+as $$
+declare
+  v_window_hours integer;
+  v_queued       integer := 0;
+  v_total        integer := 0;
+  v_body         text;
+  v_alert        record;
+begin
+  -- Suppression window (NFR-07: no duplicate for the same item within 24h).
+  select coalesce(value::int, 24) into v_window_hours
+    from settings where key = 'email_dedupe_hours';
+  v_window_hours := coalesce(v_window_hours, 24);
+
+  -- No recipients, no work. Checked first so the common case is one index probe.
+  if not exists (select 1 from email_recipients where is_active) then
+    return 0;
+  end if;
+
+  for v_alert in
+    select a.id, a.type, a.message, a.created_at
+      from alerts a
+     where a.resolved = false
+       -- Only alerts raised from here on. Without this a backfill would mail
+       -- the owner about every open alert the day the feature was switched on.
+       and a.created_at > now() - make_interval(hours => v_window_hours)
+  loop
+    v_body := v_alert.message || ' (' || v_alert.type || ')';
+
+    insert into email_notifications
+      (alert_id, recipient_id, kind, subject, body, dedupe_key)
+    select v_alert.id,
+           r.id,
+           v_alert.type,
+           'CafeTrack: ' || initcap(replace(v_alert.type, '_', ' ')),
+           v_body,
+           'alert:' || v_alert.id::text || ':' || v_alert.type
+      from email_recipients r
+     where r.is_active
+       -- Empty subscriptions means "send everything" — see the column comment.
+       and (cardinality(r.subscriptions) = 0
+            or v_alert.type = any (r.subscriptions))
+       -- The suppression window, per recipient. Deliberately covers `queued` and
+       -- `sending`, not just `sent`: refresh_alerts() runs after every
+       -- movement, so an alert raised by a checkout and then by the restock a
+       -- minute later would otherwise queue twice before either is sent. A
+       -- `failed` row does not suppress — that one is meant to be retried.
+       and not exists (
+         select 1 from email_notifications e
+          where e.dedupe_key = 'alert:' || v_alert.id::text || ':' || v_alert.type
+            and e.recipient_id = r.id
+            and e.status in ('queued','sending','sent')
+            and e.queued_at > now() - make_interval(hours => v_window_hours)
+       )
+     on conflict do nothing;
+
+    -- ROW_COUNT is per statement inside a loop, so it has to be accumulated
+    -- rather than assigned — the loop body's last statement is the insert.
+    GET DIAGNOSTICS v_queued = ROW_COUNT;
+    v_total := v_total + v_queued;
+  end loop;
+
+  return v_total;
+end;
+$$;
+
+-- The dedupe guarantee, enforced by the database rather than only by the loop
+-- above, so two concurrent refreshes cannot both queue the same alert.
+--
+-- `failed` is excluded on purpose: an exhausted message must stay retryable, and
+-- a unique index over every status would block the retry that NFR-07 requires.
+-- The window itself is enforced by the loop; this index is the backstop against
+-- a race, not the primary mechanism.
+create unique index if not exists uq_email_notif_dedupe
+  on email_notifications (dedupe_key, recipient_id)
+  where status in ('queued','sending','sent') and dedupe_key is not null;
+
+-- ============================================================
+-- FUNCTION: enqueue_daily_summary  (FR-11)
+-- One message a day covering what happened, not just what is open.
+-- Dedupe key is the date, so running it twice in a day sends once.
+-- ============================================================
+create or replace function enqueue_daily_summary()
+returns integer
+language plpgsql
+security definer
+as $$
+declare
+  v_body   text;
+  v_count  integer := 0;
+begin
+  if not exists (select 1 from email_recipients where is_active) then
+    return 0;
+  end if;
+
+  select
+      'Movements: ' || count(*)
+   || E'\n  checked out: ' || count(*) filter (where type = 'checkout')
+   || E'\n  restocked:   ' || count(*) filter (where type = 'restock')
+   || E'\n  waste:       ' || count(*) filter (where type = 'waste')
+  into v_body
+    from transactions
+   where created_at >= date_trunc('day', now());
+
+  v_body := v_body || E'\n\nStill open: '
+    || (select count(*) from alerts where resolved = false)
+    || E'\n  low/out of stock: '
+    || (select count(*) from alerts where resolved = false and type in ('low_stock','out_of_stock'))
+    || E'\n  expiring/expired: '
+    || (select count(*) from alerts where resolved = false and type in ('near_expiry','expired'))
+    || E'\n\nFailed sign-in attempts today: '
+    || (select count(*) from login_attempts where success = false and created_at >= date_trunc('day', now()));
+
+  insert into email_notifications
+    (recipient_id, kind, subject, body, dedupe_key)
+  select r.id,
+         'daily_summary',
+         'CafeTrack daily summary — ' || to_char(current_date, 'DD Mon YYYY'),
+         v_body,
+         'daily_summary:' || current_date::text
+    from email_recipients r
+   where r.is_active
+     and (cardinality(r.subscriptions) = 0 or 'daily_summary' = any (r.subscriptions))
+     and not exists (
+       select 1 from email_notifications e
+        where e.dedupe_key = 'daily_summary:' || current_date::text
+          and e.recipient_id = r.id
+          and e.status in ('queued','sending','sent')
+     )
+  on conflict do nothing;
+
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  return v_count;
+end;
+$$;
+
+-- ============================================================
+-- FUNCTION: enqueue_failed_login_alert  (FR-11)
+-- Called by the sign-in routes after a rejected attempt. One message per
+-- burst, not per keystroke: the dedupe key collapses repeats inside the
+-- suppression window so a person fumbling their password does not generate
+-- a dozen emails, while a real attempt an hour later still gets through.
+-- ============================================================
+create or replace function enqueue_failed_login_alert(p_username text, p_method text, p_reason text)
+returns integer
+language plpgsql
+security definer
+as $$
+declare
+  v_count integer := 0;
+  v_body  text;
+begin
+  if not exists (select 1 from email_recipients where is_active) then
+    return 0;
+  end if;
+
+  -- Deliberately does not name the credential: an unknown code is logged as a
+  -- hash prefix, and putting the raw value in an email would undo that.
+  v_body := 'A sign-in attempt was rejected.'
+    || E'\n  method: ' || p_method
+    || E'\n  reason: ' || p_reason
+    || E'\n  when:   ' || to_char(now(), 'DD Mon YYYY HH24:MI')
+    || E'\n\nIf this was not you, change the password for that account.';
+
+  insert into email_notifications
+    (recipient_id, kind, subject, body, dedupe_key)
+  select r.id,
+         'failed_login',
+         'CafeTrack: rejected sign-in attempt',
+         v_body,
+         'failed_login:' || p_method || ':' || to_char(date_trunc('hour', now()), 'YYYYMMDDHH24')
+    from email_recipients r
+   where r.is_active
+     and (cardinality(r.subscriptions) = 0 or 'failed_login' = any (r.subscriptions))
+     and not exists (
+       select 1 from email_notifications e
+        where e.dedupe_key = 'failed_login:' || p_method || ':'
+              || to_char(date_trunc('hour', now()), 'YYYYMMDDHH24')
+          and e.recipient_id = r.id
+          and e.status in ('queued','sending','sent')
+     )
+  on conflict do nothing;
+
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  return v_count;
+end;
+$$;
+
+-- ============================================================
 -- FUNCTION: refresh_alerts
 -- Recomputes low-stock / out-of-stock / near-expiry / expired.
 -- Auto-resolves alerts that no longer apply, and escalates an open
@@ -463,7 +849,12 @@ begin
               else i.name || ' is low on stock (' || i.quantity || ' ' || i.unit || ' left)'
          end
   from items i
-  where i.quantity <= i.low_stock_threshold
+  -- item_status: a submitted or rejected ingredient is not stock yet, so it
+  -- must not raise a low-stock or expiry alert. Without this a staff submission
+  -- arriving at quantity 0 would email the owner about an item that does not
+  -- officially exist.
+  where i.item_status = 'active'
+    and i.quantity <= i.low_stock_threshold
     and not exists (
       select 1 from alerts a
       where a.item_id = i.id and a.resolved = false
@@ -479,13 +870,26 @@ begin
               else i.name || ' expires on ' || i.expiration_date
          end
   from items i
-  where i.expiration_date is not null
+  where i.item_status = 'active'
+    and i.expiration_date is not null
     and i.expiration_date <= current_date + (v_days || ' days')::interval
     and not exists (
       select 1 from alerts a
       where a.item_id = i.id and a.resolved = false
         and a.type in ('near_expiry','expired')
     );
+
+  -- Email (FR-11). Queue one message per newly-opened alert, per recipient who
+  -- subscribed to that family. Wrapped so a cafe with no recipients, or with
+  -- email switched off, still gets its alerts: enqueue_email_alerts is called
+  -- on every refresh_alerts, so it must never be able to fail the refresh.
+  begin
+    perform enqueue_email_alerts();
+  exception when others then
+    -- Swallowed on purpose. An alert that was raised must not be lost because
+    -- the mail side had a problem; the queue is a convenience, not the record.
+    null;
+  end;
 
   -- auto-resolve stock alerts that cleared
   update alerts a

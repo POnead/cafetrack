@@ -64,5 +64,11 @@ function deny(req: NextRequest, pathname: string) {
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  // The favicon and the brand illustrations are excluded alongside the other
+  // static paths. A browser fetches both on its own, without a session, so
+  // letting the proxy answer them would send the sign-in page instead — and an
+  // icon that renders HTML is a broken tab on every page, while an illustration
+  // that renders HTML is a torn-up image square on the login page, which is the
+  // one page a logged-out visitor is guaranteed to load.
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|icon.svg|brand/).*)"],
 };

@@ -1,7 +1,8 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail, readBody } from "@/lib/api";
+import { handler, ok, fail, readBody, clientIp } from "@/lib/api";
 import { requireUser, verifyPassword } from "@/lib/auth";
 import { audit } from "@/lib/audit";
+import { dispatchSoon } from "@/lib/email";
 import { FieldError, parseExpiryDate, parseBoxCount } from "@/lib/item-validation";
 
 export const runtime = "nodejs";
@@ -130,10 +131,17 @@ export const POST = handler(async (req: Request) => {
   if (!me || !me.is_active) return fail("This account is inactive", 403);
 
   if (!verifyPassword(password, me.password_hash)) {
-    await audit(session, `${AUDIT_ACTION[type]}_DENIED`, "transaction", null, {
-      reason: "bad_password",
-      lines: items.length,
-    });
+    await audit(
+      session,
+      `${AUDIT_ACTION[type]}_DENIED`,
+      "transaction",
+      null,
+      {
+        reason: "bad_password",
+        lines: items.length,
+      },
+      { ip: clientIp(req), outcome: "denied" }
+    );
     return fail("Incorrect password", 401);
   }
 
@@ -154,10 +162,15 @@ export const POST = handler(async (req: Request) => {
     AUDIT_ACTION[type],
     "transaction",
     data?.transaction_id ?? null,
-    { note: body.note ?? null, items: data?.items ?? items }
+    { note: body.note ?? null, items: data?.items ?? items },
+    { ip: clientIp(req), outcome: "success" }
   );
 
+  // refresh_alerts queues the emails this movement may have caused (an item
+  // crossing its threshold, or a new batch arriving close to its date). Dispatch
+  // is fired without awaiting so a slow mail server cannot hold up the till.
   await db().rpc("refresh_alerts");
+  dispatchSoon();
 
   return ok({ result: data }, 201);
 });

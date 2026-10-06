@@ -22,6 +22,8 @@
 import { PGlite } from "@electric-sql/pglite";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { startAutoBackup } from "./backup";
+import { startEmailScheduler } from "./email";
 import { hashPassword, newStaffToken } from "./auth";
 
 type Row = Record<string, any>;
@@ -104,8 +106,12 @@ function quoteId(name: string): string {
 
 /**
  * How to reach each embedded resource. PostgREST infers this from foreign
- * keys; here the four paths the app actually selects are declared explicitly.
+ * keys; here the paths the app actually selects are declared explicitly.
  * For `many` relations localKey is on the parent and foreignKey on the child.
+ *
+ * A new embed has to be added here or the query fails at runtime — this is the
+ * tradeoff the README records. The fifth path came with the email queue, which
+ * needs the recipient's address alongside each queued message.
  */
 const RELATIONS: Record<
   string,
@@ -134,6 +140,12 @@ const RELATIONS: Record<
     localKey: "id",
     foreignKey: "transaction_id",
     many: true,
+  },
+  "email_notifications.email_recipients": {
+    table: "email_recipients",
+    localKey: "recipient_id",
+    foreignKey: "id",
+    many: false,
   },
 };
 
@@ -205,6 +217,13 @@ async function bootstrap(): Promise<PGlite> {
   await seedIfEmpty(pg);
 
   console.log(`CafeTrack: local PGlite database ready at ${DB_DIR}`);
+
+  // Housekeeping that only makes sense once, and only in local mode. Both are
+  // idempotent and guarded against hot reload, and neither is awaited: a backup
+  // or a mail server being slow must not delay the first request.
+  startAutoBackup();
+  startEmailScheduler();
+
   return pg;
 }
 
@@ -339,6 +358,9 @@ class LocalQuery implements PromiseLike<DbResult> {
   private shape: "many" | "single" | "maybe" = "many";
   private wantCount = false;
   private headOnly = false;
+  // Columns named by `.upsert(..., { onConflict: [...] })`. null means a plain
+  // insert, which is what every other caller wants.
+  private upsertConflict: string[] | null = null;
   private run: Promise<DbResult> | null = null;
 
   constructor(private table: string) {}
@@ -369,6 +391,37 @@ class LocalQuery implements PromiseLike<DbResult> {
 
   delete() {
     this.mode = "delete";
+    return this;
+  }
+
+  /**
+   * Insert, or update the matching row if one already exists.
+   *
+   * `onConflict` names the columns the conflict is judged on. Supabase-js
+   * defaults that to the table's primary key; passing the column that actually
+   * carries the uniqueness here is clearer and does not depend on the caller
+   * remembering which key the table happens to use.
+   *
+   * An empty `onConflict` falls back to a bare insert, because
+   * `on conflict () do nothing` is not valid Postgres.
+   *
+   * Normalised from either shape. supabase-js accepts a bare string or an array
+   * here, and a call written for Supabase naturally passes the string — which
+   * then arrived here as a string, and `.map()` on it threw. The throw was
+   * caught by the adapter's own error handling and handed back as `error`, so
+   * the caller saw a failed write rather than a crash, and if it did not check
+   * `error` the row was silently never written. Accepting both costs one line
+   * and removes that whole failure mode.
+   */
+  upsert(
+    payload: Row | Row[],
+    options?: { onConflict?: string | string[]; ignoreDuplicates?: boolean }
+  ) {
+    this.mode = "insert";
+    this.payload = payload;
+    const raw = options?.onConflict;
+    const cols = raw == null ? [] : Array.isArray(raw) ? raw : [raw];
+    this.upsertConflict = options?.ignoreDuplicates ? null : cols.length ? cols : null;
     return this;
   }
 
@@ -594,6 +647,25 @@ class LocalQuery implements PromiseLike<DbResult> {
       .map(quoteId)
       .join(", ")}) values ${tuples.join(", ")}`;
 
+    // upsert: turn the insert into an update-then-insert so an existing row is
+    // updated instead of failing its unique constraint. Used by the email
+    // recipient settings, where re-adding an address should not be an error.
+    //
+    // `on conflict do update` requires a conflict target to name the columns it
+    // should merge on. Supabase's default for a single-column table is that
+    // table's primary key, but a conflict on email_address (the column callers
+    // actually pass) is the intent here, so it is named explicitly. `excluded`
+    // is Postgres for "the row that would have been inserted".
+    if (this.upsertConflict?.length) {
+      const target = this.upsertConflict.map(quoteId).join(", ");
+      const updates = columns
+        .filter((c) => !this.upsertConflict!.includes(c))
+        .map((c) => `${quoteId(c)} = excluded.${quoteId(c)}`);
+      text += updates.length
+        ? ` on conflict (${target}) do update set ${updates.join(", ")}`
+        : ` on conflict (${target}) do nothing`;
+    }
+
     const returning = this.returningList();
     if (returning) text += ` returning ${returning}`;
 
@@ -694,7 +766,11 @@ const RPC: Record<
   { sql: string; args: (params: Row) => unknown[]; list?: boolean }
 > = {
   append_audit: {
-    sql: `select to_jsonb(x) as out from append_audit($1,$2,$3,$4,$5,$6::jsonb) as x`,
+    // $7 and $8 are ip_address and outcome. They have to be named here as well
+    // as in lib/audit.ts — the database function defaults them to null, so an
+    // adapter that forgot them would store every entry with the columns empty
+    // and report success. That is exactly what happened before this was fixed.
+    sql: `select to_jsonb(x) as out from append_audit($1,$2,$3,$4,$5,$6::jsonb,$7,$8) as x`,
     args: (p) => [
       p.p_actor_id ?? null,
       p.p_actor_name ?? "anonymous",
@@ -702,6 +778,8 @@ const RPC: Record<
       p.p_entity_type ?? null,
       p.p_entity_id ?? null,
       JSON.stringify(p.p_details ?? {}),
+      p.p_ip_address ?? null,
+      p.p_outcome ?? null,
     ],
   },
   process_transaction: {
@@ -719,6 +797,33 @@ const RPC: Record<
     sql: `select * from verify_audit_chain()`,
     args: () => [],
     list: true,
+  },
+  // Email queue (FR-11). enqueue_email_alerts is called from inside
+  // refresh_alerts, so this entry exists for the explicit "re-run now" case an
+  // admin can trigger from the Email settings page.
+  enqueue_email_alerts: {
+    sql: `select enqueue_email_alerts() as out`,
+    args: () => [],
+  },
+  review_item: {
+    // Wrapped in to_jsonb for the same reason as append_audit: a function that
+    // `returns items` hands back a composite, which arrives as an unparsed
+    // string rather than an object, so the route would find no fields on it.
+    sql: `select to_jsonb(x) as out from review_item($1,$2,$3,$4) as x`,
+    args: (p) => [
+      p.p_item_id ?? null,
+      p.p_actor_id ?? null,
+      p.p_decision,
+      p.p_note ?? null,
+    ],
+  },
+  enqueue_daily_summary: {
+    sql: `select enqueue_daily_summary() as out`,
+    args: () => [],
+  },
+  enqueue_failed_login_alert: {
+    sql: `select enqueue_failed_login_alert($1,$2,$3) as out`,
+    args: (p) => [p.p_username ?? null, p.p_method ?? "unknown", p.p_reason ?? "unknown"],
   },
 };
 

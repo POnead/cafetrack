@@ -22,7 +22,10 @@ export const GET = handler(async (req: Request) => {
     db()
       .from("audit_log")
       .select(
-        "seq, actor_id, actor_name, action, entity_type, entity_id, details, created_at"
+        // ip_address and outcome are written by lib/audit.ts but were never
+        // selected here, so they were stored and then invisible — an ERD column
+        // nobody can read is not a feature.
+        "seq, actor_id, actor_name, action, entity_type, entity_id, details, ip_address, outcome, created_at"
       )
       .order("seq", { ascending: false })
       .limit(limit),

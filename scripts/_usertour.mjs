@@ -352,7 +352,7 @@ try {
   // --- set the minimum shelf life on that location -------------------
   // Blur saves it: the field has no Save button, so blurring is the gesture
   // that commits the change. A real user tabs or clicks away.
-  const shelfField = admin.getByLabel(`Minimum shelf life in days for ${LOCATION}`);
+  const shelfField = admin.getByLabel(`Minimum shelf life on arrival for ${LOCATION}, in days`);
   check("the new location shows a min shelf life field", await shelfField.isVisible());
   await shelfField.fill(String(SHELF_DAYS));
   await shelfField.blur();
@@ -372,7 +372,7 @@ try {
   // --- clearing the rule ---------------------------------------------
   // A blank must mean "no rule", not "a rule of zero days": both would look
   // identical on the form otherwise.
-  const shelfField2 = admin.getByLabel(`Minimum shelf life in days for ${LOCATION}`);
+  const shelfField2 = admin.getByLabel(`Minimum shelf life on arrival for ${LOCATION}, in days`);
   await shelfField2.fill("");
   await shelfField2.blur();
   await admin.waitForTimeout(1500);
@@ -389,7 +389,7 @@ try {
   );
 
   // Put the rule back: the restock tests below depend on it.
-  const shelfField3 = admin.getByLabel(`Minimum shelf life in days for ${LOCATION}`);
+  const shelfField3 = admin.getByLabel(`Minimum shelf life on arrival for ${LOCATION}, in days`);
   await shelfField3.fill(String(SHELF_DAYS));
   await shelfField3.blur();
   await admin.waitForTimeout(1500);

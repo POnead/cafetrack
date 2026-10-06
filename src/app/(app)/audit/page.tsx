@@ -45,6 +45,15 @@ const ACTION_TONE: Record<
   USER_CREATE: "green",
   USER_UPDATE: "amber",
   SEED: "slate",
+  // FR-03: the approval queue and the permission that bypasses it.
+  ITEM_APPROVE: "green",
+  ITEM_REJECT: "red",
+  ITEM_PERMISSION_GRANT: "blue",
+  ITEM_PERMISSION_REVOKE: "amber",
+  // FR-11.
+  EMAIL_RECIPIENT_CREATE: "green",
+  EMAIL_RECIPIENT_UPDATE: "amber",
+  EMAIL_RECIPIENT_DELETE: "red",
 };
 
 export default function AuditPage() {
@@ -229,6 +238,7 @@ export default function AuditPage() {
       <Card className="!p-0">
         <div className="flex flex-wrap items-center gap-3 border-b border-cream-200 bg-cream-50 p-4">
           <input
+            aria-label="Search the audit trail"
             className="input max-w-xs"
             placeholder="Search actor, action, entity..."
             value={query}

@@ -7,7 +7,7 @@ export const runtime = "nodejs";
 
 /** Never select password_hash — it must not leave the database. */
 const USER_COLUMNS =
-  "id, username, full_name, role, qr_token, is_active, deactivation_reason, deactivated_at, created_at";
+  "id, username, full_name, role, qr_token, can_manage_items, is_active, deactivation_reason, deactivated_at, created_at";
 
 /* ---------------- list ---------------- */
 export const GET = handler(async () => {
@@ -59,6 +59,10 @@ export const POST = handler(async (req: Request) => {
       // Staff sign in with the printed barcode code; admins sign in with a
       // username. The column is still called qr_token for historical reasons.
       qr_token: role === "staff" ? newStaffToken() : null,
+      // FR-03. Grantable at creation so a trusted hire starts with it rather
+      // than needing a second trip to the admin. Only meaningful for staff —
+      // an admin can already manage items.
+      can_manage_items: role === "staff" ? body.can_manage_items === true : false,
     })
     .select(USER_COLUMNS)
     .single();
@@ -69,6 +73,7 @@ export const POST = handler(async (req: Request) => {
     username: data.username,
     role: data.role,
     has_qr: Boolean(data.qr_token),
+    can_manage_items: data.can_manage_items,
   });
 
   return ok({ user: data }, 201);

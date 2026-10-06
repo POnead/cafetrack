@@ -282,9 +282,16 @@ export default function ItemsPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Save failed");
 
+      // FR-03: a staff member without the grant is not refused — their item is
+      // saved, but as pending. Saying so plainly matters, because the alternative
+      // is watching for the barcode to stop working and assuming the save failed.
       setToast({
-        msg: editing ? "Item updated" : `Item created — SKU ${data.item.sku}`,
-        tone: "success",
+        msg: editing
+          ? "Item updated"
+          : data.pending_approval
+            ? `Submitted for approval — SKU ${data.item.sku}. An admin approves it before it can be used.`
+            : `Item created — SKU ${data.item.sku}`,
+        tone: data.pending_approval ? "info" : "success",
       });
       closeForm();
       load();
@@ -348,12 +355,14 @@ export default function ItemsPage() {
       <Card className="!p-0">
         <div className="flex flex-wrap gap-3 border-b border-cream-200 bg-cream-50 p-4">
           <input
+            aria-label="Search items by name or SKU"
             className="input max-w-xs"
             placeholder="Search name or SKU..."
             value={q}
             onChange={(e) => setQ(e.target.value)}
           />
           <select
+            aria-label="Filter by category"
             className="input max-w-[200px]"
             value={catFilter}
             onChange={(e) => setCatFilter(e.target.value)}
@@ -551,8 +560,11 @@ export default function ItemsPage() {
       >
         <div className="space-y-4">
           <div>
-            <label className="label">Item name</label>
+            <label className="label" htmlFor="item-name">
+              Item name
+            </label>
             <input
+              id="item-name"
               className="input"
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
@@ -562,8 +574,11 @@ export default function ItemsPage() {
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="label">Category</label>
+              <label className="label" htmlFor="item-category">
+                Category
+              </label>
               <select
+                id="item-category"
                 className="input"
                 value={form.category_id}
                 onChange={(e) => setForm({ ...form, category_id: e.target.value })}
@@ -577,8 +592,11 @@ export default function ItemsPage() {
               </select>
             </div>
             <div>
-              <label className="label">Storage location</label>
+              <label className="label" htmlFor="item-location">
+                Storage location
+              </label>
               <select
+                id="item-location"
                 className="input"
                 value={form.location_id}
                 onChange={(e) => setForm({ ...form, location_id: e.target.value })}
@@ -608,8 +626,11 @@ export default function ItemsPage() {
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="label">Physical form</label>
+              <label className="label" htmlFor="item-physical-form">
+                Physical form
+              </label>
               <select
+                id="item-physical-form"
                 className="input"
                 value={form.physical_form}
                 onChange={(e) => setForm({ ...form, physical_form: e.target.value })}
@@ -620,8 +641,11 @@ export default function ItemsPage() {
               </select>
             </div>
             <div>
-              <label className="label">Unit</label>
+              <label className="label" htmlFor="item-unit">
+                Unit
+              </label>
               <input
+                id="item-unit"
                 className="input"
                 value={form.unit}
                 onChange={(e) => setForm({ ...form, unit: e.target.value })}
@@ -688,8 +712,11 @@ export default function ItemsPage() {
         </div>
 
           <div>
-            <label className="label">Expiration date</label>
+            <label className="label" htmlFor="item-expiration-date">
+              Expiration date
+            </label>
             <input
+              id="item-expiration-date"
               className="input"
               type="date"
               value={form.expiration_date}

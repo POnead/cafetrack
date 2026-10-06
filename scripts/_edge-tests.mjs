@@ -199,8 +199,53 @@ async function rawCall(method, path, rawBody, cookie) {
 
   r = await call("GET", "/api/audit", null, sc);
   check("staff blocked from audit API", r.status === 403, `${r.status}`);
-  r = await call("POST", "/api/items", { name: "Staff Item", quantity: 1 }, sc);
-  check("staff blocked from creating items", r.status === 403, `${r.status}`);
+
+  // FR-03 changed this. Staff are no longer blocked from creating items: a
+  // submission is accepted and held as pending, which is what the requirement
+  // asks for. What must still hold is that it is NOT stock — invisible to the
+  // stock list, unscanable at the till, and un-editable by the submitter.
+  r = await call("POST", "/api/items", {
+    name: "Staff Submitted Item",
+    quantity: 3,
+    unit: "pcs",
+    low_stock_threshold: 1,
+  }, sc);
+  check("staff item submission is accepted", r.status === 201, `${r.status} ${r.data?.error ?? ""}`);
+  check("staff submission lands pending, not active",
+    r.data?.item?.item_status === "pending", r.data?.item?.item_status ?? "");
+  const pendingId = r.data?.item?.id;
+  const pendingSku = r.data?.item?.sku;
+
+  if (pendingId) {
+    const stock = await call("GET", "/api/items", null, sc);
+    check("a pending submission is not in the stock list",
+      !(stock.data?.items ?? []).some((i) => i.id === pendingId));
+
+    const scan = await call("GET", `/api/items/lookup?code=${encodeURIComponent(pendingSku ?? "")}`, null, sc);
+    check("a pending submission cannot be scanned at the till",
+      scan.status === 409, `${scan.status}`);
+
+    // Editing and deleting stay admin-only. The submission path is deliberately
+    // open; quietly widening the other two would not be.
+    const patch = await call("PATCH", `/api/items/${pendingId}`, { name: "Renamed by staff" }, sc);
+    check("staff cannot edit an item", patch.status === 403, `${patch.status}`);
+    const del = await call("DELETE", `/api/items/${pendingId}`, null, sc);
+    check("staff cannot delete an item", del.status === 403, `${del.status}`);
+
+    // Approved by the admin, so it becomes stock and leaves the queue.
+    const review = await call("POST", "/api/items/review",
+      { id: pendingId, decision: "approve" }, A);
+    check("admin can approve a submission", review.status === 200, review.data?.error ?? "");
+
+    const after = await call("GET", "/api/items", null, sc);
+    check("an approved item becomes stock",
+      (after.data?.items ?? []).some((i) => i.id === pendingId));
+
+    // Clean up: the ledger keeps the movement history by design, but the item
+    // itself should not linger.
+    await call("DELETE", `/api/items/${pendingId}`, null, A);
+  }
+
   r = await call("POST", "/api/users", { username: "hack", full_name: "Hack", password: "password1" }, sc);
   check("staff blocked from creating users", r.status === 403, `${r.status}`);
 

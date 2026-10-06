@@ -7,6 +7,20 @@ import { clearSettingsCache } from "@/lib/settings";
 export const runtime = "nodejs";
 
 /**
+ * Keys never returned by GET, however they came to be in the table.
+ *
+ * `smtp_pass_enc` holds the encrypted mail app password. Even as ciphertext it
+ * has no business in a general settings response — it is not a setting, it is a
+ * credential, and anything that ships it to a browser widens the number of
+ * places it can leak from. The Email page describes the account through
+ * /api/email instead, which returns only whether a password exists.
+ *
+ * Blocked by key rather than deleted, so adding another credential later fails
+ * closed instead of publishing it.
+ */
+const SECRET_KEYS = new Set(["smtp_pass_enc"]);
+
+/**
  * Read the tunable company settings.
  *
  * Admin-only, because the same page is the only place these can be written
@@ -23,6 +37,7 @@ export const GET = handler(async () => {
 
   const values: Record<string, string> = {};
   for (const row of (data ?? []) as { key: string; value: string }[]) {
+    if (SECRET_KEYS.has(row.key)) continue;
     values[row.key] = row.value;
   }
 
@@ -40,11 +55,27 @@ const EDITABLE: Record<
 > = {
   session_timeout_minutes: { min: 1, max: 480, label: "Session timeout" },
   expiry_warning_days: { min: 1, max: 365, label: "Expiry warning window" },
+  // Email (FR-11).
+  email_dedupe_hours: { min: 1, max: 168, label: "Duplicate alert window" },
+  email_max_attempts: { min: 1, max: 10, label: "Delivery attempts" },
+  email_daily_summary_hour: { min: 0, max: 23, label: "Daily summary hour" },
 };
 
 /** Free-text settings have a length cap instead of a numeric range. */
 const TEXT_SETTINGS: Record<string, { maxLength: number; label: string }> = {
   business_name: { maxLength: 120, label: "Business name" },
+  email_from: { maxLength: 200, label: "Sender address" },
+};
+
+/**
+ * Off/on switches, stored as the strings "0" and "1" because that is what the
+ * settings table holds and what the email code reads.
+ *
+ * Separate from the numeric bounds above so a stray `email_enabled: "banana"`
+ * cannot be coerced into a truthy number by `Number()`.
+ */
+const TOGGLES: Record<string, string> = {
+  email_enabled: "Email notifications",
 };
 
 /**
@@ -61,14 +92,31 @@ export const PATCH = handler(async (req: Request) => {
   const changes: Record<string, string> = {};
 
   for (const [key, raw] of Object.entries(body ?? {})) {
+    // Credentials are written through /api/email, which encrypts them. Letting
+    // them be set here as plain text would put an unencrypted value in the
+    // table under a key the rest of the app assumes is ciphertext.
+    if (SECRET_KEYS.has(key)) {
+      return fail(`"${key}" cannot be set here`, 400);
+    }
+
     const numeric = EDITABLE[key];
     const text = TEXT_SETTINGS[key];
+    const toggle = TOGGLES[key];
 
-    if (!numeric && !text) {
+    if (!numeric && !text && !toggle) {
       return fail(`"${key}" is not a setting you can change`, 400);
     }
 
-    if (numeric) {
+    if (toggle) {
+      // Only the two canonical forms. Accepting anything else would mean
+      // "off" and "maybe" both silently becoming true, which for a switch that
+      // starts sending email is the wrong direction to be wrong in.
+      const s = String(raw ?? "").trim().toLowerCase();
+      if (s !== "0" && s !== "1" && s !== "true" && s !== "false") {
+        return fail(`${toggle} must be on or off`);
+      }
+      changes[key] = s === "1" || s === "true" ? "1" : "0";
+    } else if (numeric) {
       const n = Number(raw);
       if (!Number.isFinite(n)) return fail(`${numeric.label} must be a number`);
       if (n < numeric.min || n > numeric.max) {

@@ -1,6 +1,7 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail, readBody } from "@/lib/api";
-import { requireAdmin, requireUser } from "@/lib/auth";
+import { handler, ok, fail, readBody, clientIp } from "@/lib/api";
+import { requireUser } from "@/lib/auth";
+import { canManageItems } from "@/lib/permissions";
 import { audit } from "@/lib/audit";
 import { randomBytes } from "node:crypto";
 import {
@@ -24,15 +25,27 @@ export const GET = handler(async (req: Request) => {
   const categoryId = searchParams.get("category");
   const lowOnly = searchParams.get("low") === "1";
 
+  // `status=active` (the default) hides anything still awaiting approval, so the
+  // inventory a staff member sees is stock and only stock. `status=pending` is
+  // the approvals list, and `status=all` is the admin's view of everything
+  // including rejected submissions.
+  const status = searchParams.get("status") ?? "active";
+
   let query = db()
     .from("items")
     .select(
       `id, sku, name, physical_form, unit, units_per_box, quantity,
-       low_stock_threshold, expiration_date, version, created_at, updated_at,
+       low_stock_threshold, expiration_date, version, item_status,
+       submitted_by, submitted_at, reviewed_by, reviewed_at, review_note,
+       created_at, updated_at,
        category:categories(id, name),
        location:locations(id, name, min_shelf_life_days)`
     )
     .order("name", { ascending: true });
+
+  if (status === "active" || status === "pending" || status === "rejected") {
+    query = query.eq("item_status", status);
+  }
 
   if (q) {
     // PostgREST treats commas, parentheses and double quotes as filter
@@ -61,7 +74,15 @@ export const GET = handler(async (req: Request) => {
 
 /* ---------------- create ---------------- */
 export const POST = handler(async (req: Request) => {
-  const admin = await requireAdmin();
+  // FR-03. Two roles, two behaviours, from one endpoint:
+  //
+  //   admin, or staff granted can_manage_items -> saved as active, immediately
+  //     usable.
+  //   any other staff member -> saved as pending. It is real, it is audited, and
+  //     it appears on the Approvals list, but it is not stock until an admin
+  //     approves it, so it raises no alerts and cannot be moved.
+  const user = await requireUser();
+  const manages = await canManageItems(user);
   const body = await readBody(req);
 
   const name = String(body.name || "").trim();
@@ -141,6 +162,8 @@ export const POST = handler(async (req: Request) => {
   }
   if (!sku) return fail("Could not generate a unique SKU, try again", 500);
 
+  const itemStatus = manages ? "active" : "pending";
+
   const { data, error } = await db()
     .from("items")
     .insert({
@@ -154,20 +177,40 @@ export const POST = handler(async (req: Request) => {
       quantity,
       low_stock_threshold: lowStock,
       expiration_date: expiry,
+      item_status: itemStatus,
+      // Only a submission needs provenance. An item added by someone who could
+      // add it directly is not waiting on anyone, so recording it as submitted
+      // would imply a review that never happened.
+      submitted_by: manages ? null : user.id,
+      submitted_at: manages ? null : new Date().toISOString(),
     })
     .select()
     .single();
 
   if (error) return fail(error.message, 500);
 
-  await audit(admin, "ITEM_CREATE", "item", data.id, {
+  await audit(user, "ITEM_CREATE", "item", data.id, {
     sku: data.sku,
     name: data.name,
     quantity: data.quantity,
     unit: data.unit,
-  });
+    item_status: itemStatus,
+  }, { ip: clientIp(req) });
 
+  // A pending item is invisible to refresh_alerts by design, so this is safe to
+  // call either way — it simply does nothing for an unapproved submission.
   await db().rpc("refresh_alerts");
 
-  return ok({ item: data }, 201);
+  return ok(
+    {
+      item: data,
+      // Spelled out rather than left for the client to infer, because the two
+      // cases mean very different things to the person who just submitted.
+      pending_approval: !manages,
+      message: manages
+        ? `Item created — SKU ${data.sku}`
+        : `Submitted for approval — SKU ${data.sku}. An admin must approve it before it can be used.`,
+    },
+    201
+  );
 });

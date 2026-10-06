@@ -143,3 +143,37 @@ export function CloseIcon(props: IconProps) {
     </Icon>
   );
 }
+
+/**
+ * Coffee cup — the sidebar avatar fallback, shown when a session has no name.
+ *
+ * It skips the `Icon` wrapper because it mixes a filled body with stroked
+ * details, and `Icon` sets `fill="none"`. The cafe's larger illustrations live
+ * in ./BrandArt as real images; this one stays vector because at 20px in the
+ * sidebar a JPEG would be a smudge.
+ */
+export function CupMark(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={props.className} aria-hidden="true">
+      <path
+        d="M4 8h13v7a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5V8Z"
+        fill="currentColor"
+        opacity="0.9"
+      />
+      <path
+        d="M17 10h1.5a2.5 2.5 0 0 1 0 5H17"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        fill="none"
+      />
+      <path
+        d="M8 4c0-1 1.5-1 1.5-2M12 4c0-1 1.5-1 1.5-2"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        opacity="0.7"
+      />
+    </svg>
+  );
+}

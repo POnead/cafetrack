@@ -3,6 +3,12 @@ import { HttpError, type SessionUser } from "./auth";
 
 /**
  * Append an entry to the hash-chained audit log.
+ *
+ * `ip_address` and `outcome` are recorded beside the hash, never inside it —
+ * see the column comments in db/schema.sql. They are filled in automatically:
+ * the client address comes from the request when a route has one, and a denied
+ * action is recorded with outcome 'denied' by the routes that reject something.
+ *
  * The hashing + chaining happens inside a Postgres function so it's atomic.
  *
  * `critical` (the default) makes a failed append throw. The audit trail is a
@@ -23,8 +29,19 @@ export async function audit(
   entityType: string | null,
   entityId: string | null,
   details: Record<string, unknown> = {},
-  { critical = true }: { critical?: boolean } = {}
+  { critical = true, ip = null, outcome }: {
+    critical?: boolean;
+    ip?: string | null;
+    outcome?: string | null;
+  } = {}
 ) {
+  // Defaulting to "success" rather than leaving it null: almost every call here
+  // is reached only after the change it describes has already been made, so a
+  // blank outcome would mean "unknown" on the majority of rows and make the
+  // column useless for the question it exists to answer — which entries did not
+  // work. The routes that record a refusal say so explicitly.
+  const finalOutcome = outcome ?? "success";
+
   const { data, error } = await db().rpc("append_audit", {
     p_actor_id: actor?.id ?? null,
     p_actor_name: actor?.fullName ?? "anonymous",
@@ -32,6 +49,8 @@ export async function audit(
     p_entity_type: entityType,
     p_entity_id: entityId,
     p_details: details,
+    p_ip_address: ip,
+    p_outcome: finalOutcome,
   });
 
   if (error) {

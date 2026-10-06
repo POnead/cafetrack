@@ -109,6 +109,43 @@ export async function readBody(req: Request): Promise<any> {
   return parsed;
 }
 
+/**
+ * The client's address, for the audit trail's `ip_address` column.
+ *
+ * CafeTrack runs on the cafe's own machine, so the immediate peer is almost
+ * always 127.0.0.1 and the useful address is the one the browser sent in
+ * `x-forwarded-for` — a phone on the same Wi-Fi reaching the dev server through
+ * a proxy, for instance. That header is client-controlled, which is exactly why
+ * the column sits outside the hash chain: a forged value cannot make a forged
+ * entry look authentic, because the entry_hash covers the action and its details
+ * rather than the address it came from.
+ *
+ * Returns null when there is nothing plausible to record, so the column stays
+ * honestly empty instead of carrying "unknown".
+ */
+export function clientIp(req: Request): string | null {
+  // IPv4 addresses from a Node socket arrive as "::ffff:127.0.0.1". The prefix is
+  // an IPv4-in-IPv6 compatibility marker, not part of the address, and leaving it
+  // in makes the audit column harder to read than it needs to be.
+  const tidy = (v: string) => v.trim().replace(/^::ffff:/, "").slice(0, 45);
+
+  const forwarded = req.headers.get("x-forwarded-for");
+  if (forwarded) {
+    // A chain of proxies appends; the client is first.
+    const first = forwarded.split(",")[0]?.trim();
+    if (first) return tidy(first);
+  }
+
+  const real = req.headers.get("x-real-ip")?.trim();
+  if (real) return tidy(real);
+
+  // Node exposes the socket address on a non-standard property.
+  const socket = (req as any).socket?.remoteAddress;
+  if (typeof socket === "string" && socket) return tidy(socket);
+
+  return null;
+}
+
 /** Wraps a route handler so thrown HttpErrors become clean JSON responses. */
 export function handler(fn: (...args: any[]) => Promise<Response>) {
   return async (...args: any[]) => {

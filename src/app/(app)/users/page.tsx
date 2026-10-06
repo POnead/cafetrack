@@ -21,6 +21,7 @@ type StaffUser = {
   full_name: string;
   role: "admin" | "staff";
   qr_token: string | null;
+  can_manage_items: boolean;
   is_active: boolean;
   deactivation_reason: string | null;
   deactivated_at: string | null;
@@ -32,6 +33,7 @@ const EMPTY_FORM = {
   username: "",
   password: "",
   role: "staff" as "admin" | "staff",
+  can_manage_items: false,
 };
 
 export default function UsersPage() {
@@ -169,7 +171,25 @@ export default function UsersPage() {
     }
   }
 
-  /** Re-activating is one click; deactivating asks for a reason first. */
+  /**
+ * Grant or revoke item management (FR-03). One click, no confirmation — unlike
+ * deactivation, this is reversible and does not lock anyone out, and the change
+ * is recorded in the audit trail either way.
+ */
+async function toggleItemPermission(user: StaffUser) {
+  const grant = !user.can_manage_items;
+  const updated = await patch(user, { can_manage_items: grant });
+  if (updated) {
+    setToast({
+      msg: grant
+        ? `${updated.full_name} can now add, edit and delete items`
+        : `${updated.full_name} now submits items for approval`,
+      tone: "success",
+    });
+  }
+}
+
+/** Re-activating is one click; deactivating asks for a reason first. */
   async function toggleActive(user: StaffUser) {
     if (!user.is_active) {
       const updated = await patch(user, { is_active: true });
@@ -266,12 +286,14 @@ export default function UsersPage() {
       <Card className="!p-0">
         <div className="flex flex-wrap gap-3 border-b border-cream-200 bg-cream-50 p-4">
           <input
+            aria-label="Search accounts by name or username"
             className="input max-w-xs"
             placeholder="Search name or username..."
             value={uq}
             onChange={(e) => setUq(e.target.value)}
           />
           <select
+            aria-label="Filter by role"
             className="input max-w-[160px]"
             value={roleFilter}
             onChange={(e) => setRoleFilter(e.target.value as "" | "admin" | "staff")}
@@ -281,6 +303,7 @@ export default function UsersPage() {
             <option value="staff">Staff</option>
           </select>
           <select
+            aria-label="Filter by status"
             className="input max-w-[170px]"
             value={statusFilter}
             onChange={(e) =>
@@ -342,6 +365,19 @@ export default function UsersPage() {
                       {fmtDateTime(u.created_at)}
                     </span>
                   </DataField>
+
+                  {/* FR-03. Hidden for admins, who can always manage items. */}
+                  {u.role === "staff" && (
+                    <DataField label="Item management">
+                      <button
+                        className="btn-ghost min-h-[40px] !px-2 !py-1 text-xs"
+                        disabled={busyId === u.id}
+                        onClick={() => toggleItemPermission(u)}
+                      >
+                        {u.can_manage_items ? "Granted" : "Not granted"}
+                      </button>
+                    </DataField>
+                  )}
 
                   {!u.is_active && (
                     <DataField label="Reason">
@@ -587,6 +623,32 @@ export default function UsersPage() {
               <option value="staff">Staff — signs in with a barcode code</option>
               <option value="admin">Admin — signs in with username and password</option>
             </select>
+
+            {/* Only meaningful for staff — an admin can always manage items. */}
+            {form.role === "staff" && (
+              <div className="mt-4 rounded-xl border border-cream-200 bg-cream-50 px-3.5 py-3">
+                <label className="flex items-start gap-2.5 text-sm">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={form.can_manage_items}
+                    onChange={(e) =>
+                      setForm({ ...form, can_manage_items: e.target.checked })
+                    }
+                  />
+                  <span>
+                    <span className="font-semibold text-cocoa-800">
+                      Can add, edit and delete items
+                    </span>
+                    <span className="mt-0.5 block text-xs text-cocoa-500">
+                      Without this, new ingredients are submitted and wait on
+                      Approvals before they count as stock. With it, their changes
+                      take effect straight away.
+                    </span>
+                  </span>
+                </label>
+              </div>
+            )}
           </div>
 
           {formError && (

@@ -1,6 +1,7 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail, badId, readBody } from "@/lib/api";
-import { requireAdmin, requireUser } from "@/lib/auth";
+import { handler, ok, fail, badId, readBody, clientIp } from "@/lib/api";
+import { requireUser } from "@/lib/auth";
+import { canManageItems } from "@/lib/permissions";
 import { audit } from "@/lib/audit";
 import {
   FieldError,
@@ -41,7 +42,14 @@ export const GET = handler(
 /* ---------------- update ---------------- */
 export const PATCH = handler(
   async (req: Request, { params }: { params: Promise<{ id: string }> }) => {
-    const admin = await requireAdmin();
+    // FR-03: an admin, or a staff member granted item management.
+    const user = await requireUser();
+    if (!(await canManageItems(user))) {
+      return fail(
+        "You need item management permission to change an item. Ask an admin to grant it.",
+        403
+      );
+    }
     const { id } = await params;
 
     const malformed = badId(id, "item");
@@ -161,11 +169,11 @@ export const PATCH = handler(
       }
     }
 
-    await audit(admin, "ITEM_UPDATE", "item", data.id, {
+    await audit(user, "ITEM_UPDATE", "item", data.id, {
       sku: data.sku,
       name: data.name,
       changes,
-    });
+    }, { ip: clientIp(req) });
 
     await db().rpc("refresh_alerts");
 
@@ -175,8 +183,17 @@ export const PATCH = handler(
 
 /* ---------------- delete ---------------- */
 export const DELETE = handler(
-  async (_req: Request, { params }: { params: Promise<{ id: string }> }) => {
-    const admin = await requireAdmin();
+  async (req: Request, { params }: { params: Promise<{ id: string }> }) => {
+    // Same permission as an edit: FR-03 grants add, edit and delete together,
+    // because a person who can correct a typo but not remove a duplicate is only
+    // half-trusted, which is a harder rule to explain than either extreme.
+    const user = await requireUser();
+    if (!(await canManageItems(user))) {
+      return fail(
+        "You need item management permission to delete an item. Ask an admin to grant it.",
+        403
+      );
+    }
     const { id } = await params;
 
     const malformed = badId(id, "item");
@@ -193,11 +210,11 @@ export const DELETE = handler(
     const { error } = await db().from("items").delete().eq("id", id);
     if (error) return fail(error.message, 500);
 
-    await audit(admin, "ITEM_DELETE", "item", item.id, {
+    await audit(user, "ITEM_DELETE", "item", item.id, {
       sku: item.sku,
       name: item.name,
       quantity_at_delete: item.quantity,
-    });
+    }, { ip: clientIp(req) });
 
     return ok({ ok: true });
   }

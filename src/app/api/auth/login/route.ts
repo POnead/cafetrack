@@ -1,5 +1,5 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail, readBody } from "@/lib/api";
+import { handler, ok, fail, readBody, clientIp } from "@/lib/api";
 import {
   hashPassword,
   verifyPassword,
@@ -8,10 +8,55 @@ import {
   deactivatedMessage,
 } from "@/lib/auth";
 import { audit } from "@/lib/audit";
+import { dispatchSoon } from "@/lib/email";
 import { getSessionMinutes } from "@/lib/settings";
 import { checkLoginThrottle, tooManyAttempts, userKey } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
+
+/**
+ * Record a rejected admin sign-in and queue the email, without ever changing
+ * what the caller is told. A person who mistyped must get the same generic 401
+ * whether or not mail is set up, so every notification path is best-effort.
+ *
+ * The unknown-username case passes only the throttle key, never a real
+ * credential — there is no user to name.
+ */
+async function recordRejection(
+  req: Request,
+  actor: { id: string; username: string; fullName: string; role: "admin" },
+  reason: string
+) {
+  await audit(actor, "LOGIN_FAILED", "user", actor.id, {
+    method: "admin_password",
+    reason,
+  }, { critical: false, ip: clientIp(req), outcome: "failed" });
+
+  try {
+    await db().rpc("enqueue_failed_login_alert", {
+      p_username: actor.username,
+      p_method: "admin_password",
+      p_reason: reason,
+    });
+    dispatchSoon();
+  } catch (e: any) {
+    console.error("failed-login notification failed:", e?.message || e);
+  }
+}
+
+/** The no-such-user variant: nothing to audit against, only to notify about. */
+async function notifyRejection(_key: string, method: string, reason: string) {
+  try {
+    await db().rpc("enqueue_failed_login_alert", {
+      p_username: "unknown",
+      p_method: method,
+      p_reason: reason,
+    });
+    dispatchSoon();
+  } catch (e: any) {
+    console.error("failed-login notification failed:", e?.message || e);
+  }
+}
 
 export const POST = handler(async (req: Request) => {
   const { username, password } = await readBody(req);
@@ -51,18 +96,16 @@ export const POST = handler(async (req: Request) => {
 
   if (!user) {
     await logAttempt(false);
+    await notifyRejection(key, "admin_password", "unknown_user");
     return fail("Invalid credentials", 401);
   }
 
   if (!verifyPassword(password, user.password_hash)) {
     await logAttempt(false);
-    await audit(
+    await recordRejection(
+      req,
       { id: user.id, username: user.username, fullName: user.full_name, role: "admin" },
-      "LOGIN_FAILED",
-      "user",
-      user.id,
-      { method: "admin_password" },
-      { critical: false }
+      "bad_password"
     );
     return fail("Invalid credentials", 401);
   }
@@ -72,13 +115,10 @@ export const POST = handler(async (req: Request) => {
   // their own password deserves to know the account was switched off, and why.
   if (!user.is_active) {
     await logAttempt(false);
-    await audit(
+    await recordRejection(
+      req,
       { id: user.id, username: user.username, fullName: user.full_name, role: "admin" },
-      "LOGIN_FAILED",
-      "user",
-      user.id,
-      { method: "admin_password", reason: "deactivated" },
-      { critical: false }
+      "deactivated"
     );
     return fail(deactivatedMessage(user.deactivation_reason), 403, {
       deactivated: true,
@@ -101,7 +141,10 @@ export const POST = handler(async (req: Request) => {
   const token = await signSession(session, minutes);
   await setSessionCookie(token, minutes);
 
-  await audit(session, "LOGIN", "user", user.id, { method: "admin_password" });
+  await audit(session, "LOGIN", "user", user.id, { method: "admin_password" }, {
+    ip: clientIp(req),
+    outcome: "success",
+  });
 
   return ok({ user: session });
 });

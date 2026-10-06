@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <title>CafeTrack</title>
+  <!-- The shop front from the brand illustrations in public/brand, cut down to
+       what still reads at 16px: a striped awning over a doorway. The full
+       artwork has too much detail to survive a favicon, so this keeps only the
+       silhouette and drops the isometric perspective and the coffee board.
+
+       Colours are unchanged from the previous icon — the same cream/cocoa pair
+       used by cream-300 and cocoa-700 — so the browser tab, the apple touch
+       icon and the sidebar all keep the same warmth.
+
+       Next serves this as /icon.svg and links it as the favicon, so the browser
+       stops asking for /favicon.ico and getting a 404 on every page load. The
+       path is allowed past the proxy in src/proxy.ts. -->
+  <rect width="32" height="32" rx="7" fill="#F5D5A8"/>
+
+  <!-- shop front -->
+  <path d="M9 14h14v11H9z" fill="#FFFFFF"/>
+
+  <!-- awning, with the stripes cut back to the cream behind it -->
+  <path d="M6 9h20v5H6z" fill="#5E3A1F" />
+  <path d="M11 9v5M16 9v5M21 9v5" stroke="#F5D5A8" stroke-width="2" />
+
+  <!-- doorway and window -->
+  <path d="M16 18h4v7h-4z" fill="#5E3A1F" />
+  <path d="M11 17h3.5v4H11z" fill="#F5D5A8" />
+
+  <!-- kerb -->
+  <rect x="5" y="26" width="22" height="2.4" rx="1.2" fill="#5E3A1F" />
+</svg>

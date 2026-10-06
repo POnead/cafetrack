@@ -4,7 +4,6 @@ import Link from "next/link";
 import { useEffect } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import type { SessionUser } from "@/lib/auth";
-import { CupMark } from "./CafeIllustration";
 import {
   BellIcon,
   BoxIcon,
@@ -12,6 +11,7 @@ import {
   ChartIcon,
   CloseIcon,
   CogIcon,
+  CupMark,
   HomeIcon,
   LogOutIcon,
   ShieldIcon,
@@ -36,6 +36,10 @@ const ADMIN_NAV: NavGroup[] = [
     title: "Inventory Management",
     items: [
       { href: "/items", label: "All Items", icon: BoxIcon },
+      // FR-03: the approval queue. Admin-only for decisions — the API refuses a
+      // staff decision with a 403 — but the page renders read-only for staff so
+      // a barista can see their own submission is still waiting.
+      { href: "/approvals", label: "Approvals", icon: BoxIcon },
       { href: "/alerts", label: "Alerts", icon: BellIcon },
     ],
   },
@@ -44,6 +48,8 @@ const ADMIN_NAV: NavGroup[] = [
     items: [
       { href: "/users", label: "Staff Accounts", icon: UsersIcon },
       { href: "/settings", label: "Settings", icon: CogIcon },
+      // FR-11.
+      { href: "/email", label: "Email", icon: BellIcon },
     ],
   },
   {
@@ -63,7 +69,20 @@ const STAFF_NAV: NavGroup[] = [
       { href: "/checkout", label: "Checkout & Restock", icon: CartIcon },
     ],
   },
-  { title: "Inventory", items: [{ href: "/alerts", label: "Alerts", icon: BellIcon }] },
+  // FR-03: staff can put new ingredients in. Whether their submission becomes
+  // stock immediately or waits for an admin is decided per person by the
+  // can_manage_items grant, which the server enforces — the link is here so the
+  // page is reachable either way.
+  //
+  // One group, not two: Nav keys its groups by title, so two groups both called
+  // "Inventory" produce a duplicate-key warning on every page.
+  {
+    title: "Inventory",
+    items: [
+      { href: "/items", label: "All Items", icon: BoxIcon },
+      { href: "/alerts", label: "Alerts", icon: BellIcon },
+    ],
+  },
 ];
 
 function initials(name: string) {

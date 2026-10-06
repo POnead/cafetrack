@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Stat, ViewPill, Badge, Spinner, Empty } from "@/components/ui";
-import { CafeIllustration } from "@/components/CafeIllustration";
+import { BaristaArt } from "@/components/BrandArt";
 import { fmtQty, fmtDateTime, daysUntil } from "@/lib/format";
 
 type Item = {
@@ -163,7 +163,9 @@ export default function DashboardPage() {
           {/* illustration panel */}
           <div className="card flex flex-col items-center justify-center gap-4 px-6 py-8">
             <div className="script-logo-dark text-4xl">CafeTrack</div>
-            <CafeIllustration className="w-full max-w-xs" />
+            {/* White card, so the illustration's own white background is
+                invisible. No white panel needed here. */}
+            <BaristaArt className="max-w-[260px]" sizes="260px" />
             <p className="text-center text-xs text-cocoa-400">
               Live stock monitoring for Merrylane Cafe Foodhub
             </p>

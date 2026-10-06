@@ -629,6 +629,7 @@ export default function CheckoutPage() {
             key={mode}
             onScan={handleScan}
             disabled={scanning}
+            label="Scan an item barcode"
             placeholder="Scan the item label or type the SKU, then press Enter"
           />
 

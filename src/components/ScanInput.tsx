@@ -13,11 +13,19 @@ import { useEffect, useRef, useState } from "react";
 export function ScanInput({
   onScan,
   placeholder = "Scan or type code, then press Enter",
+  label = "Barcode scanner",
   disabled = false,
   autoFocus = true,
 }: {
   onScan: (code: string) => void;
   placeholder?: string;
+  /**
+   * The accessible name. A placeholder disappears as soon as anything is typed
+   * and is not reliably announced, so the field would otherwise be announced as
+   * an unnamed text box — which is the one control on the till that a person
+   * using a screen reader most needs named.
+   */
+  label?: string;
   disabled?: boolean;
   autoFocus?: boolean;
 }) {
@@ -54,6 +62,7 @@ export function ScanInput({
     <div className="relative">
       <input
         ref={ref}
+        aria-label={label}
         className="input font-mono text-base sm:pr-24"
         value={value}
         disabled={disabled}

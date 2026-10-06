@@ -34,7 +34,11 @@ async function getPage(path, cookie) {
   check("admin sign-in for page render", Boolean(admin));
 
   console.log("\n== every page renders for an admin ==");
-  for (const p of ["/", "/dashboard", "/checkout", "/items", "/reports", "/audit", "/alerts", "/users", "/login"]) {
+  // /approvals (FR-03) and /email (FR-11) joined the list with the features that
+  // introduced them. /email is admin-only in the API but the page itself must
+  // still render for a staff session rather than erroring — the same rule the
+  // alerts pages follow.
+  for (const p of ["/", "/dashboard", "/checkout", "/items", "/approvals", "/reports", "/audit", "/alerts", "/users", "/email", "/login"]) {
     const r = await getPage(p, admin);
     check(`${p} renders`, r.status === 200 && !r.crashed, r.crashed ? r.html.slice(0, 120) : String(r.status));
   }
@@ -82,6 +86,19 @@ async function getPage(path, cookie) {
       const staffDetail = await getPage(`/alerts/${alertId}`, sc);
       check("/alerts/[id] renders for staff", staffDetail.status === 200 && !staffDetail.crashed,
         staffDetail.crashed ? staffDetail.html.slice(0, 120) : String(staffDetail.status));
+
+      // The two pages added with FR-03 and FR-11 must render for a staff
+      // session too. /approvals shows its queue read-only and /email is refused
+      // by the API, but neither should crash the page for someone who follows a
+      // link or lands on the URL.
+      const staffApprovals = await getPage("/approvals", sc);
+      check("/approvals renders for staff", staffApprovals.status === 200 && !staffApprovals.crashed,
+        staffApprovals.crashed ? staffApprovals.html.slice(0, 120) : String(staffApprovals.status));
+
+      const staffEmail = await getPage("/email", sc);
+      check("/email renders for staff without a server error",
+        staffEmail.status === 200 && !staffEmail.crashed,
+        staffEmail.crashed ? staffEmail.html.slice(0, 120) : String(staffEmail.status));
     } else {
       check("an active staff account was available", false, "none found");
     }

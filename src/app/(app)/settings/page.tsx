@@ -217,6 +217,7 @@ export default function SettingsPage() {
 
         <div className="mt-4 flex gap-2">
           <input
+            aria-label={`New ${kind} name`}
             className="input flex-1"
             value={value}
             placeholder={`New ${kind} name`}
@@ -273,7 +274,7 @@ export default function SettingsPage() {
                             if (next === current) return;
                             saveShelfLife(r, next);
                           }}
-                          aria-label={`Minimum shelf life in days for ${r.name}`}
+                          aria-label={`Minimum shelf life on arrival for ${r.name}, in days`}
                         />
                         <span>days</span>
                       </label>

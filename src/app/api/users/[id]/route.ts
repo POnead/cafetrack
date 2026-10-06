@@ -6,7 +6,7 @@ import { audit } from "@/lib/audit";
 export const runtime = "nodejs";
 
 const USER_COLUMNS =
-  "id, username, full_name, role, qr_token, is_active, deactivation_reason, deactivated_at, created_at";
+  "id, username, full_name, role, qr_token, can_manage_items, is_active, deactivation_reason, deactivated_at, created_at";
 
 /** Update a staff/admin account: name, password, status, staff code. */
 export const PATCH = handler(
@@ -112,6 +112,28 @@ export const PATCH = handler(
     ) {
       patch.deactivation_reason = reason;
       changed.push("deactivation_reason");
+    }
+
+    // FR-03: grant or revoke the right to add, edit and delete items directly.
+    // Recorded as its own audit action rather than a generic USER_UPDATE,
+    // because it is the one change here that widens what a person can do to the
+    // data, and "who gained write access to the catalogue, and who approved it"
+    // is the question an owner would ask afterwards.
+    if (body.can_manage_items !== undefined) {
+      const grant = body.can_manage_items === true;
+      patch.can_manage_items = grant;
+      changed.push("can_manage_items");
+
+      if (before.role !== "admin" && Boolean((before as any).can_manage_items) !== grant) {
+        await audit(
+          admin,
+          grant ? "ITEM_PERMISSION_GRANT" : "ITEM_PERMISSION_REVOKE",
+          "user",
+          id,
+          { username: before.username, full_name: before.full_name, can_manage_items: grant },
+          { outcome: "success" }
+        );
+      }
     }
 
     if (changed.length === 0) return fail("Nothing to update");

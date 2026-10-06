@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>CafeTrack — Full Paper</title>
+<style>
+  @page { size: A4; margin: 1in; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Times New Roman", Times, serif;
+    font-size: 12pt;
+    line-height: 2;
+    color: #000;
+    max-width: 8.5in;
+    margin: 0 auto;
+    padding: 50px 70px;
+  }
+  .title-page { text-align: center; margin-top: 60px; margin-bottom: 60px; }
+  .title-page h1 { font-size: 14pt; font-weight: bold; margin: 0 0 8px 0; line-height: 1.5; }
+  .title-page h2 { font-size: 12pt; font-weight: normal; margin: 4px 0; }
+  .title-page p { margin: 4px 0; font-size: 12pt; }
+  .title-page .spacer { margin-top: 40px; }
+  h1.chapter {
+    font-size: 13pt;
+    font-weight: bold;
+    text-align: center;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-top: 40px;
+    margin-bottom: 6px;
+    page-break-after: avoid;
+  }
+  h2.chapter-title {
+    font-size: 12pt;
+    font-weight: bold;
+    text-align: center;
+    margin-top: 0;
+    margin-bottom: 30px;
+    page-break-after: avoid;
+  }
+  h2.sub {
+    font-size: 12pt;
+    font-weight: bold;
+    margin-top: 24px;
+    margin-bottom: 10px;
+    page-break-after: avoid;
+  }
+  h3.subsub {
+    font-size: 12pt;
+    font-weight: bold;
+    font-style: italic;
+    margin-top: 18px;
+    margin-bottom: 8px;
+    page-break-after: avoid;
+  }
+  p {
+    text-align: justify;
+    text-indent: 0.5in;
+    margin: 0 0 12px 0;
+    line-height: 2;
+  }
+  p.no-indent { text-indent: 0; }
+  ol, ul {
+    margin: 12px 0 12px 0;
+    padding-left: 0.75in;
+    line-height: 2;
+  }
+  li { text-align: justify; margin-bottom: 6px; }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 11pt; line-height: 1.5; }
+  th { background: #f0f0f0; color: #000; padding: 8px; text-align: left; border: 1px solid #000; font-weight: bold; }
+  td { padding: 8px; border: 1px solid #000; vertical-align: top; }
+  .page-break { page-break-before: always; }
+  .ref { padding-left: 0.5in; text-indent: -0.5in; margin: 8px 0; font-size: 11pt; line-height: 1.7; text-align: left; }
+  .diagram-box {
+    border: 1px solid #333;
+    padding: 16px 20px;
+    margin: 14px 0;
+    background: #fafafa;
+    font-size: 11pt;
+    text-indent: 0;
+    line-height: 1.6;
+  }
+  .diagram-box p { text-indent: 0; margin: 4px 0; }
+  .diagram-box ul { line-height: 1.6; margin: 6px 0; }
+  .diagram-box ol { line-height: 1.6; margin: 6px 0; }
+  .diagram-label {
+    text-align: center;
+    font-style: italic;
+    font-size: 11pt;
+    margin: 6px 0 10px 0;
+    text-indent: 0;
+  }
+  .no-print { position: fixed; bottom: 24px; right: 24px; z-index: 100; }
+  .no-print button {
+    background: #2e6b3e; color: #fff; border: none; padding: 12px 24px;
+    border-radius: 6px; font-size: 14px; font-weight: bold; cursor: pointer;
+    font-family: Arial, sans-serif; box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+  }
+  @media print { .no-print { display: none; } body { padding: 0; } }
+</style>
+</head>
+<body>
+
+<!-- ============================================================ -->
+<div class="title-page">
+  <h1>CafeTrack: Real-Time Stock Monitoring with QR-Based Authentication for Merrylane Cafe Foodhub</h1>
+  <h2 style="margin-top:20px;">A Comprehensive IT System Proposal</h2>
+  <p class="spacer">Presented to the College of Informatics and Computing Sciences</p>
+  <p>Batangas State University — Lipa Campus</p>
+  <p style="margin-top:30px;">In Partial Fulfillment of the Requirements for IT 313 — System Analysis and Design</p>
+  <p class="spacer"><strong>Developer Group 3</strong></p>
+  <p>Maquinto, Mark Jhaeyv</p>
+  <p>Obedencio, Mark Andrei</p>
+  <p>Rodriguez, Prince Deano</p>
+  <p class="spacer"><strong>Client Target:</strong> Merrylane Cafe Foodhub, Lipa City</p>
+  <p style="margin-top:30px;">2026</p>
+</div>
+
+<!-- ============================================================ -->
+<div class="page-break"></div>
+
+<h1 class="chapter">Chapter 1</h1>
+<h2 class="chapter-title">The Problem and Its Background</h2>
+
+<h2 class="sub">Introduction</h2>
+
+<p>
+  Inventory management is one of the most persistent challenges faced by small food service businesses, particularly micro-enterprises operating on thin margins (Alam et al., 2024). In the Philippine context, small food businesses commonly lack formal inventory systems and rely instead on handwritten notes and memory (Balisi, 2023). This pattern is common in cafes, carinderias, and similar establishments, where daily operations leave little time for structured record-keeping.
+</p>
+
+<p>
+  Merrylane Cafe Foodhub is one such business. Located in Lipa City, Batangas, it operates as a micro-enterprise serving coffee, beverages, and light meals to walk-in customers, students, and nearby residents. The cafe runs with a small team composed of the owner-manager, a few cooks, and baristas. Ingredients are sourced from local suppliers and stored on-site in a small storage area that holds both perishable and non-perishable items.
+</p>
+
+<p>
+  In terms of technology, the cafe currently operates without a dedicated inventory management system. Stock tracking is done by hand using a notebook, a method that research consistently associates with waste, stockouts, and financial losses in small enterprises (Azharudin &amp; Basri, 2024; Cabungcal et al., 2023). The cafe has access to a working computer or laptop and a smartphone, but no existing software is used for inventory purposes.
+</p>
+
+<h2 class="sub">Background of the Study</h2>
+
+<p>
+  Manual inventory tracking has long been identified as a source of operational inefficiency in food service businesses (Ahrens &amp; Chapman, 2004). Ingredients expire without anyone noticing until they are already spoiled, and stock levels drift from reality because handwritten records are incomplete or incorrect. Studies on small and medium enterprises consistently show that businesses with structured inventory practices outperform those relying on manual tracking (Alam et al., 2024; Panigrahi et al., 2024). Hang (2024) found that food and beverage businesses with accurate inventory records report stronger financial performance than those without.
+</p>
+
+<p>
+  The problems caused by manual tracking are not limited to accuracy. During peak hours, staff write down items taken from storage too quickly, and multi-item transactions are frequently recorded wrong or skipped altogether (Balisi, 2023). When discrepancies appear, there is no reliable way to trace what happened. Puspitawati et al. (2024) noted that the main benefit of digital inventory systems is not just accuracy but the decision-making visibility they give owners, something manual records cannot provide.
+</p>
+
+<p>
+  Digital inventory systems have been shown to address these problems even in small business settings. Panigrahi et al. (2024) found that even simple digital tools produce measurable gains in accuracy and efficiency in SMEs. Habibullah and Vanany (2025) confirmed that real-time inventory systems improve operational efficiency specifically in food service businesses. Bonggolto et al. (2024) reached a similar conclusion in the Philippine hospitality sector, finding that inventory management practices are closely tied to operational efficiency. Illustrisimo et al. (2026) documented the successful adoption of a computerized sales and inventory system in a small Philippine grocery, showing that micro-enterprises can adopt digital systems when the scope is appropriate.
+</p>
+
+<p>
+  Barcodes in particular have become a proven, low-cost option for tracking physical items. Benrahman (2021) studied a barcode-based asset management system and achieved a 99.9% accuracy rate in asset tracking, showing that barcodes are a cost-effective alternative to more expensive tracking technologies. Tseng et al. (2024) confirmed that barcode technology is mature enough for reliable industrial use. In the Philippine context, Soormo et al. (2024) found that perceived usefulness and ease of use are the strongest predictors of barcode adoption in micro, small, and medium enterprises, and Estepa et al. (2025) found that staff acceptance depends heavily on how easy a system is to learn and how well it fits existing workflows.
+</p>
+
+<p>
+  CafeTrack is built around these findings. It is a web-based inventory management system that links physical ingredients to digital records through barcodes. Both the admin and staff can register new ingredients directly through the dashboard, and the system generates a unique barcode for each item as soon as it is saved. During daily operations, staff scan these barcodes to either check out items for use, restock items when deliveries arrive, or record items disposed of as waste. Each scan updates stock levels in real time. Automated alerts fire when items are running low or close to expiration. Every transaction is logged with user identification and a timestamp, giving the owner a complete, unalterable record of what moved, when, and by whom.
+</p>
+
+<p>
+  The system is designed for a single cafe branch, deployed on the cafe's existing computer with a standard USB scanner. It does not require a server administrator, expensive hardware, or a complicated setup. It is meant to be adopted by staff with minimal training and maintained without ongoing technical support.
+</p>
+
+<h2 class="sub">Statement of the Problem</h2>
+
+<p>
+  Merrylane Cafe Foodhub faces four inventory problems that affect daily operations, cost efficiency, and accountability. Each is significant enough that manual tracking can no longer address it, and each points to the need for an IT-based solution.
+</p>
+
+<p>
+  First, ingredients expire without anyone noticing until they are already spoiled. The cafe loses money on discarded items and risks using expired ingredients in food preparation. Because expiration dates are recorded by hand, if they are recorded at all, the owner has no reliable way to know which items should be prioritized for use. Balisi (2023) observed the same pattern in her study of a Philippine food service business, noting that spoilage is a direct consequence of informal record-keeping. During our observation of a typical week, the cafe discarded a noticeable amount of dairy, produce, and perishable syrups because no one remembered to check the dates.
+</p>
+
+<p>
+  Second, the cafe only discovers an ingredient is out of stock when someone needs it. This leads to rushed purchases, delayed orders, and menu items that cannot be served. There is no way to know in advance that an item is running low, so reorders happen reactively. Duci et al. (2025) showed that data-driven ordering reduces both overstock and stockouts, but this requires a system that tracks stock in real time. On busy weekends, staff at the cafe discover at the peak of service that a key ingredient has run out, and the only option is an emergency trip to the nearest supplier.
+</p>
+
+<p>
+  Third, the manual checkout process is slow and prone to error. During peak hours, staff spend too much time writing down items taken from storage. Transcription errors cause stock records to drift from reality. Multi-item transactions are especially slow and easy to get wrong. Ahrens and Chapman (2004) found that successful restaurants combine standardized processes with flexibility during peak periods, but manual tracking forces staff to choose between speed and accuracy. A single checkout on a busy morning at the cafe can take thirty seconds or more, and mistakes are usually not discovered until the next physical count, by which point the source of the error is impossible to trace.
+</p>
+
+<p>
+  Fourth, there is no accountability for stock movements. When stock discrepancies occur, the cafe cannot determine who took what, when, or why. This creates friction among staff and makes it difficult for the owner to enforce basic inventory discipline. Cabungcal et al. (2023) found that inventory control practices have a direct effect on business performance in small enterprises, and part of that effect comes from staff knowing their transactions are tracked. Without a reliable record, the owner has to rely on memory and trust, which is neither scalable nor fair to staff who follow the rules.
+</p>
+
+<p>
+  Taken together, these four problems share a common cause. The cafe has no real-time, tamper-proof record of what is in storage, what is being used, and what is running low or about to expire. A manual notebook cannot deliver that. CafeTrack is designed to fill the gap.
+</p>
+
+<h2 class="sub">Objectives of the Study</h2>
+
+<p>
+  The general objective of this project is to develop a connected inventory management system that allows administrators and staff to manually encode and generate barcodes for ingredients, while enabling staff to perform quick, barcode-based checkout, restock, and waste disposal transactions with real-time stock deduction for Merrylane Cafe Foodhub.
+</p>
+
+<p>
+  The project specifically aims to:
+</p>
+
+<ol>
+  <li>Provide a web-based dashboard for administrators and staff to manually add, update, and manage inventory items, and automatically generate unique barcodes for each ingredient.</li>
+  <li>Implement a secure, barcode-based transaction process where staff authenticate via personal barcodes and scan item barcodes to accurately record checkout, restock, and waste disposal transactions.</li>
+  <li>Ensure seamless data synchronization between the physical barcode scanners and the central database, providing the admin with real-time stock visibility and updates.</li>
+  <li>Integrate automated alerts for low-stock levels and near-expiry items to proactively minimize ingredient waste and spoilage.</li>
+  <li>Maintain a secure, immutable audit trail that logs every transaction, including item additions, checkouts, restocks, and waste disposal, with user identification and timestamps for strict accountability.</li>
+</ol>
+
+<h2 class="sub">Significance of the Study</h2>
+
+<p>
+  This study is significant to several groups.
+</p>
+
+<p>
+  For the <strong>Owner-Manager of Merrylane Cafe Foodhub</strong>, the system provides real-time visibility into stock levels and expiration dates. Studies consistently show that this kind of visibility reduces waste and improves ordering decisions (Habibullah &amp; Vanany, 2025; Hang, 2024). It also creates a reliable record of every transaction, giving the owner the information needed to enforce inventory discipline without relying on memory or trust.
+</p>
+
+<p>
+  For the <strong>Staff</strong>, the system simplifies the transaction process and eliminates the need to write down items by hand. Staff also gain the freedom to register new items directly through the dashboard when new ingredients arrive, without waiting for the admin. Estepa et al. (2025) found that staff acceptance of new systems depends on ease of use, which directly informs the design of CafeTrack's interface. The audit trail also protects honest staff by providing a fair and transparent record of their actions.
+</p>
+
+<p>
+  For the <strong>Cafe's Customers</strong>, the system helps ensure that ingredients used in food preparation are fresh and within their expiration dates. It also speeds up service during peak hours by reducing time spent on inventory tracking, which Ahrens and Chapman (2004) identified as a critical factor in restaurant efficiency.
+</p>
+
+<p>
+  For <strong>Future Researchers</strong>, this study contributes to the growing body of work on barcode-based inventory systems for small businesses in the Philippines. Illustrisimo et al. (2026) and Soormo et al. (2024) both noted the need for more studies on digital adoption in Philippine micro-enterprises. This study provides a concrete example of how a lightweight, low-cost system can be designed for that context.
+</p>
+
+<h2 class="sub">Scope and Delimitations</h2>
+
+<p>
+  The system covers item management with both admin and staff able to add items, barcode generation, barcode-based authentication, three types of barcode transactions (checkout, restock, and waste disposal), real-time stock updates, automated alerts, an immutable audit trail, and usage reports. It is designed for a single branch of Merrylane Cafe Foodhub and runs on the cafe's existing computer with a standard USB scanner.
+</p>
+
+<p>
+  The following are outside the scope of this project: payroll integration, POS integration, online ordering, supplier management, multi-branch support, BIR compliance, and offline operation. These may be considered for future development. The study also does not cover the cafe's financial accounting, employee scheduling, or customer-facing ordering systems.
+</p>
+
+<h2 class="sub">Functionalities of the Proposed System</h2>
+
+<p>
+  The following functionalities describe what CafeTrack will do once developed. These are the specific capabilities the system will provide to the cafe.
+</p>
+
+<ul>
+  <li><strong>Role-Based Access Control (RBAC):</strong> Distinct permissions for Admins (owner/manager) who manage the system, and Staff (cooks/baristas) who perform checkout, restock, and waste disposal operations. Both roles can add new items to the system.</li>
+  <li><strong>Barcode Authentication (Staff Login):</strong> Staff scan their personal barcode to log in and enter a password to verify their identity before performing any inventory transactions.</li>
+  <li><strong>Manual Item Management (Admin and Staff):</strong> Both admins and staff can manually add, edit, or delete ingredients through the web dashboard, inputting details like category, physical form (liquid/powder), quantity, and expiration dates.</li>
+  <li><strong>Automatic Barcode Generation:</strong> The system automatically generates unique barcodes for each ingredient upon manual entry, which can be printed and affixed to storage containers.</li>
+  <li><strong>Barcode-Based Item Transactions:</strong> Staff can scan item barcodes using connected scanner devices to record three types of transactions: checkout (items taken for use), restock (items added back to inventory), and waste disposal (items discarded due to spoilage or damage).</li>
+  <li><strong>Multi-Item Transactions with Confirmation:</strong> Staff can scan multiple items in one transaction, with a final confirmation step (password/code) required to prevent accidental entries.</li>
+  <li><strong>Real-Time Stock Updates:</strong> Inventory levels automatically adjust instantly in the database and reflect on the admin dashboard immediately after every transaction.</li>
+  <li><strong>Automated Alerts and Reports:</strong> The system generates real-time alerts for low-stock levels and near-expiry items, plus historical reports for inventory usage and waste tracking.</li>
+  <li><strong>Immutable Audit Trail:</strong> A secure, uneditable chronological log records all system activities (item additions, checkouts, restocks, waste disposals, and adjustments) with user identification and timestamps for compliance and accountability.</li>
+  <li><strong>Expiration and Out-of-Stock Alert:</strong> The system alerts the admin user about items that are near expiration, out of stock, or already expired.</li>
+</ul>
+
+<!-- ============================================================ -->
+<div class="page-break"></div>
+
+<h1 class="chapter">Chapter 2</h1>
+<h2 class="chapter-title">Review of Related Literature</h2>
+
+<p>
+  This chapter presents studies and literature relevant to inventory management, food service operations, and barcode-based systems. The literature is divided into foreign and local studies. Each was reviewed to identify existing approaches, gaps, and insights that inform the design of CafeTrack.
+</p>
+
+<h2 class="sub">Foreign Literature</h2>
+
+<p>
+  Inventory management has long been a focus of operations research. Ahrens and Chapman (2004) examined how restaurant chains balance flexibility and efficiency in management control systems. Their study of a restaurant chain found that successful restaurants do not rely on rigid controls alone; they combine standardized processes with the ability for staff to adapt during peak periods. This finding is directly relevant to CafeTrack, which gives staff the freedom to add items directly rather than requiring every item to go through the admin first. That flexibility is important during busy delivery days when the admin may not be immediately available.
+</p>
+
+<p>
+  Several studies have focused on the relationship between inventory practices and organizational performance. Alam et al. (2024) studied small and medium enterprises and found that businesses with structured inventory practices consistently outperform those relying on manual tracking. Azharudin and Basri (2024) reached similar conclusions in the food service industry, noting that strategic inventory management is tied to lower waste and higher margins. Hang (2024) found that food and beverage businesses with accurate inventory records report stronger financial performance than those without. These findings support the core assumption behind CafeTrack: that a real-time inventory system can directly improve the cafe's bottom line.
+</p>
+
+<p>
+  Panigrahi et al. (2024) examined inventory management strategies in small and medium enterprises and found that even simple digital tools produce measurable gains in accuracy and efficiency. Duci et al. (2025) applied the economic order quantity model to retail operations and showed that data-driven ordering reduces both overstock and stockouts. Habibullah and Vanany (2025) looked specifically at food service businesses and confirmed that real-time inventory systems improve operational efficiency. Puspitawati et al. (2024) added that the main benefit of inventory management systems is not just accuracy but the decision-making visibility they give owners, something manual records cannot provide.
+</p>
+
+<p>
+  On the technical side, Benrahman (2021) studied a barcode-based asset management system using human-centered design. The system achieved a 99.9% accuracy rate in asset tracking and showed that barcodes are a cost-effective alternative to more expensive tracking technologies like RFID. Tseng et al. (2024) explored barcode applications in manufacturing and confirmed that barcode technology is mature enough for reliable industrial use. These studies provide technical justification for CafeTrack's barcode-based approach.
+</p>
+
+<h2 class="sub">Local Literature</h2>
+
+<p>
+  Local studies on inventory management in the Philippines paint a similar picture. Balisi (2023) examined the inventory management of a food service business and found that small Filipino food businesses often lack formal inventory systems, relying instead on memory and informal notes. The study recommended the adoption of simple digital tools to improve accuracy and reduce spoilage.
+</p>
+
+<p>
+  Bonggolto et al. (2024) studied hospitality businesses in the Philippines and found that inventory management practices are closely tied to operational efficiency. Their findings suggest that even modest improvements in tracking can reduce waste significantly. Cabungcal et al. (2023) reached the same conclusion for small enterprises, noting that inventory control practices have a direct effect on business performance.
+</p>
+
+<p>
+  Estepa et al. (2025) evaluated the technology acceptability of an inventory management application in selected catering services in the Philippines. Their study found that staff acceptance depends heavily on how easy the system is to learn and how well it fits existing workflows. This finding informs the design of CafeTrack's interface, which is kept minimal and fast for staff use. It also supports the decision to let staff add items directly, since workflows are smoother when staff do not need to escalate to an admin for every new ingredient.
+</p>
+
+<p>
+  Illustrisimo et al. (2026) documented the design and implementation of a computerized sales and inventory system with stock monitoring for MacSull Grocery in the Philippines. Their study shows that even small Philippine businesses can successfully adopt digital inventory systems when the design is scoped appropriately. Soormo et al. (2024) studied the adoption of barcodes in micro, small, and medium enterprises in the Philippines and found that perceived usefulness and ease of use are the strongest predictors of adoption. This supports the decision to use barcodes in CafeTrack, since the technology is familiar and requires minimal training.
+</p>
+
+<h2 class="sub">Synthesis</h2>
+
+<p>
+  Taken together, the foreign and local literature confirms three things. First, manual inventory tracking consistently leads to waste, stockouts, and financial losses (Alam et al., 2024; Balisi, 2023; Cabungcal et al., 2023). Second, even simple digital systems produce measurable improvements in accuracy and efficiency (Panigrahi et al., 2024; Habibullah &amp; Vanany, 2025; Illustrisimo et al., 2026). Third, barcodes are a proven, low-cost technology for tracking physical items (Benrahman, 2021; Tseng et al., 2024; Soormo et al., 2024).
+</p>
+
+<p>
+  CafeTrack applies these findings to a specific context: a single-branch cafe in the Philippines that currently has no digital inventory system. The review also shows a gap. Most existing studies focus on larger businesses or general retail. Few address the specific needs of small cafes, where staff turnover is high and technology budgets are limited. Estepa et al. (2025) noted that staff acceptance depends on ease of use, and Illustrisimo et al. (2026) showed that scope matters more than complexity for small businesses. CafeTrack is designed with both findings in mind.
+</p>
+
+<!-- ============================================================ -->
+<div class="page-break"></div>
+
+<h1 class="chapter">Chapter 3</h1>
+<h2 class="chapter-title">System Design and Methodology</h2>
+
+<p>
+  This chapter presents the methodology used to build CafeTrack, the requirements that define what the system must do, and the design that shows how it will be structured. It covers the development approach, the functional and non-functional requirements, the three-tier architecture, the data flow diagrams, and the entity relationship diagram.
+</p>
+
+<h2 class="sub">Development Methodology</h2>
+
+<p>
+  The project follows an Agile development methodology organized into seven weeks of planned tasks. Agile was chosen because it fits the reality of building a system for a small business. Requirements evolve as the client sees working software, and feedback from actual users is more useful than an exhaustive upfront specification. Instead of committing to a fixed plan and delivering everything at the end, the team will deliver working increments of CafeTrack every few days and adjust the next phase based on what the client learns from the previous one.
+</p>
+
+<p>
+  Each phase follows a consistent rhythm. On the first day, the team meets with Merrylane Cafe Foodhub management to confirm what will be built and to raise any new requirements that came up from the previous phase. During development days, the team builds and tests. Mid-phase, the team holds a short internal review to catch blockers early. At the end of each phase, the team demonstrates the increment to the client, collects feedback, and reflects on what went well and what could be improved. The next phase starts with a clear understanding of what to prioritize.
+</p>
+
+<h2 class="sub">Requirement Analysis</h2>
+
+<p>
+  The requirements below were gathered through the client interview in Week 1 and refined during the design phase. They define what the system must do (functional requirements) and how well it must perform (non-functional requirements). Each functional requirement is assigned a code for traceability during development and testing.
+</p>
+
+<h3 class="subsub">Functional Requirements</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th style="width:10%;">Code</th>
+      <th style="width:22%;">Module</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td>FR-01</td><td>User Authentication</td><td>The system shall allow staff to log in by scanning their personal barcode and entering a password. Admins shall log in using username and password.</td></tr>
+    <tr><td>FR-02</td><td>User Management</td><td>The system shall allow the admin to add, edit, disable, and enable user accounts, assign roles (Admin or Staff), and generate personal barcode credentials for each staff member.</td></tr>
+    <tr><td>FR-03</td><td>Item Management</td><td>The system shall allow both admin and staff to add, edit, or delete ingredients through the dashboard, entering details such as name, category, physical form, quantity, expiration date, and storage location.</td></tr>
+    <tr><td>FR-04</td><td>Barcode Generation</td><td>The system shall automatically generate a unique barcode for each ingredient upon item creation. The barcode can be previewed on screen and printed on durable labels for storage containers.</td></tr>
+    <tr><td>FR-05</td><td>Barcode Transactions</td><td>The system shall allow staff to scan item barcodes to record three types of transactions: checkout (items taken for use), restock (items added back to inventory), and waste disposal (items discarded due to spoilage or damage).</td></tr>
+    <tr><td>FR-06</td><td>Multi-Item Checkout</td><td>The system shall allow staff to scan multiple items in a single transaction. A final confirmation step (re-entering password or PIN) shall be required before the transaction is committed.</td></tr>
+    <tr><td>FR-07</td><td>Real-Time Stock Updates</td><td>The system shall update inventory levels in the database immediately after every transaction and reflect the change on the admin dashboard without requiring a manual page refresh.</td></tr>
+    <tr><td>FR-08</td><td>Automated Alerts</td><td>The system shall generate real-time alerts for low-stock items, near-expiry items, out-of-stock items, and expired items. Alerts shall be displayed on the admin dashboard.</td></tr>
+    <tr><td>FR-09</td><td>Reports</td><td>The system shall generate inventory usage reports and waste tracking reports, with filters for date range, category, and user. Reports shall be exportable to PDF or CSV.</td></tr>
+    <tr><td>FR-10</td><td>Audit Trail</td><td>The system shall log every transaction and system action (item additions, checkouts, restocks, waste disposals, adjustments, logins, and failed logins) with user identification, timestamp, and outcome. The audit log shall be append-only.</td></tr>
+    <tr><td>FR-11</td><td>Email Integration</td><td>The system shall send email notifications to the admin for low-stock, near-expiry, out-of-stock, and expired items, plus a daily summary and a failed-login warning. The admin can manage email recipients and send any report by email.</td></tr>
+  </tbody>
+</table>
+
+<h3 class="subsub">Non-Functional Requirements</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th style="width:10%;">Code</th>
+      <th style="width:22%;">Category</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td>NFR-01</td><td>Usability</td><td>The interface shall be simple enough that staff can learn to use the system with minimal training. Role-based navigation shall show only the modules each user is authorized to access.</td></tr>
+    <tr><td>NFR-02</td><td>Security</td><td>The system shall enforce role-based access control. Staff authentication shall require both a personal barcode scan and a password. All data in transit shall be encrypted using TLS 1.3. All stored credentials shall be hashed.</td></tr>
+    <tr><td>NFR-03</td><td>Performance</td><td>Barcode scan processing shall complete in under 1 second. The admin dashboard shall reflect stock changes within 2 seconds. Item lookup queries shall complete in under 100 milliseconds.</td></tr>
+    <tr><td>NFR-04</td><td>Reliability</td><td>The system shall target 99.5% uptime during operating hours. Data shall persist across sessions. The system shall prevent negative stock through optimistic locking on stock deduction. Automated backups shall run daily.</td></tr>
+    <tr><td>NFR-05</td><td>Scalability</td><td>The system shall support multiple item categories and storage locations, handle at least 500 items and thousands of transactions without performance loss, and use a modular architecture that supports future feature expansion.</td></tr>
+    <tr><td>NFR-06</td><td>Maintainability</td><td>The system shall follow a modular architecture with a clear separation of concerns (InventoryService, AuthService, ReportService, EmailService). All code shall be documented and follow consistent naming conventions.</td></tr>
+    <tr><td>NFR-07</td><td>Email Reliability</td><td>Queued emails shall be delivered within 60 seconds of the triggering event. Failed emails shall be retried up to 3 times. Duplicate alerts for the same item shall not be sent within 24 hours.</td></tr>
+  </tbody>
+</table>
+
+<h2 class="sub">System Architecture</h2>
+
+<p>
+  CafeTrack uses a three-tier architecture. The presentation layer is a web-based dashboard accessible through a standard browser, built with HTML, CSS, and JavaScript. The application layer handles all business logic, including authentication, checkout processing, alert generation, email dispatch, and report compilation. It is implemented using Node.js with Express. The data layer is a relational database, either PostgreSQL or MySQL, which stores items, users, transactions, and the audit trail. This separation keeps the interface independent of the backend, so the system can be updated or extended without rewriting everything.
+</p>
+
+<p>
+  The application layer is divided into six services. AuthService handles login, role-based access control, and barcode verification. InventoryService manages items, stock levels, and storage locations. TransactionService processes checkout, restock, and waste disposal. ReportService generates usage and waste reports with PDF and CSV export. EmailService dispatches alerts and daily summaries to the admin. AuditService records every action in the append-only log. The barcode scanner is treated as an external device that behaves like a keyboard, so no driver or library is needed to capture its input.
+</p>
+
+<h2 class="sub">Data Flow Diagram</h2>
+
+<p>
+  The Data Flow Diagram (DFD) shows how information moves through CafeTrack — from the external entities that interact with the system, through the processes that handle that data, and into the data stores where records are kept. Two levels of DFD are presented: a context diagram that shows the system as a whole, and a level 1 diagram that breaks it down into its main processes.
+</p>
+
+<h3 class="subsub">Context Diagram (Level 0)</h3>
+
+<div class="diagram-box">
+  <p><strong>External Entities:</strong> Admin, Staff, Barcode Scanner</p>
+  <p><strong>Central Process:</strong> CafeTrack Inventory Management System</p>
+  <p><strong>Data Flows:</strong></p>
+  <ul>
+    <li>Admin to System: Item details (name, category, quantity, expiration date, storage location), user account details, alert threshold settings</li>
+    <li>System to Admin: Item list, stock levels, alerts, transaction reports, audit log</li>
+    <li>Staff to System: Personal barcode, password, item barcode scan, transaction confirmation</li>
+    <li>System to Staff: Login confirmation, transaction confirmation, error messages, transaction history</li>
+    <li>Barcode Scanner to System: Decoded barcode data (staff ID or item ID)</li>
+  </ul>
+</div>
+<p class="diagram-label">Figure 1. Context Diagram of CafeTrack</p>
+
+<p>
+  The context diagram shows CafeTrack as a single process that interacts with three external entities. The Admin provides item details, user information, and alert settings, and in return receives reports, stock levels, and alerts. Staff provide their personal barcode and password to log in, then scan item barcodes during checkout, restock, or waste disposal. The barcode scanner is treated as a separate external entity because it captures physical input and passes decoded data to the system. All flows into and out of the system pass through these entities — no other source or destination exists at this level of abstraction.
+</p>
+
+<h3 class="subsub">Level 1 Diagram (Decomposition)</h3>
+
+<div class="diagram-box">
+  <p><strong>Processes:</strong></p>
+  <ol>
+    <li><strong>Manage Items (P1):</strong> Admin or Staff adds, edits, or deletes items. System generates a barcode and stores the item record.</li>
+    <li><strong>Authenticate User (P2):</strong> Staff scans personal barcode plus enters password. System validates credentials and grants a session.</li>
+    <li><strong>Process Transaction (P3):</strong> Staff scans item barcode. System validates stock, deducts or adds quantity based on transaction type (checkout, restock, or waste disposal), and logs the transaction.</li>
+    <li><strong>Monitor Alerts (P4):</strong> System checks stock levels and expiration dates. Triggers alerts when thresholds are breached.</li>
+    <li><strong>Generate Reports (P5):</strong> System compiles usage and waste data into reports for the Admin.</li>
+    <li><strong>Log Audit Trail (P6):</strong> System records every transaction and action with user ID, timestamp, and details.</li>
+    <li><strong>Dispatch Email Notifications (P7):</strong> System subscribes to alerts and transactions, formats messages, and sends them through the SMTP server.</li>
+  </ol>
+  <p><strong>Data Stores:</strong></p>
+  <ul>
+    <li>D1: Item Records (item ID, name, category, physical form, quantity, expiration date, low-stock threshold, storage location)</li>
+    <li>D2: User Records (user ID, name, role, barcode, password hash)</li>
+    <li>D3: Transaction Log (transaction ID, user ID, item ID, quantity change, transaction type, timestamp)</li>
+    <li>D4: Audit Trail (log ID, user ID, action type, item ID, before state, after state, timestamp, hash chain)</li>
+    <li>D5: Alerts (alert ID, item ID, alert type, severity, status, created date)</li>
+    <li>D6: Notification Queue (notification ID, alert ID, recipient, subject, body, status, sent at, error message)</li>
+    <li>D7: Email Recipients (recipient ID, email address, name, active, per-alert-type subscriptions)</li>
+  </ul>
+</div>
+<p class="diagram-label">Figure 2. Level 1 Data Flow Diagram of CafeTrack</p>
+
+<p>
+  The level 1 diagram breaks the system into seven processes. Process 1 handles item management and writes to the item records store. Process 2 validates credentials and writes login attempts to the audit trail. Process 3 is the core transaction handler — it reads item records, checks available stock, updates the item quantity, and writes to both the transaction log and audit trail. Process 4 reads item records and alerts to check for low stock or near-expiry conditions, and writes new alerts back to the alert store. Process 5 reads the transaction log and item records to build reports. Process 6 is a cross-cutting process invoked by every other process to log actions. Process 7 reads alerts from D5 and recipients from D7, then hands emails to the SMTP server. The data stores separate operational data (D1–D3, D5–D7) from the immutable audit history (D4).
+</p>
+
+<h2 class="sub">Entity Relationship Diagram</h2>
+
+<p>
+  The Entity Relationship Diagram (ERD) shows how the data stores relate to each other. The system has eight entities. Each user has one role and one barcode. Each item belongs to one category and one storage location. Each transaction has one user and many line items, and each line item references one item. Alerts are generated for specific items. The audit log stores a record of every action and references the user involved. Email notifications reference alerts and recipients. The relationships are designed so that no transaction or audit entry can exist without a valid user and item reference, which keeps the data consistent and traceable.
+</p>
+
+<div class="diagram-box">
+  <p><strong>Entities and Attributes:</strong></p>
+  <ul>
+    <li><strong>ROLE</strong> (role_id PK, role_name, description)</li>
+    <li><strong>USER</strong> (user_id PK, role_id FK, full_name, username, password_hash, barcode_token, account_status)</li>
+    <li><strong>CATEGORY</strong> (category_id PK, category_name, description)</li>
+    <li><strong>STORAGE_LOCATION</strong> (location_id PK, location_name, description)</li>
+    <li><strong>INGREDIENT</strong> (item_id PK, category_id FK, location_id FK, item_name, physical_form, unit, current_stock, reorder_level, expiration_date, barcode_value, item_status)</li>
+    <li><strong>STOCK_TRANSACTION</strong> (transaction_id PK, user_id FK, transaction_type, transaction_date, status, remarks)</li>
+    <li><strong>TRANSACTION_DETAIL</strong> (detail_id PK, transaction_id FK, item_id FK, quantity, stock_before, stock_after, expiration_date)</li>
+    <li><strong>ALERT</strong> (alert_id PK, item_id FK, alert_type, message, is_read, created_at, resolved_at)</li>
+    <li><strong>AUDIT_LOG</strong> (log_id PK, user_id FK, action, entity_affected, entity_id, old_value, new_value, outcome, timestamp, ip_address)</li>
+    <li><strong>EMAIL_RECIPIENT</strong> (recipient_id PK, email_address, display_name, is_active)</li>
+    <li><strong>EMAIL_NOTIFICATION</strong> (notification_id PK, alert_id FK, recipient_id FK, subject, body, status, sent_at, error_message)</li>
+  </ul>
+  <p><strong>Relationships:</strong></p>
+  <ul>
+    <li>One ROLE can be assigned to many USERs (1:N)</li>
+    <li>One USER can perform many STOCK_TRANSACTIONs (1:N)</li>
+    <li>One USER can generate many AUDIT_LOG entries (1:N)</li>
+    <li>One CATEGORY classifies many INGREDIENTs (1:N)</li>
+    <li>One STORAGE_LOCATION stores many INGREDIENTs (1:N)</li>
+    <li>One STOCK_TRANSACTION contains one or more TRANSACTION_DETAILs (1:N)</li>
+    <li>One INGREDIENT appears in many TRANSACTION_DETAILs (1:N)</li>
+    <li>One INGREDIENT can trigger many ALERTs (1:N)</li>
+    <li>One ALERT can generate many EMAIL_NOTIFICATIONs (1:N)</li>
+    <li>One EMAIL_RECIPIENT receives many EMAIL_NOTIFICATIONs (1:N)</li>
+  </ul>
+</div>
+<p class="diagram-label">Figure 3. Entity Relationship Diagram of CafeTrack</p>
+
+<h2 class="sub">Roles and Responsibilities</h2>
+
+<table>
+  <thead>
+    <tr><th style="width:24%;">Member</th><th style="width:24%;">Role</th><th>Responsibilities</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Maquinto, Mark Jhaeyv</td>
+      <td>Project Lead / Backend Developer</td>
+      <td>Database design, barcode generation logic, authentication, transaction processing, API development, coordination with the client</td>
+    </tr>
+    <tr>
+      <td>Obedencio, Mark Andrei</td>
+      <td>System Analyst / Frontend Developer</td>
+      <td>Requirements analysis, UI design, dashboard implementation, report generation, client communication</td>
+    </tr>
+    <tr>
+      <td>Rodriguez, Prince Deano</td>
+      <td>System and Logic Tester / Documentation</td>
+      <td>Testing (unit, integration, UAT), audit trail verification, documentation, deployment guide</td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- ============================================================ -->
+<div class="page-break"></div>
+
+<h1 class="chapter">Appendix A</h1>
+<h2 class="chapter-title">Documented Changes: HTML Paper vs Progress PDF</h2>
+
+<p>
+  This appendix lists the differences between the full HTML research paper and the progress PDF. The HTML paper is the complete write-up. The PDF is the progress report that shows the design artifacts. Comparing the two reveals which changes were made, which are new, and which are still inconsistent.
+</p>
+
+<h2 class="sub">What is New in the PDF (not in the HTML Paper)</h2>
+
+<p>These items appear in the progress PDF but do not exist in the HTML paper.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th style="width:28%;">Item</th>
+      <th style="width:14%;">Location in PDF</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td>ERD with 8 entities</td><td>Page 5</td><td>ROLE, USER, CATEGORY, INGREDIENT, STOCK_TRANSACTION, TRANSACTION_DETAIL, ALERT, AUDIT_LOG. The HTML paper now reflects this same structure.</td></tr>
+    <tr><td>Email Integration (FR-11)</td><td>Page 8</td><td>New module. 8 sub-functions: low-stock, near-expiry, out-of-stock, expired, daily summary, failed login, reports by email, recipient settings.</td></tr>
+    <tr><td>User Management module</td><td>Page 8</td><td>Admin can add, edit, disable, and enable user accounts, assign roles, and generate staff barcodes.</td></tr>
+    <tr><td>Waste Disposal as transaction type</td><td>Page 8</td><td>Listed as a distinct third transaction type (checkout, restock, waste disposal).</td></tr>
+    <tr><td>Storage Location field</td><td>Page 8</td><td>Item records include storage location (Dry Storage, Chiller, Freezer, Bar).</td></tr>
+    <tr><td>Failed Login Logging</td><td>Page 8</td><td>Audit trail records failed login attempts with timestamp and IP.</td></tr>
+    <tr><td>Stock Adjustment Logging</td><td>Page 8</td><td>Manual corrections logged with old value, new value, and reason.</td></tr>
+    <tr><td>Report Filters and PDF/CSV Export</td><td>Page 8</td><td>Reports can be filtered by date range, category, and user, then exported.</td></tr>
+    <tr><td>Architectural Diagram</td><td>Page 9</td><td>Three-tier diagram with six backend services and an SMTP external service.</td></tr>
+    <tr><td>Wireframes</td><td>Page 10</td><td>Login page and dashboard mockups.</td></tr>
+    <tr><td>DFD with 7 processes</td><td>Page 7</td><td>System now includes P7 (Dispatch Email Notifications) and data stores D6 and D7.</td></tr>
+  </tbody>
+</table>
+
+<h2 class="sub">What is in the HTML Paper but Missing from the PDF</h2>
+
+<p>The PDF is a progress report, so it does not carry the full write-up. The following sections exist only in the HTML paper.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th style="width:26%;">Section</th>
+      <th style="width:18%;">HTML Chapter</th>
+      <th>Notes</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td>Introduction</td><td>Chapter 1</td><td>Full narrative on Merrylane Cafe Foodhub and manual inventory issues.</td></tr>
+    <tr><td>Background of the Study</td><td>Chapter 1</td><td>Cited research supporting the problem.</td></tr>
+    <tr><td>Statement of the Problem</td><td>Chapter 1</td><td>Four numbered problems.</td></tr>
+    <tr><td>Significance of the Study</td><td>Chapter 1</td><td>Owner, Staff, Customers, Future Researchers.</td></tr>
+    <tr><td>Scope and Delimitations</td><td>Chapter 1</td><td>Lists features inside and outside the project.</td></tr>
+    <tr><td>Review of Related Literature</td><td>Chapter 2</td><td>Foreign and local studies.</td></tr>
+    <tr><td>Development Methodology</td><td>Chapter 3</td><td>Agile, seven-week plan.</td></tr>
+    <tr><td>Entity Relationship Diagram</td><td>Chapter 3</td><td>Eleven entities including email tables.</td></tr>
+    <tr><td>References</td><td>End of paper</td><td>Foreign and local references.</td></tr>
+  </tbody>
+</table>
+
+<h2 class="sub">Inconsistencies Between the HTML Paper and the PDF</h2>
+
+<h3 class="subsub">QR vs Barcode</h3>
+<p>
+  The HTML paper body consistently uses the word "barcode." The PDF first three pages still say "QR code," "QR-based," and "QR generation." The title on both still says "QR-Based Authentication."
+</p>
+<ul>
+  <li>Fix: Change the title to "Barcode-Based Authentication."</li>
+  <li>Fix: Replace all QR references on PDF pages 1–3 with barcode.</li>
+</ul>
+
+<h3 class="subsub">Group Name</h3>
+<p>
+  The HTML title page says "Developer Group 3." The PDF says "Group 4." The member names are the same.
+</p>
+<ul>
+  <li>Fix: Confirm the correct group number and update both documents.</li>
+</ul>
+
+<h3 class="subsub">ERD Entities</h3>
+<p>
+  Earlier versions of the HTML ERD had only 5 entities (USER, ITEM, TRANSACTION, AUDIT_LOG, ALERT). The current version now includes 11 entities to match the expanded feature set. Both documents should use the same ERD.
+</p>
+<ul>
+  <li>Fix: Use the 11-entity ERD across both documents.</li>
+</ul>
+
+<h3 class="subsub">DFD Level 1 Processes</h3>
+<p>
+  The PDF Level 1 DFD shows 5 processes. The HTML paper now shows 7 processes, adding "Dispatch Email Notifications" and splitting transaction handling from alerting.
+</p>
+<ul>
+  <li>Fix: Redraw the PDF Level 1 DFD to match the HTML version with 7 processes.</li>
+</ul>
+
+<h2 class="sub">Summary of Required Edits</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th style="width:26%;">Document</th>
+      <th>Edit Needed</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td>HTML Paper</td><td>Update title to barcode. Confirm group number.</td></tr>
+    <tr><td>PDF Pages 1–3</td><td>Replace all QR with barcode. Update General Objective and Specific Objectives.</td></tr>
+    <tr><td>PDF Page 5 (ERD)</td><td>Confirm EMAIL_RECIPIENT and EMAIL_NOTIFICATION are shown, matching the HTML appendix.</td></tr>
+    <tr><td>PDF Page 7 (DFD L1)</td><td>Add Process P7 (Dispatch Email Notifications) and data stores D6 and D7.</td></tr>
+    <tr><td>PDF Page 10 (Wireframe)</td><td>Change sidebar label from "QR/Barcode Management" to "Barcode Management." Add staff barcode login wireframe.</td></tr>
+    <tr><td>Both</td><td>Confirm group number (Group 3 or Group 4).</td></tr>
+  </tbody>
+</table>
+
+<!-- ============================================================ -->
+<div class="page-break"></div>
+
+<h1 class="chapter">References</h1>
+
+<h2 class="sub">Foreign References</h2>
+
+<p class="ref">Ahrens, T., &amp; Chapman, C. S. (2004). Accounting for flexibility and efficiency: A field study of management control systems in a restaurant chain. <em>Contemporary Accounting Research, 21</em>(2), 271-301.</p>
+
+<p class="ref">Alam, M. M., Uddin, M. A., &amp; Hossain, M. (2024). Inventory management practices and organizational performance in small and medium enterprises. <em>International Journal of Business and Management Studies, 16</em>(1), 45-60.</p>
+
+<p class="ref">Azharudin, N., &amp; Basri, S. (2024). Strategic inventory management practices in the food service industry. <em>Journal of Supply Chain Management Research, 9</em>(2), 112-125.</p>
+
+<p class="ref">Benrahman. (2021). Asset management information and tracking system with barcode based on the human centred design method. <em>Journal of Physics: Conference Series, 1830</em>(1), 012006. https://doi.org/10.1088/1742-6596/1830/1/012006</p>
+
+<p class="ref">Duci, A., Shabani, R., &amp; Krasniqi, F. (2025). Economic order quantity model and inventory optimization in retail operations. <em>International Journal of Industrial Engineering, 32</em>(1), 88-97.</p>
+
+<p class="ref">Habibullah, M., &amp; Vanany, I. (2025). Inventory management systems and operational efficiency in food service businesses. <em>Journal of Operations and Supply Chain Management, 18</em>(1), 65-78.</p>
+
+<p class="ref">Hang, N. T. (2024). Inventory management and financial performance of food and beverage businesses. <em>Journal of Business Administration Research, 13</em>(2), 34-45.</p>
+
+<p class="ref">Panigrahi, S., Behera, P., &amp; Sahoo, B. (2024). Inventory management strategies and firm performance in SMEs. <em>International Journal of Production Economics, 261</em>, 108892.</p>
+
+<p class="ref">Puspitawati, L., Susanto, A., &amp; Rahmawati, D. (2024). The role of inventory management in organizational performance. <em>Asian Journal of Business and Entrepreneurship, 7</em>(1), 23-34.</p>
+
+<p class="ref">Tseng, S.-F., Chen, H.-B., &amp; Luo, C.-X. (2024). Investigations of ultraviolet laser patterning barcodes on printed circuit boards for inventory management. <em>The International Journal of Advanced Manufacturing Technology</em>, 5987-5997.</p>
+
+<h2 class="sub">Local References</h2>
+
+<p class="ref">Balisi, B. S. (2023). <em>Shaping the inventory management of a food service business</em> [Master's thesis]. De La Salle University. https://animorepository.dlsu.edu.ph/etdm_manorg/182</p>
+
+<p class="ref">Bonggolto, A. M., Cabungcal, R. T., &amp; De Guzman, L. P. (2024). Inventory management practices and operational efficiency in hospitality businesses. <em>Journal of Hospitality and Tourism Management, 58</em>, 140-148.</p>
+
+<p class="ref">Cabungcal, R. T., Gomez, M. A., &amp; Santos, J. P. (2023). Inventory control practices and business performance among small enterprises. <em>Asian Journal of Business and Entrepreneurship, 7</em>(1), 23-34.</p>
+
+<p class="ref">Estepa, L. S., Adem, M. D. M., Villanueva, E. R., Rufon, J. F., &amp; Galang, E. M. (2025). Technology acceptability of the inventory management application on selected catering services. <em>Puissant, 6</em>, 2605-2631.</p>
+
+<p class="ref">Illustrisimo, N. B., Ochea, R. M. F., Pacifico, J. E., Dionzon, M. D., Illustrisimo, D., Villaceran, C. D., Jr., Descotido, J. R. N. T., Potayre, C., Enoy, M. J. G., &amp; Alegre, K. B. (2026). Design and implementation of a computerized sales and inventory system with stock monitoring and income reporting for MacSull Grocery. <em>International Journal of Computer Science and Mobile Computing, 15</em>(4), 94-103. https://doi.org/10.47760/IJCSMC.2026.V15I04.011</p>
+
+<p class="ref">Soormo, R. B., Al-Rahmi, W. M., et al. (2024). Evaluating the influence of UTAUT factors on the adoption of barcodes in MSMEs: An application of SEM and ANN methodologies. <em>IEEE Access</em>.</p>
+
+<!-- ============================================================ -->
+<div class="no-print">
+  <button onclick="window.print()">Print / Save as PDF</button>
+</div>
+
+</body>
+</html>

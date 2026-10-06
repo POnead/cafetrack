@@ -25,13 +25,24 @@ export const GET = handler(async (req: Request) => {
     .from("items")
     .select(
       `id, sku, name, unit, units_per_box, quantity, low_stock_threshold,
-       expiration_date, physical_form,
+       expiration_date, physical_form, item_status,
        category:categories(id, name), location:locations(id, name, min_shelf_life_days)`
     )
     .eq("sku", sku)
     .maybeSingle();
 
   if (error) return fail(error.message, 500);
+
+  // A pending item exists but is not stock yet (FR-03). Scanning its label at
+  // the till has to say why, rather than reporting "no item matches" — the label
+  // is real and the operator would reasonably think the scanner is broken.
+  if (data && data.item_status === "pending") {
+    return fail(
+      `${data.name} is waiting for admin approval and cannot be used yet`,
+      409
+    );
+  }
+
   if (!data) {
     // A staff badge scanned at the counter is the likely mistake, and "no item
     // matches CT-STF-..." reads like a damaged label rather than a wrong page.

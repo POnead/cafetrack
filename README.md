@@ -109,6 +109,59 @@ one, from `Downloads\cafetrack`.
   units per box, quantity, low-stock threshold and expiry date. Search, filter by
   category, and sort by clicking any column header. Barcode labels for the whole
   filtered list or one at a time.
+- **Staff can add ingredients, two ways** — an admin grants *item management* to
+  a staff member from their account, and their additions, edits and deletions take
+  effect immediately. Without that grant they can still submit a new ingredient;
+  it is saved, audited and listed under **Approvals**, but it is **not stock** until
+  an admin approves it. A pending item raises no alerts, cannot be checked out or
+  restocked, and its barcode says it is waiting rather than "no item matches" — so
+  the approval step cannot be bypassed by accident. Edit and delete stay
+  admin-only unless item management is granted, and revoking it takes effect on the
+  next request rather than at next sign-in.
+- **Email notifications** — low stock, out of stock, expiring soon, expired, a daily
+  summary, rejected sign-ins, and the stock report on demand. **Off until an admin
+  turns it on** in Settings → Email and adds a recipient, so the feature cannot
+  start sending from someone's café by accident. Alerts are queued by the database
+  during the movement that caused them and sent afterwards, so a slow or dead mail
+  server never slows down the till; a failed send is retried, up to three times by
+  default. The same alert is not sent twice inside a suppression window (24 hours by
+  default), and the delivery log shows what went out, what is queued, and why
+  anything failed.
+
+### Setting up email
+
+An admin sets the sending account from **Settings → Email** — no file editing and
+no restart. Gmail, Outlook and anything else that speaks SMTP work the same way;
+Gmail and Outlook are one-click presets that fill in the server and port.
+
+**Gmail needs an App Password, not your account password.** Google stopped
+accepting the real password for SMTP in 2022. Turn on 2-Step Verification, then
+create one at <https://myaccount.google.com/apppasswords> and paste the 16
+characters into the app-password field.
+
+**The From address must be the account itself, or a verified alias of it.** Gmail
+rejects anything else, and reports it only as an unreadable `553`.
+
+Where the details are stored:
+
+| | |
+| --- | --- |
+| Saved on the website | `settings`, host/port/user in the clear, **password encrypted** |
+| `SMTP_*` in `.env.local` | A fallback, used only when nothing is saved on the website |
+| Precedence | The website wins — an admin saving a new account expects it to take effect |
+
+The app password is encrypted with AES-256-GCM keyed from `AUTH_SECRET` before it
+is stored, so it is not readable in the database, in a backup, or through any API.
+It is never displayed again, not even to the admin who set it — the form shows only
+whether one exists, and leaving that field blank keeps the stored one. Changing
+`AUTH_SECRET` invalidates it, which the app reports as "re-enter the password"
+rather than failing every send. `GET /api/settings` refuses to return the key at
+all, so it fails closed for any credential added later.
+
+TLS is required: with the default port 587 the connection upgrades with STARTTLS,
+and if a server does not offer it the send is refused rather than handing over the
+password in cleartext. `SMTP_ALLOW_INSECURE=1` lifts that for a relay on the same
+machine with no certificate — an explicit choice, not a silent fallback.
 - **Alerts** — low stock, out of stock, expired and expiring soon, raised by a
   database function. Every alert has a detail page with the item, its current
   stock and its full alert history. An open alert **escalates in place** when
@@ -130,7 +183,10 @@ one, from `Downloads\cafetrack`.
   export of whatever is currently in view.
 - **Audit trail** — every stock movement and account change, hash-chained so
   entries cannot be edited or removed without it showing, with a "verify chain"
-  button that walks the whole chain.
+  button that walks the whole chain. Each entry also records **where it came from**
+  (IP) and **how it turned out** (success, denied, failed). Those two sit beside
+  the hash rather than inside it: adding them to the digest would invalidate every
+  entry already written, and a chain that does not verify is worth nothing.
 
 ---
 
@@ -165,6 +221,31 @@ npm run db:reset       # delete ./.pglite; rebuilt on the next request
 npm run db:wipe        # clear the data, keep the admin account and the
                        # reference lists (categories, locations)
 ```
+
+### The automatic daily backup
+
+The server takes one on its own, once a day, so nothing has to be remembered:
+
+- **When** — after 3am (`CAFETRACK_BACKUP_HOUR`), and only if today's has not been
+  taken. It checks every ten minutes rather than scheduling a precise tick, which
+  also means a machine that was off at 3am takes the backup on its first start
+  instead of skipping the day.
+- **Where** — `backups/cafetrack-auto-<timestamp>/`, keeping the newest 3
+  (`CAFETRACK_BACKUP_KEEP`). Only `cafetrack-auto-*` is ever pruned, so a manual
+  `npm run db:backup` in the same folder is left alone.
+- **How** — PGlite's own `dumpDataDir()`, taken from inside the running process.
+  This is what makes it different from `npm run db:backup`, which copies the
+  directory and therefore refuses to run while the server is up. The automatic
+  one needs no downtime.
+- **Turning it off** — set `CAFETRACK_DISABLE_AUTO_BACKUP=1`.
+
+Each snapshot is a `pgdata.tar.gz` plus a `manifest.json` of per-table row counts.
+**The two backup types are not interchangeable:** `npm run db:restore` expects the
+directory-copy layout that `npm run db:backup` makes, so restoring an automatic
+one means stopping the server and extracting the tar over the database directory.
+The manifest says which it is and spells this out.
+
+Under Supabase this does nothing — that platform takes its own backups.
 
 ### Backup and restore
 
@@ -242,6 +323,12 @@ overwrites your change:
 | `SEED_ADMIN_PASSWORD`        | no                   | Admin password created on first run. Defaults to `admin123`.       |
 | `SEED_STAFF_PASSWORD`        | no                   | Staff password created on first run. Defaults to `staff123`.       |
 | `CAFETRACK_BACKUP_KEEP`      | no                   | How many local backups to keep. Defaults to 3.                      |
+| `CAFETRACK_BACKUP_HOUR`      | no                   | Hour the automatic daily backup runs. Defaults to 3.                |
+| `CAFETRACK_DISABLE_AUTO_BACKUP` | no              | Set to `1` to stop the automatic backup.                           |
+| `SMTP_HOST` / `SMTP_USER` / `SMTP_PASS` | no      | Mail server **fallback**, used only when nothing is saved on Settings → Email. |
+| `SMTP_PORT`                  | no                   | Fallback mail port. Defaults to 587.                              |
+| `SMTP_ALLOW_INSECURE`        | no                   | Set to `1` to permit a mail server offering no TLS. Off by default. |
+| `CAFETRACK_DISABLE_EMAIL`    | no                   | Set to `1` to stop the mail scheduler and dispatch entirely.        |
 | `BASE_URL`                   | no                   | Target for the test scripts. Defaults to `http://localhost:3100`.  |
 | `NEXT_PUBLIC_SUPABASE_*`     | Supabase only        | Project URL and anon key.                                         |
 | `SUPABASE_SERVICE_ROLE_KEY`  | Supabase only        | Server-side key. Never exposed to the browser.                    |
@@ -284,9 +371,16 @@ npm run test:all      # all seven in order, stopping at the first failure
 working data.**
 
 `test:smoke` currently reports **68 passed, 0 failed**. `test:edge` reports
-**95 passed, 0 failed**, `test:pages` **17 passed, 0 failed**,
+**102 passed, 0 failed**, `test:pages` **21 passed, 0 failed**,
 `test:journeys` **117 passed, 0 failed**, `test:ui` **36 passed, 0 failed**,
 and `test:tour` **147 passed, 0 failed**.
+
+Two of those counts grew with the item-approval and email work. `test:edge` now
+covers the submission path properly — that staff *can* submit, that the result is
+pending rather than stock, that it is invisible to the stock list, unscanable at
+the till, and still not editable or deletable by the person who submitted it.
+`test:pages` renders `/approvals` and `/email` for a staff session, since neither
+should crash for someone who follows a link.
 
 `test:smoke` and `test:ui` need a **freshly seeded** database — both assert
 against the seeded items. `npm run db:reset` clears and re-seeds;
@@ -365,6 +459,23 @@ that fall out of it, read the report, onboard a hire, close the day — and
 records every console error, uncaught exception and 5xx response on every page
 it visits.
 
+### The browser suites need `localhost`, not `127.0.0.1`
+
+`test:ui` and `test:tour` drive a real page, and against `127.0.0.1` the HMR
+websocket is refused as a cross-origin dev request — `next.config.mjs` allowlists
+this machine's LAN addresses and names, and the loopback IP is not among them. The
+symptom is not a clear failure: the page loads but never hydrates, so
+`waitForTimeout` is followed by a locator that times out waiting for a login field,
+and the suite reports "suite crashed" for what is really a config mismatch.
+
+```bash
+BASE_URL=http://localhost:3101 npm run test:ui    # works
+BASE_URL=http://127.0.0.1:3101 npm run test:ui   # crashes on the HMR socket
+```
+
+Adding `127.0.0.1` to `allowedDevOrigins` would fix it for anyone who prefers the
+numeric form; `localhost` is what the suites use now.
+
 It is the suite that covers the behaviour a real user actually depends on and
 that a request-level test cannot see:
 
@@ -416,11 +527,14 @@ db/
 scripts/               seed, schema build, db reset/wipe, test scripts
 src/
   app/
-    (app)/             signed-in area: dashboard, checkout, items, alerts,
-                       reports, audit, users, settings
+    (app)/             signed-in area: dashboard, checkout, items, approvals,
+                       alerts, reports, audit, users, settings, email
     api/               every API route
     login/             sign-in page
-  components/          Nav, ScanInput, BarcodeView, ui primitives, icons
+  components/          Nav, ScanInput, BarcodeView, ui primitives, icons,
+                       BrandArt (the cafe illustrations)
+public/
+  brand/               storefront, barista and table illustrations (JPEG)
   lib/
     supabase.ts        picks local or Supabase — the only place that decides
     local-db.ts        PGlite + a small PostgREST-compatible query adapter
@@ -430,6 +544,9 @@ src/
     status.ts          shared status wording and colours
     ref-delete.ts      shared in-use guard for the reference lists
     report-print.tsx   print/PDF view of the stock report
+    permissions.ts     can this person manage items? (FR-03)
+    email.ts           SMTP delivery, the queue, the daily-summary timer
+    backup.ts          the automatic daily snapshot
   proxy.ts           JWT check for every route (was middleware.ts before Next 16)
 ```
 
@@ -442,7 +559,13 @@ src/
 - **`AUTH_SECRET`** signs the session JWT. In production the app refuses to
   start without a real one instead of falling back to the value published in
   this repository, and the middleware answers `503` rather than verify a token
-  with a key it cannot trust.
+  with a key it cannot trust. It is also the key the mail app password is
+  encrypted with, so it cannot be rotated casually — doing so makes the stored
+  password unreadable, which the app reports rather than hiding.
+- **The mail app password is encrypted at rest** (AES-256-GCM, key derived from
+  `AUTH_SECRET`) and never returned by any route — `GET /api/settings` excludes
+  the key entirely, and the Email page reports only whether a password exists.
+  Only an admin can set, change or remove it.
 - **Sign-in throttling** — five consecutive failed attempts for one credential (or
   20 for a sign-in method as a whole) within 15 minutes are answered normally;
   the next attempt gets `429` with a `Retry-After` header. A successful sign-in
@@ -496,3 +619,38 @@ src/
   drawn as SVG at whole-pixel module widths, which is what makes them
   scannable, but nothing here proves a printed label scans — that needs a
   physical print and a real scanner.
+- **Email cannot be verified from a test run.** The notification path is checked
+  against a throwaway SMTP server, which proves messages are queued, addressed,
+  deduped and delivered — but not that a real provider accepts them, nor how a
+  given inbox treats them. Send a test message from Settings → Email first.
+- **`upsert()` takes `onConflict` as a string or an array — locally.** Supabase-js
+  accepts either, so a call written for Supabase passes a bare
+  `onConflict: "column"`. The local adapter now normalises both, because it
+  declared only the array form and called `.map()` on the value: the string threw
+  a `TypeError` inside the adapter, its own error handling turned that into an
+  `error` result, and a caller that did not check `error` saw a write that
+  silently never happened. That is exactly how every emailed report and test
+  message ended up queued with a null recipient. Prefer the array form anyway,
+  and **check `error`** on any `upsert()` whose failure would not otherwise be
+  visible.
+- **Rotating `AUTH_SECRET` discards the saved mail password.** That is the point of
+  deriving the key from it, but a rotation then costs one field to re-enter.
+- **The mail password is encrypted, not hidden.** It is safe in the database and in
+  backups, and no API returns it. It is still readable by anything that can run code
+  in the server process — the same trust boundary the session cookies sit inside,
+  which no amount of encryption changes.
+- **`ip_address` in the audit trail is best-effort.** It prefers
+  `x-forwarded-for`, which is client-controlled. That is safe *because* the column
+  sits outside the hash chain: a forged address cannot make a forged entry look
+  authentic, since the digest covers the action and its details instead.
+- **Two kinds of backup, not interchangeable.** `npm run db:backup` makes a
+  directory copy that `npm run db:restore` understands. The automatic daily one
+  writes `pgdata.tar.gz` because it has to run while the server is up, so
+  restoring it means stopping the server and extracting the tar by hand. Both
+  manifests say which kind they are.
+- **A rejected item cannot be re-submitted.** It stays as `rejected` with the
+  admin's reason. Correcting it means adding a new item; there is no "edit and
+  resubmit", because a submission that could edit itself into stock would skip
+  the approval it exists to get.
+- **A pending item has no barcode.** One is drawn only once the item is approved,
+  so a label cannot be printed for stock that is not stock yet.
