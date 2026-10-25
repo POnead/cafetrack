@@ -1,5 +1,6 @@
 import { handler, ok } from "@/lib/api";
 import { getSession, clearSessionCookie } from "@/lib/auth";
+import { db } from "@/lib/supabase";
 import { audit } from "@/lib/audit";
 
 export const runtime = "nodejs";
@@ -9,6 +10,6 @@ export const POST = handler(async () => {
   if (session) {
     await audit(session, "LOGOUT", "user", session.id, {}, { critical: false });
   }
-  await clearSessionCookie();
+  await clearSessionCookie(session?.id, db());
   return ok({ ok: true });
 });

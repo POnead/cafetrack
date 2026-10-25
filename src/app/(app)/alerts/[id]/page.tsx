@@ -52,7 +52,7 @@ export default function AlertDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // Resolving is admin-only (SR-F30). Staff can open this page to see why an
+  // Resolving is admin-only (FR-08). Staff can open this page to see why an
   // item is unavailable, so the controls are hidden for them rather than the
   // page being blocked.
   const [isAdmin, setIsAdmin] = useState(false);

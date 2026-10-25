@@ -204,6 +204,28 @@ async function rawCall(method, path, rawBody, cookie) {
   const users = await call("GET", "/api/users", null, A);
   const barista = users.data.users.find((u) => u.username === "barista1");
   check("barista1 found with a barcode code", Boolean(barista?.qr_token), barista?.qr_token ?? "");
+
+  // barista1 has to NOT hold item-management for the checks below to mean
+  // anything, and this used to be assumed rather than arranged — so the section
+  // passed only on a database where nothing had ever granted it. Grant it from
+  // the Staff Accounts page (which is now reachable from a desktop, where before
+  // it was not) and every one of these assertions fails for a reason that has
+  // nothing to do with the code under test.
+  //
+  // A suite that asserts a *suppression* property has to establish the thing
+  // being suppressed. Set it explicitly rather than hoping.
+  const hadGrant = Boolean(barista?.can_manage_items);
+  if (hadGrant) {
+    await call("PATCH", `/api/users/${barista.id}`, { can_manage_items: false }, A);
+  }
+  const baristaNow = (await call("GET", "/api/users", null, A)).data.users.find(
+    (u) => u.username === "barista1"
+  );
+  check(
+    "barista1 does not hold item-management, so the queue is exercised",
+    baristaNow?.can_manage_items === false,
+    hadGrant ? "revoked an inherited grant" : "already unprivileged"
+  );
   const s = await fetch(BASE + "/api/auth/staff", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ token: barista.qr_token, password: "staff123" }),
@@ -244,10 +266,23 @@ async function rawCall(method, path, rawBody, cookie) {
     check("a pending submission cannot be scanned at the till",
       scan.status === 409, `${scan.status}`);
 
-    // Editing and deleting stay admin-only. The submission path is deliberately
-    // open; quietly widening the other two would not be.
+    // Editing a live item is not refused outright (FR-12): the change is queued
+    // for an admin instead. What matters is that it does NOT take effect, and
+    // that deleting stays admin-only. The earlier version of this check expected
+    // a 403, which was the correct answer before the change-request queue existed
+    // and stopped being the right one after it did.
     const patch = await call("PATCH", `/api/items/${pendingId}`, { name: "Renamed by staff" }, sc);
-    check("staff cannot edit an item", patch.status === 403, `${patch.status}`);
+    check(
+      "a staff edit is queued rather than applied",
+      patch.status === 201 && patch.data?.pending_change === true,
+      `${patch.status} ${patch.data?.message ?? patch.data?.error ?? ""}`
+    );
+    const unchanged = await call("GET", `/api/items/${pendingId}`, null, sc);
+    check(
+      "the queued edit has not changed the item",
+      unchanged.data?.item?.name !== "Renamed by staff",
+      unchanged.data?.item?.name ?? "no item"
+    );
     const del = await call("DELETE", `/api/items/${pendingId}`, null, sc);
     check("staff cannot delete an item", del.status === 403, `${del.status}`);
 
@@ -264,6 +299,169 @@ async function rawCall(method, path, rawBody, cookie) {
     // itself should not linger.
     await call("DELETE", `/api/items/${pendingId}`, null, A);
   }
+
+  /* ============ 4b. FR-03: the two ways a submission skips the queue ============ */
+  section("FR-03 — approval code and item-management grant");
+
+  // Two independent routes past the approvals queue: a per-person code that is
+  // typed when submitting, and a standing grant on the account. Neither had any
+  // automated coverage, which is why both could sit unreachable on a desktop
+  // without anything failing — the API worked, only the door to it was missing.
+  //
+  // Every check below arranges its own precondition rather than inheriting one.
+  // These are suppression properties: "a submission with no code is held" only
+  // means something if the code really is absent.
+
+  const stamp = Date.now().toString(36);
+  const withCode = async (approval_code) => {
+    const res = await call("POST", "/api/items", {
+      name: `Coded ${stamp} ${Math.random().toString(36).slice(2, 7)}`,
+      quantity: 2,
+      unit: "pcs",
+      low_stock_threshold: 1,
+      ...(approval_code ? { approval_code } : {}),
+    }, sc);
+    return res;
+  };
+
+  // --- issuing the code itself ---
+  r = await call("PATCH", `/api/users/${barista.id}`, { regenerate_approval_code: true }, A);
+  check("an approval code can be issued", r.status === 200, `${r.status} ${r.data?.error ?? ""}`);
+  const code1 = r.data?.user?.approval_code;
+  check("it is generated, not invented by the admin", /^CT-[0-9A-F]{6}$/.test(code1 ?? ""), code1 ?? "none");
+
+  r = await call("PATCH", `/api/users/${barista.id}`, { regenerate_approval_code: true }, A);
+  const code2 = r.data?.user?.approval_code;
+  check("reissuing rotates it", Boolean(code2) && code2 !== code1, `${code1} -> ${code2}`);
+
+  // --- a valid code skips the queue ---
+  let coded = await withCode(code2);
+  check("a submission with a valid code is accepted", coded.status === 201, `${coded.status} ${coded.data?.error ?? ""}`);
+  check(
+    "and is active immediately rather than pending",
+    coded.data?.item?.item_status === "active",
+    coded.data?.item?.item_status ?? ""
+  );
+  const codedId = coded.data?.item?.id;
+  if (codedId) {
+    const listed = await call("GET", "/api/items", null, sc);
+    check("so it is real stock straight away",
+      (listed.data?.items ?? []).some((i) => i.id === codedId));
+    await call("DELETE", `/api/items/${codedId}`, null, A);
+  }
+
+  // --- a wrong code does not skip it ---
+  coded = await withCode("CT-DEADBE");
+  check(
+    "a wrong code falls back to the queue rather than failing",
+    coded.status === 201 && coded.data?.item?.item_status === "pending",
+    `${coded.status} ${coded.data?.item?.item_status ?? coded.data?.error ?? ""}`
+  );
+  if (coded.data?.item?.id) await call("DELETE", `/api/items/${coded.data.item.id}`, null, A);
+
+  // --- a malformed code is still just a code ---
+  coded = await withCode("not-a-code");
+  check(
+    "a malformed code is treated as no code, not as an error",
+    coded.status === 201 && coded.data?.item?.item_status === "pending",
+    `${coded.status} ${coded.data?.item?.item_status ?? coded.data?.error ?? ""}`
+  );
+  if (coded.data?.item?.id) await call("DELETE", `/api/items/${coded.data.item.id}`, null, A);
+
+  // --- the code is per-person ---
+  const other = await call("POST", "/api/users", {
+    username: `codeonly${stamp}`, full_name: "Code Only", password: "password1",
+  }, A);
+  const otherId = other.data?.user?.id;
+  const otherToken = other.data?.user?.qr_token;
+  if (otherId && otherToken) {
+    await call("PATCH", `/api/users/${otherId}`, { approval_code: code2 }, A);
+    const otherSession = await fetch(BASE + "/api/auth/staff", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: otherToken, password: "password1" }),
+    });
+    const osc = (otherSession.headers.getSetCookie?.() ?? []).map((c) => c.split(";")[0]).join("; ");
+    const theirs = await call("POST", "/api/items", {
+      name: `Borrowed ${stamp}`, quantity: 1, unit: "pcs", low_stock_threshold: 1,
+      approval_code: code2,
+    }, osc);
+    check(
+      "one person's code does not work for another",
+      theirs.status === 201 && theirs.data?.item?.item_status === "pending",
+      `${theirs.data?.item?.item_status ?? theirs.data?.error ?? theirs.status}`
+    );
+    if (theirs.data?.item?.id) await call("DELETE", `/api/items/${theirs.data.item.id}`, null, A);
+  }
+
+  // --- the standing grant ---
+  r = await call("PATCH", `/api/users/${barista.id}`, { can_manage_items: true }, A);
+  check("item-management can be granted", r.status === 200 && r.data?.user?.can_manage_items === true,
+    `${r.status} ${r.data?.error ?? ""}`);
+
+  const granted = await withCode(null);
+  check("a granted submission is accepted", granted.status === 201, `${granted.status} ${granted.data?.error ?? ""}`);
+  check("and needs no code at all",
+    granted.data?.item?.item_status === "active", granted.data?.item?.item_status ?? "");
+  const grantedId = granted.data?.item?.id;
+  if (grantedId) {
+    // An edit by a granted user must apply rather than queue — that is the
+    // difference between the grant and the code, and it is easy to get wrong by
+    // only fixing the create path.
+    const edited = await call("PATCH", `/api/items/${grantedId}`, { name: `Granted Edit ${stamp}` }, sc);
+    check("a granted edit applies immediately",
+      edited.status === 200 && edited.data?.pending_change !== true,
+      `${edited.status} ${edited.data?.pending_change === true ? "queued" : ""}`);
+    const live = await call("GET", `/api/items/${grantedId}`, null, sc);
+    check("and the change is really on the item",
+      live.data?.item?.name === `Granted Edit ${stamp}`, live.data?.item?.name ?? "");
+    await call("DELETE", `/api/items/${grantedId}`, null, A);
+  }
+
+  // --- revoking the grant puts them back in the queue ---
+  r = await call("PATCH", `/api/users/${barista.id}`, { can_manage_items: false }, A);
+  check("the grant can be revoked", r.status === 200 && r.data?.user?.can_manage_items === false, `${r.status}`);
+  const regranted = await withCode(null);
+  check("a revoked grant queues submissions again",
+    regranted.status === 201 && regranted.data?.item?.item_status === "pending",
+    regranted.data?.item?.item_status ?? "");
+  if (regranted.data?.item?.id) await call("DELETE", `/api/items/${regranted.data.item.id}`, null, A);
+
+  // --- revoking the code ---
+  r = await call("PATCH", `/api/users/${barista.id}`, { approval_code: null }, A);
+  check("the approval code can be revoked", r.status === 200 && !r.data?.user?.approval_code, `${r.status}`);
+  const recoded = await withCode(code2);
+  check("a revoked code no longer skips the queue",
+    recoded.status === 201 && recoded.data?.item?.item_status === "pending",
+    recoded.data?.item?.item_status ?? "");
+  if (recoded.data?.item?.id) await call("DELETE", `/api/items/${recoded.data.item.id}`, null, A);
+
+  // --- a deactivated account's code is dead ---
+  if (otherId) {
+    // Re-activation carries the admin's password; the route refuses without it.
+    const revived = await call(
+      "PATCH",
+      `/api/users/${otherId}`,
+      { is_active: true, confirm_password: "admin123" },
+      A
+    );
+    check("the second account is active again", revived.status === 200, `${revived.status} ${revived.data?.error ?? ""}`);
+    await call(
+        "PATCH",
+        `/api/users/${otherId}`,
+        { is_active: false, deactivation_reason: "Edge test: parked" },
+        A
+      );
+    const deadSession = await fetch(BASE + "/api/auth/staff", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: otherToken, password: "password1" }),
+    });
+    check("a deactivated account cannot sign in to use its code anyway",
+      deadSession.status === 401 || deadSession.status === 403, `${deadSession.status}`);
+    await call("DELETE", `/api/users/${otherId}`, null, A);
+  }
+
+  // Leave barista1 as found, so a later section is not surprised.
+  await call("PATCH", `/api/users/${barista.id}`, { can_manage_items: false, approval_code: null }, A);
 
   r = await call("POST", "/api/users", { username: "hack", full_name: "Hack", password: "password1" }, sc);
   check("staff blocked from creating users", r.status === 403, `${r.status}`);
@@ -392,7 +590,14 @@ async function rawCall(method, path, rawBody, cookie) {
   r = await call("POST", "/api/users", { username: "ab", full_name: "Short", password: "password1" }, A);
   check("short username -> 400", r.status === 400, `${r.status} ${r.data?.error}`);
   const me = await call("GET", "/api/auth/me", null, A);
-  r = await call("PATCH", `/api/users/${me.data.user.id}`, { is_active: false }, A);
+  // Carries a reason so the 400 below can only be the admin-self refusal, not the
+  // missing-reason rule, which also answers 400.
+  r = await call(
+    "PATCH",
+    `/api/users/${me.data.user.id}`,
+    { is_active: false, deactivation_reason: "Edge test: should be refused" },
+    A
+  );
   check("admin cannot deactivate self", r.status === 400, `${r.status} ${r.data?.error}`);
 
   /* ============ 6. Session / middleware ============ */
@@ -528,14 +733,24 @@ async function rawCall(method, path, rawBody, cookie) {
   });
   const tc = (ts.headers.getSetCookie?.() ?? []).map((x) => x.split(";")[0]).join("; ");
   check("temp staff login", ts.status === 200, `got ${ts.status}`);
-  await call("PATCH", `/api/users/${temp.id}`, { is_active: false }, A2);
+  await call(
+      "PATCH",
+      `/api/users/${temp.id}`,
+      { is_active: false, deactivation_reason: "Edge test: deactivated" },
+      A2
+    );
   r = await call("POST", "/api/transactions", { type: "checkout", password: "password1", items: [{ sku: spillItem.sku, qty: 1 }] }, tc);
   check("deactivated staff cannot transact (403)", r.status === 403, `${r.status} ${r.data?.error}`);
   r = await call("POST", "/api/auth/staff", { token: temp.qr_token, password: "wrong-password" });
   check("deactivated staff, wrong password -> generic 401", r.status === 401 && r.data?.deactivated === undefined, `${r.status} ${r.data?.error}`);
   r = await call("POST", "/api/auth/staff", { token: temp.qr_token, password: "password1" });
   check("deactivated staff cannot re-login (403 + deactivated flag)", r.status === 403 && r.data?.deactivated === true, `${r.status} ${r.data?.error}`);
-  await call("PATCH", `/api/users/${temp.id}`, { is_active: false, regenerate_token: true }, A2);
+  await call(
+      "PATCH",
+      `/api/users/${temp.id}`,
+      { is_active: false, deactivation_reason: "Edge test: deactivated", regenerate_token: true },
+      A2
+    );
 
   // Remove the throwaway item so a run does not leave stock behind.
   if (spillItem.id) {
@@ -548,6 +763,158 @@ async function rawCall(method, path, rawBody, cookie) {
   check("hash chain intact after heavy activity", r.status === 200 && r.data.intact === true, JSON.stringify(r.data?.broken ?? []));
   r = await call("GET", "/api/audit?limit=5", null, A2);
   check("audit entries recorded", (r.data.entries ?? []).length > 0, `${(r.data.entries ?? []).length} shown`);
+
+  /* ============ 10. Audit paging (FR-19) ============ */
+  // The audit table is append-only and grows forever, so retrieval has to be
+  // paged on `seq`. The property that matters is that paging down the whole log
+  // visits every entry exactly once — a duplicate or a gap would make the trail
+  // read differently depending on which page someone looked at.
+  section("audit paging");
+
+  r = await call("GET", "/api/audit?limit=10", null, A2);
+  const firstPage = r.data.entries ?? [];
+  check(
+    "audit page returns at most the requested limit",
+    firstPage.length <= 10,
+    `${firstPage.length} rows`
+  );
+  check(
+    "audit reports whether another page exists",
+    typeof r.data.has_more === "boolean" && typeof r.data.next_before === "number",
+    `has_more=${r.data.has_more} next_before=${r.data.next_before}`
+  );
+  check(
+    "audit page is newest-first",
+    firstPage.every((e, i) => i === 0 || firstPage[i - 1].seq > e.seq),
+    firstPage.map((e) => e.seq).join(">")
+  );
+
+  // Walk the log in pages of 20 and compare the visit order against a plain
+  // descending read of the first page plus a known total. Full equality against
+  // the whole log would need one unbounded query, which is exactly what the
+  // paging exists to avoid.
+  const seen = [];
+  let before = null;
+  for (let pageNo = 0; pageNo < 5; pageNo++) {
+    const qs = before === null ? "?limit=20" : `?limit=20&before=${before}`;
+    const page = (await call("GET", `/api/audit${qs}`, null, A2)).data;
+    const rows = page.entries ?? [];
+    if (rows.length === 0) break;
+    seen.push(...rows.map((e) => e.seq));
+    if (!page.has_more || rows.length < 20) break;
+    before = page.next_before;
+  }
+  check(
+    "walking pages visits no seq twice",
+    new Set(seen).size === seen.length,
+    `${seen.length} rows, ${new Set(seen).size} distinct`
+  );
+  check(
+    "walking pages never goes backwards",
+    seen.every((s, i) => i === 0 || seen[i - 1] > s),
+    `${seen.length} rows in strict descending order`
+  );
+
+  r = await call("GET", "/api/audit?before=0", null, A2);
+  check(
+    "a 'before' older than the log returns nothing rather than erroring",
+    r.status === 200 && (r.data.entries ?? []).length === 0,
+    `${r.status} ${(r.data.entries ?? []).length} rows`
+  );
+  r = await call("GET", "/api/audit?before=abc", null, A2);
+  check(
+    "a non-numeric 'before' is ignored, not treated as 0",
+    r.status === 200 && (r.data.entries ?? []).length > 0,
+    `${r.status} ${(r.data.entries ?? []).length} rows (fell back to the newest page)`
+  );
+
+  /* ============ 11. Item paging and sorting (FR-19) ============ */
+  section("item paging");
+
+  r = await call("GET", "/api/items?limit=3&offset=0", null, A2);
+  const p1 = r.data.items ?? [];
+  const p1Total = r.data.total;
+  check("item page honours the limit", p1.length <= 3, `${p1.length} rows`);
+  check(
+    "item page reports a total for the whole list, not the page",
+    typeof r.data.total === "number" && r.data.total >= p1.length,
+    `total=${r.data.total} returned=${p1.length}`
+  );
+  check("item page reports has_more", typeof r.data.has_more === "boolean", `${r.data.has_more}`);
+
+  r = await call("GET", "/api/items?limit=3&offset=3", null, A2);
+  const p2 = r.data.items ?? [];
+  const p2Total = r.data.total;
+  check(
+    "the second page does not repeat the first",
+    !p1.some((a) => p2.some((b) => b.id === a.id)),
+    `${p1.length} + ${p2.length} rows, no overlap`
+  );
+  check(
+    "both pages report the same total, so paging cannot invent items",
+    p2Total === p1Total,
+    `page 1 total=${p1Total}, page 2 total=${p2Total}`
+  );
+
+  // Sorting has to happen in the database now. If it happened in the browser,
+  // every page would come back name-ascending and this would still pass — so the
+  // check is that a reversed sort actually reverses.
+  r = await call("GET", "/api/items?limit=5&sort=quantity&order=desc", null, A2);
+  const desc = (r.data.items ?? []).map((i) => Number(i.quantity));
+  check(
+    "sorting by quantity descending returns descending rows",
+    desc.every((v, i) => i === 0 || desc[i - 1] >= v),
+    desc.join(">=")
+  );
+  r = await call("GET", "/api/items?limit=5&sort=quantity&order=asc", null, A2);
+  const asc = (r.data.items ?? []).map((i) => Number(i.quantity));
+  check(
+    "sorting by quantity ascending returns ascending rows",
+    asc.every((v, i) => i === 0 || asc[i - 1] <= v),
+    asc.join("<=")
+  );
+
+  r = await call("GET", "/api/items?sort=;drop%20table%20items;--", null, A2);
+  check(
+    "an unmapped sort key falls back to the default instead of reaching SQL",
+    r.status === 200 && (r.data.items ?? []).length > 0,
+    `${r.status}, ${(r.data.items ?? []).length} rows`
+  );
+
+  r = await call("GET", "/api/items?offset=-1", null, A2);
+  check("a negative offset is rejected", r.status === 400, `${r.status} ${r.data?.error}`);
+
+  // Search is a database query now, so a search with PostgREST filter
+  // metacharacters in it must not become a syntax error — that regression is
+  // exactly what moving the filter server-side could reintroduce.
+  r = await call("GET", `/api/items?q=${encodeURIComponent('milk, 1l')}`, null, A2);
+  check(
+    "search tolerates commas and spaces without erroring",
+    r.status === 200,
+    `${r.status} ${(r.data.items ?? []).length} rows`
+  );
+
+  /* ============ 12. Health endpoint (FR-20) ============ */
+  section("health check");
+
+  const health = await fetch(BASE + "/api/health");
+  const healthBody = await health.json();
+  check("health endpoint answers without credentials", health.status === 200, `${health.status}`);
+  check(
+    "health reports the database as reachable",
+    healthBody.ok === true && healthBody.database === "reachable",
+    JSON.stringify({ ok: healthBody.ok, database: healthBody.database })
+  );
+  check(
+    "health names which database mode it is, so a test cannot be mistaken for a deployment",
+    healthBody.mode === "test" || healthBody.mode === "live",
+    `mode=${healthBody.mode}`
+  );
+  check(
+    "health returns nothing sensitive",
+    !JSON.stringify(healthBody).match(/password|secret|token|hash/i),
+    Object.keys(healthBody).join(",")
+  );
 
   console.log(`\n${"-".repeat(50)}`);
   console.log(`${pass} passed, ${fail} failed`);

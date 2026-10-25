@@ -2,6 +2,7 @@ import { db } from "@/lib/supabase";
 import { handler, ok, fail, badId, readBody, clientIp } from "@/lib/api";
 import { requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
+import { eventBus, Events } from "@/lib/events";
 
 export const runtime = "nodejs";
 
@@ -40,6 +41,15 @@ export const POST = handler(async (req: Request) => {
   );
 
   await db().rpc("refresh_alerts");
+
+  // The approvals list loses a row, and the item itself may have just changed —
+  // an approved edit can move a quantity under a threshold, in which case the
+  // alert pass above has opened something new.
+  eventBus.emit(Events.ITEMS_CHANGED, {
+    action: decision === "approve" ? "change-approved" : "change-rejected",
+    item_id: (data as any)?.item_id ?? null,
+  });
+  eventBus.emit(Events.ALERTS_CHANGED, { type: "recomputed", count: 0 });
 
   return ok({
     request: data,

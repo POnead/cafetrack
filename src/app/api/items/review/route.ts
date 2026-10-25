@@ -2,6 +2,7 @@ import { db } from "@/lib/supabase";
 import { handler, ok, fail, badId, readBody, clientIp } from "@/lib/api";
 import { requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
+import { eventBus, Events } from "@/lib/events";
 import { dispatchSoon } from "@/lib/email";
 
 export const runtime = "nodejs";
@@ -59,6 +60,16 @@ export const POST = handler(async (req: Request) => {
 
   // An approved item can now be short or expiring, so let the alert pass run.
   await db().rpc("refresh_alerts");
+
+  // Three lists are now out of date: the approvals queue (the row left it), the
+  // item list (a pending item becomes stock, a rejected one disappears from the
+  // active view), and alerts. Whoever is watching any of them should see it now,
+  // not at their next poll.
+  eventBus.emit(Events.ITEMS_CHANGED, {
+    action: decision === "approve" ? "approve" : "reject",
+    sku: (data as any)?.sku,
+  });
+  eventBus.emit(Events.ALERTS_CHANGED, { type: "recomputed", count: 0 });
 
   // A freshly approved item may deserve an email if it is already low or
   // near-expiry; this is the moment those alerts get raised.

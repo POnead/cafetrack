@@ -43,11 +43,6 @@ class EventBus {
       }
     }
   }
-
-  /** Get all registered events (for debugging). */
-  events(): string[] {
-    return Object.keys(this.handlers);
-  }
 }
 
 export const eventBus = new EventBus();

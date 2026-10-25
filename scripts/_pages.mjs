@@ -68,8 +68,18 @@ async function getPage(path, cookie) {
     // A staff session must reach the same page without a server error. The
     // resolve controls are hidden client-side by role; the API refuses them
     // regardless, which the edge suite covers.
+    // Pick the seeded account, not "whichever staff row happens to sort first".
+    //
+    // Earlier suites run first against the same database and leave throwaway
+    // staff accounts behind ("Code Only", "Smoke Tester", ...). This used to take
+    // the first active staff in the list and assume its password was the seeded
+    // staff123, which holds only until one of those throwaways sorts ahead of
+    // the seeded name — and then this fails with a 401 that has nothing to do
+    // with page rendering. Select by username, the one thing known to be right.
     const users = await (await fetch(BASE + "/api/users", { headers: { cookie: admin } })).json();
-    const staff = users.users?.find((u) => u.role === "staff" && u.is_active);
+    const staff = users.users?.find((u) => u.username === "barista1" && u.is_active);
+    check("a seeded active staff account is available to sign in as", Boolean(staff?.qr_token),
+      staff ? staff.username : "no active barista1");
     if (staff?.qr_token) {
       const sr = await fetch(BASE + "/api/auth/staff", {
         method: "POST",

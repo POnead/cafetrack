@@ -3,6 +3,8 @@ import { handler, ok, fail, badId, readBody, clientIp } from "@/lib/api";
 import { requireUser } from "@/lib/auth";
 import { canManageItems, approvalCodeMatches } from "@/lib/permissions";
 import { audit } from "@/lib/audit";
+import { eventBus, Events } from "@/lib/events";
+import { dispatchSoon } from "@/lib/email";
 import {
   FieldError,
   requireQuantity,
@@ -10,6 +12,7 @@ import {
   parseExpiryDate,
   parsePhysicalForm,
   parseUnitsPerBox,
+  parseUnitPrice,
   assertRefExists,
 } from "@/lib/item-validation";
 
@@ -28,7 +31,7 @@ export const GET = handler(
     const { data, error } = await db()
       .from("items")
       .select(
-        `*, category:categories(id, name), location:locations(id, name)`
+        `*, category:categories(id, name), location:locations(id, name), supplier:suppliers(id, name)`
       )
       .eq("id", id)
       .maybeSingle();
@@ -115,6 +118,22 @@ export const PATCH = handler(
             )
         );
       }
+      if (body.supplier_id !== undefined) {
+        patch.supplier_id = await assertRefExists(
+          body.supplier_id,
+          "Supplier",
+          async (id) =>
+            Boolean(
+              (
+                await db()
+                  .from("suppliers")
+                  .select("id")
+                  .eq("id", id)
+                  .maybeSingle()
+              ).data
+            )
+        );
+      }
     } catch (e: any) {
       if (e instanceof FieldError) return fail(e.message);
       throw e;
@@ -153,6 +172,10 @@ export const PATCH = handler(
         // A blank clears it, which is how an item stops being counted by the box.
         patch.units_per_box = parseUnitsPerBox(body.units_per_box);
       }
+      if (body.unit_price !== undefined) {
+        // A blank clears it, which is how an item loses its cost price.
+        patch.unit_price = parseUnitPrice(body.unit_price);
+      }
     } catch (e: any) {
       if (e instanceof FieldError) return fail(e.message);
       throw e;
@@ -174,9 +197,11 @@ export const PATCH = handler(
           "name",
           "category_id",
           "location_id",
+          "supplier_id",
           "physical_form",
           "unit",
           "units_per_box",
+          "unit_price",
           "quantity",
           "low_stock_threshold",
           "expiration_date",
@@ -198,6 +223,12 @@ export const PATCH = handler(
           name: before.name,
           request_id: data.id,
         }, { ip: clientIp(req) });
+
+        // The item itself did not change, but the approvals queue did.
+        eventBus.emit(Events.ITEMS_CHANGED, {
+          action: "change-requested",
+          sku: before.sku,
+        });
 
         return ok({
           pending_change: true,
@@ -238,6 +269,18 @@ export const PATCH = handler(
 
     await db().rpc("refresh_alerts");
 
+    // Dispatch, for the same reason the create route does: this pass can open an
+    // alert (a correction that drops an item below its threshold, or pushes it
+    // past its date) and NFR-07 asks for that mail within a minute, not whenever
+    // the scheduler next runs.
+    dispatchSoon();
+
+    // A quantity correction can put an item under its threshold or past its date,
+    // so the alerts list is as interested as the item list. Both events, because
+    // refresh_alerts has just run and may have opened or closed something.
+    eventBus.emit(Events.ITEMS_CHANGED, { action: "update", sku: data.sku });
+    eventBus.emit(Events.ALERTS_CHANGED, { type: "recomputed", count: 0 });
+
     return ok({ item: data });
   }
 );
@@ -276,6 +319,11 @@ export const DELETE = handler(
       name: item.name,
       quantity_at_delete: item.quantity,
     }, { ip: clientIp(req) });
+
+    // Deleting an item cascades its alerts away, so the alerts list has to hear
+    // about it too — otherwise it keeps offering a row that can no longer open.
+    eventBus.emit(Events.ITEMS_CHANGED, { action: "delete", sku: item.sku });
+    eventBus.emit(Events.ALERTS_CHANGED, { type: "recomputed", count: 0 });
 
     return ok({ ok: true });
   }

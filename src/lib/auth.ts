@@ -85,7 +85,30 @@ export async function getSessionToken(): Promise<string | null> {
 export async function getSession(): Promise<SessionUser | null> {
   const token = await getSessionToken();
   if (!token) return null;
-  return readSessionToken(token);
+  const user = await readSessionToken(token);
+  if (!user) return null;
+
+  // FR-16: Verify this token is still the active session for the user.
+  // If the user logged in elsewhere, the session_token column was overwritten
+  // with the new token, so this old one is no longer valid.
+  try {
+    const { db } = await import("@/lib/supabase");
+    const { data: row, error } = await db()
+      .from("users")
+      .select("session_token")
+      .eq("id", user.id)
+      .maybeSingle();
+    if (error) {
+      return user; // Don't block if the DB check fails — let the JWT expiry handle it.
+    }
+    if (row?.session_token && row.session_token !== token) {
+      return null; // Session was superseded by a login elsewhere.
+    }
+  } catch {
+    return user; // Network error — fall back to JWT validation only.
+  }
+
+  return user;
 }
 
 /** Seconds of life left on a token; 0 when it is invalid or already expired. */
@@ -141,7 +164,9 @@ export class HttpError extends Error {
 // cookie write has to happen before the response is returned either way.
 export async function setSessionCookie(
   token: string,
-  minutes: number = SESSION_MINUTES
+  minutes: number = SESSION_MINUTES,
+  userId?: string,
+  dbClient?: any
 ) {
   const jar = await cookies();
   jar.set({
@@ -153,9 +178,21 @@ export async function setSessionCookie(
     path: "/",
     maxAge: minutes * 60,
   });
+  // Track the active session token on the user record so we can detect
+  // when the same account is logged in elsewhere (FR-16).
+  if (userId && dbClient) {
+    try {
+      await dbClient
+        .from("users")
+        .update({ session_token: token })
+        .eq("id", userId);
+    } catch (e) {
+      console.error("Failed to set session_token:", e instanceof Error ? e.message : String(e));
+    }
+  }
 }
 
-export async function clearSessionCookie() {
+export async function clearSessionCookie(userId?: string, dbClient?: any) {
   const jar = await cookies();
   jar.set({
     name: COOKIE_NAME,
@@ -164,6 +201,17 @@ export async function clearSessionCookie() {
     path: "/",
     maxAge: 0,
   });
+  // Clear the active session token on the user record (FR-16).
+  if (userId && dbClient) {
+    try {
+      await dbClient
+        .from("users")
+        .update({ session_token: null })
+        .eq("id", userId);
+    } catch (e) {
+      console.error("Failed to clear session_token:", e instanceof Error ? e.message : String(e));
+    }
+  }
 }
 
 export function newStaffToken(): string {

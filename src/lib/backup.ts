@@ -210,11 +210,22 @@ function nowStamp(): string {
  *
  * Only touches `cafetrack-auto-*` directories, so a manual `npm run db:backup`
  * left in the same folder is never deleted by the timer.
+ *
+ * The `turbopackIgnore` comments are load-bearing and all three are needed.
+ * BACKUP_ROOT honours CAFETRACK_BACKUP_DIR, so it cannot be resolved to a
+ * literal at build time; without them Turbopack assumes the worst and traces
+ * the entire project into the server output — every source file and all of
+ * public/, including the 6.7MB of face weights. These three calls are the ones
+ * that read BACKUP_ROOT rather than a path under it, so they are the only ones
+ * it cannot see is scoped. The paths that *are* statically analysable (the
+ * stamp file, the per-backup dest) are left alone.
  */
 function pruneAuto(): void {
-  if (!existsSync(BACKUP_ROOT)) return;
+  if (!existsSync(/* turbopackIgnore: true */ BACKUP_ROOT)) return;
 
-  const stale = readdirSync(BACKUP_ROOT, { withFileTypes: true })
+  const stale = readdirSync(/* turbopackIgnore: true */ BACKUP_ROOT, {
+    withFileTypes: true,
+  })
     .filter((e) => e.isDirectory() && e.name.startsWith("cafetrack-auto-"))
     .map((e) => e.name)
     .sort() // ISO-8601 sorts chronologically
@@ -222,7 +233,12 @@ function pruneAuto(): void {
     .slice(KEEP);
 
   for (const name of stale) {
-    rmSync(join(BACKUP_ROOT, name), { recursive: true, force: true });
+    // The comment goes on the path argument, not the options — that is the
+    // expression Turbopack is complaining about.
+    rmSync(/* turbopackIgnore: true */ join(BACKUP_ROOT, name), {
+      recursive: true,
+      force: true,
+    });
     console.log(`CafeTrack: pruned old auto-backup ${name}`);
   }
 }

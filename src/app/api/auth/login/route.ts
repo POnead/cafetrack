@@ -139,12 +139,15 @@ export const POST = handler(async (req: Request) => {
   // Session lifetime comes from settings.session_timeout_minutes.
   const minutes = await getSessionMinutes();
   const token = await signSession(session, minutes);
-  await setSessionCookie(token, minutes);
+  await setSessionCookie(token, minutes, user.id, db());
 
   await audit(session, "LOGIN", "user", user.id, { method: "admin_password" }, {
     ip: clientIp(req),
     outcome: "success",
   });
 
-  return ok({ user: session });
+  // Check if there was a previous session — notify client to show the conflict popup.
+  const hadPreviousSession = Boolean(user.session_token);
+
+  return ok({ user: session, session_conflict: hadPreviousSession });
 });

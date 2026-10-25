@@ -14,6 +14,7 @@ import {
 } from "@/components/ui";
 import { fmtDateTime } from "@/lib/format";
 import { alertTypeStatus, stockStatus } from "@/lib/status";
+import { useLiveRefresh } from "@/lib/use-live-refresh";
 
 type AlertRow = {
   id: string;
@@ -115,10 +116,13 @@ export default function AlertsPage() {
 
   useEffect(() => {
     load();
-    const timer = setInterval(load, 8000);
-    return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status]);
+
+  // An alert can open or escalate at any moment — a restock runs out of shelf
+  // life, a delivery arrives already expired, the till draws the last of an
+  // item. Subscribing means the list moves now rather than up to 8s later.
+  useLiveRefresh(load);
 
   const openAlerts = alerts.filter((a) => !a.resolved);
   const counts = {

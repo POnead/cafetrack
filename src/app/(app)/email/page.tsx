@@ -9,8 +9,10 @@
  * general settings page would bury all three.
  *
  * Nothing here sends anything by accident. Email is off until an admin turns it
- * on, and the toggle is separate from whether SMTP is configured — one is the
- * cafe's decision, the other is the machine's.
+ * on, and turning it on needs an account and a recipient first — the two settings
+ * below are the cafe's decision, the machine's ability to deliver is a third
+ * thing, and the setup checklist at the top is what keeps them from being
+ * confused with one another.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, Spinner, Toast, Empty, Badge, Modal, DataCard, DataField } from "@/components/ui";
@@ -30,6 +32,8 @@ type QueueRow = {
   id: string;
   kind: string;
   subject: string;
+  /** The alert text. Every low-stock subject is identical; the item is here. */
+  body: string;
   status: "queued" | "sending" | "sent" | "failed";
   attempts: number;
   last_error: string | null;
@@ -51,15 +55,31 @@ type Smtp = {
 
 type Preset = { key: string; label: string; host: string; port: number };
 
+type SetupStep = {
+  key: "account" | "recipient";
+  label: string;
+  hint: string;
+  need: string;
+  done: boolean;
+};
+
 type Status = {
   enabled: boolean;
   configured: boolean;
-  detail: string;
   from: string;
   recipients: number;
   source: "website" | "environment" | "none";
   user: string | null;
   unreadable: boolean;
+  /**
+   * Derived on the server, so the checklist and a real send cannot disagree.
+   * See emailStatus() in lib/email.ts.
+   */
+  setup: {
+    steps: SetupStep[];
+    ready: boolean;
+    blocked: string | null;
+  };
 };
 
 type Tone = "info" | "error" | "success";
@@ -104,6 +124,11 @@ export default function EmailSettingsPage() {
   // obvious thing to check, and stays editable because the account that sends is
   // often not the one that should receive.
   const [testTo, setTestTo] = useState("");
+  // Two results because there are two buttons that produce one, and a person
+  // wants the answer next to the thing they pressed — not at the bottom of the
+  // page, and not reused by the other button's card.
+  const [saveCheck, setSaveCheck] = useState<Check | null>(null);
+  const [testCheck, setTestCheck] = useState<Check | null>(null);
 
   const inFlight = useRef(false);
 
@@ -165,9 +190,18 @@ export default function EmailSettingsPage() {
   }
 
   /** Save the sending account. Password is only sent when the field was filled. */
+/**
+ * Save the account and check it works, in one step.
+ *
+ * These were two separate actions, and the gap between them is where this feature
+ * loses people: save, walk away believing it is done, and find out days later that
+ * a typo in the port meant nothing was ever delivered. Checking here means the
+ * answer arrives while the password that was just typed is still on screen.
+ */
 async function saveAccount() {
   setBusy("save_smtp");
   setError(null);
+  setSaveCheck(null);
   try {
     const res = await fetch("/api/email", {
       method: "PATCH",
@@ -181,6 +215,10 @@ async function saveAccount() {
         user: account.user,
         from: account.from,
         ...(account.pass ? { pass: account.pass } : {}),
+        // Check to the account itself: the person who just typed these details
+        // wants to know those details work, and this is the only address already
+        // known to be reachable from here.
+        verify_to: testTo.trim() || account.user,
       }),
     });
     const data = await res.json();
@@ -188,13 +226,53 @@ async function saveAccount() {
 
     // Cleared from the field so the password does not linger in the page state.
     setAccount((p) => ({ ...p, pass: "" }));
-    setToast({
-      msg: "Sending account saved — send a test message to confirm it works",
-      tone: "success",
-    });
+
+    if (data.verification) setSaveCheck(data.verification as Check);
+    else setToast({ msg: "Sending account saved", tone: "success" });
+
     await load(false);
   } catch (e: any) {
     setError(e.message || "Could not save the account");
+  } finally {
+    setBusy(null);
+  }
+}
+
+/** Send one message now and report what happened, without changing anything. */
+async function sendTest() {
+  setBusy("test");
+  setTestCheck(null);
+  try {
+    const res = await fetch("/api/email", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "test", to: testTo.trim() || status?.user }),
+    });
+    const data = await res.json();
+
+    // A failed check is a result, not an error to throw away: the diagnosis is the
+    // whole point of pressing the button, so it is rendered rather than toasted.
+    if (!res.ok) {
+      setTestCheck({
+        ok: false,
+        to: data.to ?? testTo,
+        title: data.error,
+        fix: data.fix,
+        transient: data.transient,
+        server: data.server,
+      });
+      return;
+    }
+
+    setTestCheck({ ok: true, to: data.to, ms: data.ms });
+  } catch (e: any) {
+    setTestCheck({
+      ok: false,
+      to: testTo,
+      title: e.message || "Could not check the account.",
+      fix: "Try again in a moment.",
+      transient: true,
+    });
   } finally {
     setBusy(null);
   }
@@ -223,6 +301,94 @@ async function clearAccount() {
 /** Fill the form from a preset — host and port only, never the credentials. */
 function applyPreset(p: Preset) {
   setAccount((prev) => ({ ...prev, host: p.host, port: String(p.port) }));
+}
+
+/** The outcome of a send check, as it should be shown. */
+type Check = {
+  ok: boolean;
+  to: string;
+  /** What went wrong, in a sentence. */
+  title?: string;
+  /** What to change about it. */
+  fix?: string;
+  /** True when the same settings would probably work later. */
+  transient?: boolean;
+  /** Whatever the mail server said, verbatim. */
+  server?: string;
+  ms?: number;
+};
+
+/**
+ * Show the result of a send check where the person is already looking.
+ *
+ * Set as page state rather than toasted, because the answer to "does this work?"
+ * has to survive being read. A toast disappears in a few seconds, and a diagnosis
+ * with a fix attached is not something anyone can read and act on at that speed —
+ * which is most of why people gave up on this the first time and assumed their
+ * Gmail was at fault.
+ */
+function ReportCheck({ check, onDismiss }: { check: Check; onDismiss: () => void }) {
+  return (
+    <div
+      role="status"
+      className={`mt-4 rounded-xl px-3.5 py-3 text-sm ${
+        check.ok ? "bg-green-50 text-green-800" : "bg-terracotta-50 text-terracotta-700"
+      }`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="font-semibold">
+            {check.ok
+              ? `Email works — a message reached ${check.to}.`
+              : check.title || "The message was not sent."}
+          </p>
+
+          {check.ok ? (
+            <p className="mt-1 text-xs">
+              You can switch email on above. Nothing else was sent — no alerts, no
+              summary.
+            </p>
+          ) : (
+            <>
+              {check.fix && <p className="mt-1 text-xs">{check.fix}</p>}
+
+              {/*
+                The server's own words, kept behind a disclosure. They are the
+                authoritative detail and the last thing anyone needs on screen by
+                default — a cafe owner does not need SMTP jargon in the middle of
+                a setup form, but whoever ends up on the phone with their provider
+                does need it, and there is nowhere else to get it from.
+              */}
+              {check.server && (
+                <details className="mt-2">
+                  <summary className="cursor-pointer select-none text-xs underline">
+                    What the server said
+                  </summary>
+                  <p className="mt-1.5 break-words font-mono text-xs text-cocoa-600">
+                    {check.server}
+                  </p>
+                </details>
+              )}
+
+              {check.transient && (
+                <p className="mt-1.5 text-xs">
+                  This looks temporary, so the details were probably not the problem.
+                </p>
+              )}
+            </>
+          )}
+        </div>
+
+        <button
+          className="btn-ghost shrink-0 !px-2 !py-1 text-xs"
+          onClick={onDismiss}
+          aria-label="Dismiss"
+        >
+          Dismiss
+        </button>
+      </div>
+    </div>
+  );
 }
 
 async function action(name: string, body: Record<string, unknown> = {}) {
@@ -278,7 +444,45 @@ async function action(name: string, body: Record<string, unknown> = {}) {
     }
   }
 
-  async function removeRecipient(r: Recipient) {
+  /**
+   * Add the sending account's own address as a recipient, subscribed to
+   * everything. Empty `subscriptions` means "send everything", which is the right
+   * default for the person who set the account up: they want to hear about the
+   * café, and narrowing it can be done afterwards per recipient.
+   */
+  async function addSelf() {
+    const address = status?.user?.trim();
+    if (!address) return;
+
+    setBusy("self");
+    try {
+      const res = await fetch("/api/email", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email_address: address, subscriptions: [] }),
+      });
+      const data = await res.json();
+
+      // A 409 here is not a failure worth an error toast: the address is already a
+      // recipient, which is the state the button was trying to reach. Checked
+      // before `res.ok` because a 409 is not ok.
+      if (res.status === 409) {
+        setToast({ msg: `${address} was already a recipient`, tone: "success" });
+        await load();
+        return;
+      }
+
+      if (!res.ok) throw new Error(data.error || "Could not add the recipient");
+      setToast({ msg: `${address} added`, tone: "success" });
+      await load();
+    } catch (e: any) {
+      setToast({ msg: e.message, tone: "error" });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+async function removeRecipient(r: Recipient) {
     if (!confirm(`Stop emailing ${r.email_address}?`)) return;
     setBusy(r.id);
     try {
@@ -296,7 +500,12 @@ async function action(name: string, body: Record<string, unknown> = {}) {
 
   if (loading) return <Spinner label="Loading email settings..." />;
 
-  const off = status && !status.enabled;
+  const setup = status?.setup;
+  // Turning email on with no account or no recipient does nothing at all: every
+  // send is skipped and every alert queues forever. So the switch stays shut until
+  // the prerequisites are met, and says which one is outstanding rather than
+  // leaving the admin to discover it from silence.
+  const canTurnOn = status?.enabled || setup?.ready;
 
   return (
     <div className="space-y-5">
@@ -330,26 +539,74 @@ async function action(name: string, body: Record<string, unknown> = {}) {
             </div>
             <p className="mt-1 text-sm text-cocoa-500">
               {status?.enabled
-                ? `${status.recipients} recipient${status.recipients === 1 ? "" : "s"}.`
-                : "No email is sent until this is turned on."}
+                ? `On — ${status.recipients} recipient${status.recipients === 1 ? "" : "s"}.`
+                : canTurnOn
+                  ? "Everything is set up. Switch this on to start sending."
+                  : "No email is sent until this is set up and switched on."}
             </p>
           </div>
 
-          <button
-            className={status?.enabled ? "btn-ghost" : "btn-primary"}
-            disabled={busy === "email_enabled"}
-            onClick={() => saveSetting("email_enabled", status?.enabled ? "0" : "1")}
-          >
-            {status?.enabled ? "Turn off" : "Turn on"}
-          </button>
+          <div className="flex shrink-0 flex-col items-stretch gap-1">
+            <button
+              className={status?.enabled ? "btn-ghost" : "btn-primary"}
+              disabled={busy === "email_enabled" || !canTurnOn}
+              // The reason on the disabled control itself: a greyed-out button
+              // with no explanation is the thing that sent people hunting
+              // through the page for a setting that does not exist.
+              title={!canTurnOn && setup?.blocked ? setup.blocked : undefined}
+              onClick={() => saveSetting("email_enabled", status?.enabled ? "0" : "1")}
+            >
+              {status?.enabled ? "Turn off" : "Turn on"}
+            </button>
+            {!canTurnOn && setup?.blocked && (
+              <p className="max-w-[16rem] text-xs text-cocoa-400">{setup.blocked}</p>
+            )}
+          </div>
         </div>
 
-        {status && !status.configured && (
-          <div className="mt-4 rounded-xl bg-ochre-50 px-3.5 py-2.5 text-sm text-ochre-700">
-            No sending account yet. Set one below — it takes effect immediately,
-            no restart needed. Messages queue until then and go out once it
-            works.
-          </div>
+        {/*
+          The setup checklist, in the order the steps have to happen.
+
+          Everything below this card is independently editable, so nothing about
+          the page forces an admin to work out that an account comes before a
+          recipient and both come before the switch. This does, and it doubles as
+          the explanation for why the switch is unavailable.
+        */}
+        {setup && !setup.ready && (
+          <ol className="mt-4 space-y-2.5">
+            {setup.steps.map((step, i) => (
+              <li key={step.key} className="flex items-start gap-3">
+                {/*
+                  A tick rather than the step number once it is done. The number
+                  stays as the `sr-only` text so the list still reads as an
+                  ordered sequence to a screen reader.
+                */}
+                <span
+                  aria-hidden
+                  className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
+                    step.done
+                      ? "bg-green-100 text-green-700"
+                      : "bg-ochre-100 text-ochre-700"
+                  }`}
+                >
+                  {step.done ? "\u2713" : i + 1}
+                </span>
+                <span className="min-w-0">
+                  <span
+                    className={`text-sm font-medium ${
+                      step.done ? "text-cocoa-400" : "text-cocoa-800"
+                    }`}
+                  >
+                    {step.label}
+                    {step.done && <span className="sr-only"> — done</span>}
+                  </span>
+                  {!step.done && (
+                    <span className="mt-0.5 block text-xs text-cocoa-500">{step.hint}</span>
+                  )}
+                </span>
+              </li>
+            ))}
+          </ol>
         )}
 
         {status?.configured && (
@@ -372,10 +629,6 @@ async function action(name: string, body: Record<string, unknown> = {}) {
             <code className="font-mono">AUTH_SECRET</code> was changed. Enter the
             app password again below.
           </div>
-        )}
-
-        {off && status?.configured && (
-          <p className="mt-3 text-sm text-cocoa-500">{status.detail}</p>
         )}
       </Card>
 
@@ -485,7 +738,7 @@ async function action(name: string, body: Record<string, unknown> = {}) {
             disabled={busy === "save_smtp"}
             onClick={saveAccount}
           >
-            {busy === "save_smtp" ? "Saving..." : "Save account"}
+            {busy === "save_smtp" ? "Saving and checking..." : "Save account and check it works"}
           </button>
 
           {smtp?.has_password && (
@@ -498,6 +751,8 @@ async function action(name: string, body: Record<string, unknown> = {}) {
             </button>
           )}
         </div>
+
+        {saveCheck && <ReportCheck check={saveCheck} onDismiss={() => setSaveCheck(null)} />}
 
         <details className="mt-4 text-xs text-cocoa-500">
           <summary className="cursor-pointer select-none">Using Gmail?</summary>
@@ -540,10 +795,29 @@ async function action(name: string, body: Record<string, unknown> = {}) {
         </div>
 
         {recipients.length === 0 ? (
-          <p className="mt-3 text-sm text-cocoa-500">
-            No recipients yet. Alerts are still raised on the dashboard — nobody
-            is emailed until an address is added here.
-          </p>
+          <div className="mt-3 space-y-3">
+            <p className="text-sm text-cocoa-500">
+              No recipients yet. Alerts are still raised on the dashboard — nobody
+              is emailed until an address is added here.
+            </p>
+
+            {/*
+              The setup checklist makes step 2 the account owner's own address,
+              which is almost always right: the person setting this up wants to
+              know when the café runs out of milk, and it is the address they
+              have already typed above. Offering it here saves opening a modal and
+              re-entering an address that is one field away.
+            */}
+            {status?.user && (
+              <button
+                className="btn-ghost !px-3 !py-2 text-sm"
+                disabled={busy === "self"}
+                onClick={addSelf}
+              >
+                {busy === "self" ? "Adding..." : `Add ${status.user} as a recipient`}
+              </button>
+            )}
+          </div>
         ) : (
           <div className="mt-4 space-y-3">
             {recipients.map((r) => (
@@ -594,6 +868,11 @@ async function action(name: string, body: Record<string, unknown> = {}) {
       {/* ---- delivery settings ---- */}
       <Card>
         <h2 className="text-sm font-bold text-cocoa-800">When and how often</h2>
+        <p className="mt-1 text-sm text-cocoa-500">
+          The defaults are fine for most cafés. One summary a day, retrying a failed
+          message three times, and no repeat alert for the same item inside 24
+          hours. Adjust any of these only if one of them is getting in the way.
+        </p>
 
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
           <div>
@@ -617,55 +896,63 @@ async function action(name: string, body: Record<string, unknown> = {}) {
             </p>
           </div>
 
-          <div>
-            <label className="label" htmlFor="max-attempts">Delivery attempts</label>
-            <input
-              id="max-attempts"
-              type="number"
-              min={1}
-              max={10}
-              className="input"
-              value={settings.email_max_attempts ?? "3"}
-              disabled={busy === "email_max_attempts"}
-              onChange={(e) => saveSetting("email_max_attempts", e.target.value)}
-            />
-            <p className="mt-1 text-xs text-cocoa-500">
-              How many times a failed message is retried before it is given up on.
-            </p>
-          </div>
-
-          <div>
-            <label className="label" htmlFor="dedupe-hours">Repeat-alert window (hours)</label>
-            <input
-              id="dedupe-hours"
-              type="number"
-              min={1}
-              max={168}
-              className="input"
-              value={settings.email_dedupe_hours ?? "24"}
-              disabled={busy === "email_dedupe_hours"}
-              onChange={(e) => saveSetting("email_dedupe_hours", e.target.value)}
-            />
-            <p className="mt-1 text-xs text-cocoa-500">
-              The same alert is not emailed twice inside this window.
-            </p>
-          </div>
-
-          <div>
-            <label className="label" htmlFor="email-from">From address</label>
-            <input
-              id="email-from"
-              className="input"
-              value={settings.email_from ?? ""}
-              disabled={busy === "email_from"}
-              onChange={(e) => setSettings((p) => ({ ...p, email_from: e.target.value }))}
-              onBlur={(e) => saveSetting("email_from", e.target.value)}
-            />
-            <p className="mt-1 text-xs text-cocoa-500">
-              Must be an address your SMTP server is allowed to send as.
-            </p>
-          </div>
         </div>
+
+        {/*
+          The two left here are the ones that only matter when mail is already not
+          behaving. Retrying under a different limit is a response to a provider
+          that gives up; widening the repeat window is a response to getting the
+          same warning twice. Both are should-not-have-to decisions, so they are
+          behind a disclosure rather than sitting between the toggle and the
+          people it is for.
+        */}
+        <details className="mt-4">
+          <summary className="cursor-pointer select-none text-sm text-cocoa-500 underline">
+            Advanced
+          </summary>
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            <div>
+              <label className="label" htmlFor="max-attempts">Delivery attempts</label>
+              <input
+                id="max-attempts"
+                type="number"
+                min={1}
+                max={10}
+                className="input"
+                value={settings.email_max_attempts ?? "3"}
+                disabled={busy === "email_max_attempts"}
+                onChange={(e) => saveSetting("email_max_attempts", e.target.value)}
+              />
+              <p className="mt-1 text-xs text-cocoa-500">
+                How many times a failed message is retried before it is given up on.
+              </p>
+            </div>
+
+            <div>
+              <label className="label" htmlFor="dedupe-hours">Repeat-alert window (hours)</label>
+              <input
+                id="dedupe-hours"
+                type="number"
+                min={1}
+                max={168}
+                className="input"
+                value={settings.email_dedupe_hours ?? "24"}
+                disabled={busy === "email_dedupe_hours"}
+                onChange={(e) => saveSetting("email_dedupe_hours", e.target.value)}
+              />
+              <p className="mt-1 text-xs text-cocoa-500">
+                The same alert is not emailed twice inside this window.
+              </p>
+            </div>
+          </div>
+        </details>
+
+        {/*
+          The same setting, written from a different form, used to appear here too
+          — so "From address" had two live inputs that overwrote each other without
+          warning. One field, in the account card, is the one that is connected to
+          the account it depends on.
+        */}
       </Card>
 
       {/* ---- actions ---- */}
@@ -696,32 +983,49 @@ async function action(name: string, body: Record<string, unknown> = {}) {
           <button
             className="btn-primary"
             disabled={busy === "test" || !status?.configured}
-            onClick={() => action("test", { to: testTo || status?.user })}
+            onClick={sendTest}
           >
-            Send a test message
-          </button>
-          <button
-            className="btn-ghost"
-            disabled={busy === "send_now"}
-            onClick={() => action("send_now")}
-          >
-            Send anything queued
-          </button>
-          <button
-            className="btn-ghost"
-            disabled={busy === "retry_failed"}
-            onClick={() => action("retry_failed")}
-          >
-            Retry failed messages
-          </button>
-          <button
-            className="btn-ghost"
-            disabled={busy === "summary_now"}
-            onClick={() => action("summary_now")}
-          >
-            Send today&apos;s summary now
+            {busy === "test" ? "Sending..." : "Send a test message"}
           </button>
         </div>
+
+        {/*
+          The other three actions all do something to the queue rather than to
+          the account, so they are behind one disclosure instead of sitting next
+          to the one thing this card is for. "Send anything queued", "retry
+          failed" and "send today's summary now" are all things you reach for
+          after the first one has told you something.
+        */}
+        <details className="mt-4 text-sm">
+          <summary className="cursor-pointer select-none text-cocoa-500 underline">
+            More (queued mail, retries, the daily summary)
+          </summary>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              className="btn-ghost"
+              disabled={busy === "send_now"}
+              onClick={() => action("send_now")}
+            >
+              Send anything queued
+            </button>
+            <button
+              className="btn-ghost"
+              disabled={busy === "retry_failed"}
+              onClick={() => action("retry_failed")}
+            >
+              Retry failed messages
+            </button>
+            <button
+              className="btn-ghost"
+              disabled={busy === "summary_now"}
+              onClick={() => action("summary_now")}
+            >
+              Send today&apos;s summary now
+            </button>
+          </div>
+        </details>
+
+        {testCheck && <ReportCheck check={testCheck} onDismiss={() => setTestCheck(null)} />}
 
         <div className="mt-3 flex items-center gap-3">
           <label className="flex items-center gap-2 text-sm text-cocoa-600">
@@ -767,7 +1071,21 @@ async function action(name: string, body: Record<string, unknown> = {}) {
                         <td className="td text-cocoa-700">
                           {row.email_recipients?.email_address ?? "—"}
                         </td>
-                        <td className="td text-cocoa-700">{row.subject}</td>
+                        <td className="td text-cocoa-700">
+                          {row.subject}
+                          {/* Every low-stock message has the same subject, so
+                              without the body's first line the log is a column
+                              of identical rows that cannot say which item it
+                              is about. */}
+                          {row.body && (
+                            <div
+                              className="mt-0.5 max-w-[24rem] truncate text-xs text-cocoa-400"
+                              title={row.body}
+                            >
+                              {row.body.split("\n")[0]}
+                            </div>
+                          )}
+                        </td>
                         <td className="td text-cocoa-500">{row.kind}</td>
                         <td className="td">
                           <Badge tone={STATUS_TONE[row.status]} variant="tag">
@@ -793,6 +1111,11 @@ async function action(name: string, body: Record<string, unknown> = {}) {
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0 font-semibold text-cocoa-900">
                         {row.subject}
+                        {row.body && (
+                          <div className="truncate text-xs font-normal text-cocoa-400">
+                            {row.body.split("\n")[0]}
+                          </div>
+                        )}
                       </div>
                       <Badge tone={STATUS_TONE[row.status]} variant="tag">
                         {row.status}

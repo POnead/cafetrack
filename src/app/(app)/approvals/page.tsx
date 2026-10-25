@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, Spinner, Empty, Toast, Badge, DataCard, DataField, Modal } from "@/components/ui";
 import { fmtQty, fmtDate } from "@/lib/format";
+import { useLiveRefresh } from "@/lib/use-live-refresh";
 
 /**
  * The FR-03 approval queue.
@@ -80,10 +81,12 @@ export default function ApprovalsPage() {
 
   useEffect(() => {
     load();
-    // A submission from a colleague should appear without a manual refresh.
-    const timer = setInterval(load, 8000);
-    return () => clearInterval(timer);
   }, [load]);
+
+  // A submission from a colleague, or a decision on one, should appear without
+  // anyone refreshing. This is the queue an admin waits on, so waiting 8s to see
+  // a submission is the worst place for the delay.
+  useLiveRefresh(load);
 
   async function decide(item: Item, decision: "approve" | "reject", why?: string) {
     setBusy(item.id);

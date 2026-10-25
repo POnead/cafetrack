@@ -18,6 +18,7 @@ Needs Node.js 18.17 or newer (this project is developed on 24.15) and npm.
 ```bash
 npm install
 cp .env.example .env.local     # optional — the app runs without it
+npm run setup:face             # optional — copies the ~6.7MB face-model weights
 npm run dev
 ```
 
@@ -38,6 +39,13 @@ On first start the app creates `.pglite`, applies the schema, and seeds a few
 items, the reference lists (categories, locations) and three accounts. Staff
 sign in with the barcode printed on their ID plus their password; admins use a
 username and password.
+
+`npm run setup:face` is the one optional step. The three face models are ~6.7MB
+of binary that already ship inside `@vladmandic/face-api`, so they are copied
+out rather than committed — see [the script](scripts/setup-face-models.mjs) for
+why. Skip it and everything still runs except face enrolment, face sign-in and
+the ID portrait check; those pages say the model files are missing rather than
+showing a camera that does nothing.
 
 To see it work without typing anything: **Inventory → All Items → Print visible
 barcode labels**, print a sheet, then scan a label with the field on **Checkout
@@ -108,31 +116,118 @@ one, from `Downloads\cafetrack`.
 - **Inventory** — items with SKU, category, location, physical form, unit,
   units per box, quantity, low-stock threshold and expiry date. Search, filter by
   category, and sort by clicking any column header. Barcode labels for the whole
-  filtered list or one at a time.
+  filtered list or one at a time. Paged 50 at a time, with the search, the filter
+  and the sort all applied by the database — so a filtered list is the whole list
+  and never one page of it pretending to be everything. Sorting by category,
+  location or status applies to the loaded page only, because those values are
+  joined or calculated rather than stored on the item; the column header says so.
 - **Staff can add ingredients, two ways** — an admin grants *item management* to
   a staff member from their account, and their additions, edits and deletions take
   effect immediately. Without that grant they can still submit a new ingredient;
   it is saved, audited and listed under **Approvals**, but it is **not stock** until
   an admin approves it. A pending item raises no alerts, cannot be checked out or
   restocked, and its barcode says it is waiting rather than "no item matches" — so
-  the approval step cannot be bypassed by accident. Edit and delete stay
-  admin-only unless item management is granted, and revoking it takes effect on the
-  next request rather than at next sign-in.
+  the approval step cannot be bypassed by accident. An edit to a live item queues
+  the same way and lands only when an admin approves it. Delete stays admin-only
+  unless item management is granted, and revoking that takes effect on the next
+  request rather than at next sign-in.
+- **Live updates** — a movement made on the till updates the dashboard, the item
+  list and the alerts list on the other device without anyone refreshing, over a
+  Server-Sent Events stream. If that connection drops, the page says so quietly and
+  falls back to polling every few seconds rather than showing a stale number or an
+  error. The same rule covers a tab that was in the background: it refreshes on
+  return.
+- **Reports export as a real PDF** — generated on the server, with the stock
+  snapshot and the filtered movement history, paginated with repeating headers and
+  a page count. The browser's print dialog is not involved, so the file is named
+  after the report and dated rather than after whatever the browser defaults to.
+  CSV export carries the same rows.
 - **Email notifications** — low stock, out of stock, expiring soon, expired, a daily
   summary, rejected sign-ins, and the stock report on demand. **Off until an admin
-  turns it on** in Settings → Email and adds a recipient, so the feature cannot
+  turns it on** in Settings → Email, which the page will not let them do until a
+  sending account and a recipient both exist, so the feature cannot
   start sending from someone's café by accident. Alerts are queued by the database
   during the movement that caused them and sent afterwards, so a slow or dead mail
   server never slows down the till; a failed send is retried, up to three times by
   default. The same alert is not sent twice inside a suppression window (24 hours by
   default), and the delivery log shows what went out, what is queued, and why
   anything failed.
+- **ID verification at hiring** — from an account's page, an admin photographs the
+  applicant's government ID and a photo of them. The app compares the portrait
+  printed on the card with their face, reads the shape of the uploads, and — if a
+  verification provider is configured — reads the text off the card and checks it
+  for signs of digital manipulation. **Every one of those is a signal shown beside
+  the two images, not a verdict.** The account only becomes `verified` when an
+  admin presses Approve, and Reject requires a reason that is shown to the person
+  at sign-in. The local checks need nothing installed and run entirely in the
+  browser and on this machine. See [ID verification](#id-verification) for what
+  they can and cannot do, and how to add a provider.
+
+### ID verification
+
+The café's own machine can compare two faces and look at an image's dimensions.
+It cannot tell whether a Philippine driver's licence is genuine — those cards
+carry no MRZ and no barcode, and no open tool checks them against a template — so
+the app never claims to. What it produces is evidence, and a human decides.
+
+**What the local checks do, with nothing configured:**
+
+- Compare the face printed on the ID against a photo of the person. Both
+  descriptors are computed in the browser by the same face model the duty check
+  already uses, so there is no new dependency and no image processing on the
+  server.
+- Report the pixel dimensions and aspect ratio of each upload, and flag anything
+  whose shape is not consistent with an ID card.
+- Say so when a check *could not run* — no face readable from the card, no photo
+  attached, no name extracted. That is reported as "not checked", never as a pass.
+
+**Adding a provider.** Set `HYPERVERGE_APP_ID` and `HYPERVERGE_APP_KEY` in
+`.env.local` (see `.env.example`) and document OCR plus forgery detection join
+the local checks on the next upload. No restart is needed for the local checks to
+keep working, and if the provider is unreachable, times out, or is not configured,
+its checks report as unavailable and the local ones still run. Per-module cost is
+roughly $0.70 for a full pass.
+
+**Making it mandatory.** Off by default. `Settings → ID verification → Require a
+checked ID before sign-in` makes a staff account whose ID was attached but not
+approved unable to sign in. Two carve-outs, both deliberate: **admins are never
+gated** (they are the people who approve the ID that would be blocking them), and
+**an account with no ID attached is unaffected** (the gate can stop an account
+waiting on a review; it cannot be used to demand a document from someone who has
+not got one). Seeded accounts are marked verified so a fresh install is never
+locked out.
+
+**Where the documents live.** Base64 in a `users` text column, the same as
+`face_image`. They are never included in the `/api/users` list — a front, a back
+and a photo is a few hundred kilobytes per person and that list loads on every
+page — and are served one at a time, admin-only, `Cache-Control: no-store`. The
+browser downsizes every upload to a 1600px long edge before sending, which takes a
+phone photo of a card from megabytes to a couple of hundred kilobytes.
+
+**What is recorded.** The audit trail gets the decision, the reason, and a count of
+how many checks passed, warned, failed or could not run. It does **not** get the ID
+number, the name read off the card, or any similarity figure — that log is
+append-only and hash-chained, so anything written there can never be taken back
+out. The evidence stays on the user row, where **Remove documents** can delete it.
+
+**Uploading is bounded.** App Router has no request body limit, so the route reads
+the declared `Content-Length` first and then counts the bytes that actually arrive,
+stopping at 10MB either way. Each image is capped at 3MB and must be a JPEG, PNG
+or WebP *by its leading bytes*, not by what it claims to be.
 
 ### Setting up email
 
 An admin sets the sending account from **Settings → Email** — no file editing and
 no restart. Gmail, Outlook and anything else that speaks SMTP work the same way;
 Gmail and Outlook are one-click presets that fill in the server and port.
+
+The page opens with a checklist of the two things needed before email can work — a
+sending account, then at least one recipient — and the on/off switch stays
+disabled until both are done, saying which one is outstanding. `PATCH
+/api/settings` enforces the same thing, so the switch cannot be set on by calling
+the API directly and left reporting a feature that sends nothing. Most people can
+get through it in two clicks: save the account, then **Add *your address* as a
+recipient** on the recipients card.
 
 **Gmail needs an App Password, not your account password.** Google stopped
 accepting the real password for SMTP in 2022. Turn on 2-Step Verification, then
@@ -346,10 +441,18 @@ overwrites your change:
 | `npm start`         | Serve the production build                             |
 | `npm run lint`      | ESLint                                                |
 | `npm run seed`      | Seed **Supabase** (local mode seeds itself)            |
+| `npm run setup:face`| Copy the face-model weights into `public/models/`      |
 | `npm run db:schema` | Regenerate `db/schema.local.sql` from `db/schema.sql`  |
 | `npm run db:migrate`| Write `db/migrate.sql` — paste-ready, data-safe updates for a hosted project |
 | `npm run db:reset`  | Delete the local database                              |
 | `npm run db:wipe`   | Clear local data, keep admin + reference lists         |
+| `npm run db:backup` | Back up the local database (stop `dev` first)          |
+| `npm run db:restore`| Restore a manual backup, verifying row counts          |
+
+`GET /api/health` needs no credentials and answers 200 when the application can
+reach its database, 503 when it cannot. Point a monitor at it and NFR-04's
+99.5% target becomes a number rather than a claim; it also reports `mode`
+(`live` or `test`), so a test database cannot be mistaken for a deployment.
 
 ### Tests
 
@@ -360,27 +463,48 @@ There is no unit-test runner. The scripts drive a running server, so start
 npm run test:smoke    # full API walk-through; makes and cleans up its own data
 npm run test:edge     # hostile and edge-case inputs
 npm run test:pages    # every page renders, for an admin and a staff session
+npm run test:email    # the notification path, against a throwaway SMTP server
 npm run test:journeys # six end-to-end user stories, asserted on their outcomes
 npm run test:ui       # drives part of the real UI in Chrome; writes ui-screenshots/
 npm run test:tour     # drives the whole site in Chrome, as a café actually works
 npm run perf          # measures the spec's performance targets
-npm run test:all      # all seven in order, stopping at the first failure
+npm run test:all      # every suite in order, stopping at the first failure
 ```
+
+The pure suites need no server and no camera, and are the fast ones to run while
+working: `test:face` (descriptor parsing, cosine matching, the duty window),
+`test:face-image` (upload sniffing), `test:face-diagnostics` (camera failures),
+`test:id-name`, `test:ocr`, `test:ocr-philsys`, `test:id-forgery`,
+`test:id-lookup` and `test:step2-ticket`. `test:all` runs those first, then the
+server suites above.
 
 **Prefer `npm run test:isolated` — see below. It keeps the suites off your
 working data.**
 
-`test:smoke` currently reports **68 passed, 0 failed**. `test:edge` reports
-**102 passed, 0 failed**, `test:pages` **21 passed, 0 failed**,
-`test:journeys` **117 passed, 0 failed**, `test:ui` **36 passed, 0 failed**,
-and `test:tour` **147 passed, 0 failed**.
+`test:smoke` currently reports **71 passed, 0 failed**. `test:edge` reports
+**150 passed, 0 failed**, `test:pages` **22 passed, 0 failed**,
+`test:email` **72 passed, 0 failed**, `test:journeys` **118 passed, 0 failed**,
+`test:ui` **46 passed, 0 failed**, and `test:tour` **151 passed, 0 failed**.
 
-Two of those counts grew with the item-approval and email work. `test:edge` now
-covers the submission path properly — that staff *can* submit, that the result is
-pending rather than stock, that it is invisible to the stock list, unscanable at
-the till, and still not editable or deletable by the person who submitted it.
-`test:pages` renders `/approvals` and `/email` for a staff session, since neither
-should crash for someone who follows a link.
+What `test:edge` grew to cover, and why each matters:
+
+- the submission path — that staff *can* submit, that the result is pending
+  rather than stock, that it is invisible to the stock list, unscanable at the
+  till, and that a staff edit is **queued rather than applied**;
+- audit paging — that walking the log forwards visits no `seq` twice and never
+  goes backwards, that `before=0` returns an empty page instead of silently
+  handing back the newest one, and that a malformed `before` is ignored;
+- item paging and sorting — that two pages do not overlap, that both report the
+  same total, that `sort=quantity&order=desc` genuinely comes back descending,
+  and that an unmapped sort key cannot reach the SQL;
+- the health endpoint — that it answers without credentials, reports the
+  database as reachable, and returns nothing sensitive.
+
+Two browser suites had been selecting the staff sign-in field by its
+placeholder text, which reads "Scan your staff ID". When that wording changed the
+selectors stopped finding the field, so both suites had been failing on a step
+that had never run. They now select by `aria-label` and drive the field the way a
+scanner does — password first, then the code, then Enter.
 
 `test:smoke` and `test:ui` need a **freshly seeded** database — both assert
 against the seeded items. `npm run db:reset` clears and re-seeds;
@@ -459,6 +583,38 @@ that fall out of it, read the report, onboard a hire, close the day — and
 records every console error, uncaught exception and 5xx response on every page
 it visits.
 
+### `test:email` — the notification path, end to end
+
+This is the one suite that needs something running besides Next. `npm run
+dev:test` starts a throwaway SMTP server (`scripts/_smtp-stub.mjs`, ports 2525
+and 2526) and points the application at it with `SMTP_HOST`, `SMTP_USER`,
+`SMTP_PASS` and `SMTP_ALLOW_INSECURE=1`. Nothing else changes: email is off in
+the settings by default, so the other suites neither send nor are affected.
+
+The stub speaks enough of RFC 5321 for nodemailer to complete a delivery —
+`EHLO`, `AUTH LOGIN`/`PLAIN`, `MAIL FROM`, `RCPT TO`, `DATA`, `RSET`, `NOOP`,
+`QUIT` — and records every message it accepts, with its headers decoded from
+RFC 2047 so subjects read the way an inbox would show them. A second, tiny HTTP
+port exists so the suite can read what arrived and steer the next failure; the
+suite and the server are separate processes, so an in-process object could not
+cross that boundary.
+
+`failNext` is the part that earns its keep. Refusing the next delivery is what
+exercises the retry path and the give-up-after-N-attempts path for real rather
+than mocked — and those are the two behaviours most likely to be wrong and least
+likely to be noticed, because a café whose alerts silently stopped retrying looks
+identical to one receiving no alerts.
+
+The suite asserts on two things at once, and the second is the point: the
+`email_notifications` rows, *and* what the stub received. Asserting on the queue
+alone would pass even if delivery were completely broken.
+
+Two consequences worth knowing. The stub speaks plain TCP on loopback, which is
+the one case `SMTP_ALLOW_INSECURE=1` exists for, so it cannot also be used to
+prove TLS is required — that stays a review item. And `startEmailScheduler` is
+disabled in tests (`CAFETRACK_DISABLE_EMAIL=1`), so the daily-summary logic is
+exercised through its own route rather than by waiting for a timer.
+
 ### The browser suites need `localhost`, not `127.0.0.1`
 
 `test:ui` and `test:tour` drive a real page, and against `127.0.0.1` the HMR
@@ -531,8 +687,8 @@ src/
                        alerts, reports, audit, users, settings, email
     api/               every API route
     login/             sign-in page
-  components/          Nav, ScanInput, BarcodeView, ui primitives, icons,
-                       BrandArt (the cafe illustrations)
+  components/          Nav, ScanInput, BarcodeView, LiveRegion, ui primitives,
+                       icons, BrandArt (the cafe illustrations)
 public/
   brand/               storefront, barista and table illustrations (JPEG)
   lib/
@@ -543,7 +699,8 @@ public/
     rate-limit.ts      sign-in throttling
     status.ts          shared status wording and colours
     ref-delete.ts      shared in-use guard for the reference lists
-    report-print.tsx   print/PDF view of the stock report
+    report-pdf.ts      the stock report as a real PDF (FR-09)
+    use-live-refresh.ts  event subscription + the poll behind it (FR-07)
     permissions.ts     can this person manage items? (FR-03)
     email.ts           SMTP delivery, the queue, the daily-summary timer
     backup.ts          the automatic daily snapshot
@@ -602,8 +759,13 @@ public/
   defaulting to `0`, which used to silently empty a stocked item. `expiration_date`
   is checked for a real `YYYY-MM-DD` calendar day before it reaches the database,
   so a bad date is a `400` and not a `500`.
-- **No pagination.** `/api/items` returns every row; transactions and the audit
-  trail cap at 500. Fine for a single café, but `audit_log` grows without bound.
+- **Pagination is partial.** The item list and the audit trail are paged in the
+  database — the item list by `limit`/`offset` with a stable second sort key, the
+  audit trail by a `seq` cursor, because offset paging over an append-only log
+  gets slower forever. Transactions are still capped at 500 per request; the
+  reports page walks the pages to build a report, and a period with more than
+  5,000 movements in it is truncated at that point rather than reported as
+  incomplete.
 - **The local database adapter** (`src/lib/local-db.ts`) implements the subset
   of the Supabase query builder this app uses, with four explicit join paths
   (`items.category`, `items.location`, `alerts.item`,
@@ -619,10 +781,24 @@ public/
   drawn as SVG at whole-pixel module widths, which is what makes them
   scannable, but nothing here proves a printed label scans — that needs a
   physical print and a real scanner.
-- **Email cannot be verified from a test run.** The notification path is checked
-  against a throwaway SMTP server, which proves messages are queued, addressed,
-  deduped and delivered — but not that a real provider accepts them, nor how a
-  given inbox treats them. Send a test message from Settings → Email first.
+- **Email is tested against a throwaway SMTP server, not a real provider.** `npm run
+  test:email` (72 checks) points the app at `scripts/_smtp-stub.mjs`, a local
+  RFC 5321 subset that records what arrived and can be told to refuse the next
+  delivery. So a message being queued, addressed, deduplicated, subscribed,
+  retried, given up on and genuinely handed to a mail server are all proven —
+  queue assertions alone would pass even if delivery were broken. Two things are
+  still unproven and are review items rather than tests: that a real provider
+  accepts a message (the stub is more forgiving than Gmail), and that TLS is
+  required on the wire, since the stub speaks plain TCP on loopback — which is
+  the one case `SMTP_ALLOW_INSECURE=1` exists for. Send a test message from
+  Settings → Email before relying on alerts in production.
+- **Verifying an account sends the raw SMTP reason back, not just "it failed".**
+  Pressing "Save account and check it works" makes a real delivery against the
+  new account and shows the outcome in place: a green banner if it arrived, or the
+  server's error translated into what to change — usually "that is your account
+  password, use an app password" (535) or "the From address must be this
+  account or its verified alias" (553). Details available by expanding "What the
+  server said".
 - **`upsert()` takes `onConflict` as a string or an array — locally.** Supabase-js
   accepts either, so a call written for Supabase passes a bare
   `onConflict: "column"`. The local adapter now normalises both, because it

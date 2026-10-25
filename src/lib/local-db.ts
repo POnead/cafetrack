@@ -130,6 +130,12 @@ const RELATIONS: Record<
     foreignKey: "id",
     many: false,
   },
+  "items.supplier": {
+    table: "suppliers",
+    localKey: "supplier_id",
+    foreignKey: "id",
+    many: false,
+  },
   "alerts.item": {
     table: "items",
     localKey: "item_id",
@@ -158,15 +164,41 @@ const RELATIONS: Record<
 
 type Embed = { alias: string; table: string; cols: string[] };
 
+/**
+ * Is this entry in a `.select()` list a computed expression rather than a column?
+ *
+ * PostgREST accepts `id_doc_front is not null as has_front` in a select, and real
+ * Postgres runs it happily. This adapter used to quote every plain entry as an
+ * identifier, which turned that into a column literally named
+ * `"id_doc_front is not null as has_front"` — a 500 with no useful message.
+ *
+ * It matters for /api/users/[id]/id/status, which asks for exactly that so it can
+ * answer "is a document attached" without pulling a few hundred kilobytes of
+ * base64 per person across the wire to find out.
+ *
+ * The space is the entire test, and it is enough because:
+ *
+ *   - every column name in this schema is a lower_snake_case identifier, and
+ *     none of them contains whitespace; and
+ *   - entries with no space are still quoted, so quoting a genuine identifier is
+ *     unchanged.
+ *
+ * So an identifier cannot be misread as an expression, and an expression cannot be
+ * silently mangled into a quoted name.
+ */
+function isSelectExpression(part: string): boolean {
+  return /\s/.test(part);
+}
+
 function parseSelect(select: string): {
   star: boolean;
   plain: string[];
   embeds: Embed[];
 } {
-  const star = false;
   const plain: string[] = [];
   const embeds: Embed[] = [];
-  let all = star;
+  // `*` is handled below; nothing selects it implicitly.
+  let all = false;
 
   for (const raw of splitTopLevel(select)) {
     const part = raw.trim();
@@ -262,15 +294,24 @@ async function seedIfEmpty(pg: PGlite) {
   );
   if (Number(existing.rows[0]?.n ?? 0) > 0) return;
 
+  /*
+   * Seeded accounts are written as already verified.
+   *
+   * The column default is 'unverified', which is right for an account an admin
+   * creates — but these three were made by this script, not by a person who had
+   * an ID in front of them. Marking them 'verified' keeps a fresh install usable
+   * the moment it starts, and keeps "why can I not sign in" from ever being an
+   * answer about a seed script.
+   */
   const adminPw = process.env.SEED_ADMIN_PASSWORD || "admin123";
   const staffPw = process.env.SEED_STAFF_PASSWORD || "staff123";
   const barista1Token = newStaffToken();
 
   await pg.query(
-    `insert into users (username, password_hash, full_name, role, qr_token)
-     values ('admin',    $1, 'Cafe Owner',     'admin', null),
-            ('barista1', $2, 'Juan Dela Cruz', 'staff', $3),
-            ('barista2', $2, 'Maria Santos',   'staff', $4)`,
+    `insert into users (username, password_hash, full_name, role, qr_token, verification_status)
+     values ('admin',    $1, 'Cafe Owner',     'admin', null,   'verified'),
+            ('barista1', $2, 'Juan Dela Cruz', 'staff', $3, 'verified'),
+            ('barista2', $2, 'Maria Santos',   'staff', $4, 'verified')`,
     [hashPassword(adminPw), hashPassword(staffPw), barista1Token, newStaffToken()]
   );
 
@@ -604,7 +645,12 @@ class LocalQuery implements PromiseLike<DbResult> {
     const cols: string[] = [];
 
     if (star) cols.push(`${alias}.*`);
-    for (const column of plain) cols.push(`${alias}.${quoteId(column)}`);
+    for (const column of plain) {
+      // An entry with a space in it is an expression, not a column name, and is
+      // emitted verbatim. See isSelectExpression for why that distinction is
+      // safe and what it unblocks.
+      cols.push(isSelectExpression(column) ? column : `${alias}.${quoteId(column)}`);
+    }
 
     for (const embed of embeds) {
       const key = `${this.table}.${embed.alias}`;
@@ -766,11 +812,22 @@ class LocalQuery implements PromiseLike<DbResult> {
     };
   }
 
+  /**
+   * The RETURNING clause for an insert or update.
+   *
+   * `.update(...).select(...)` puts its select list here rather than through the
+   * query builder's select path, so the same expression rule applies — see
+   * isSelectExpression. Postgres accepts `returning id_doc_front is not null as
+   * has_front`, and quoting it into a column name is what made the upload route
+   * answer 500 after the review route had already been fixed.
+   */
   private returningList(): string | null {
     if (this.selectStr === null) return null;
     const { star, plain } = parseSelect(this.selectStr);
     if (star || plain.length === 0) return "*";
-    return plain.map(quoteId).join(", ");
+    return plain
+      .map((c) => (isSelectExpression(c) ? c : quoteId(c)))
+      .join(", ");
   }
 }
 

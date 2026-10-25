@@ -110,15 +110,3 @@ export function decryptSecret(stored: string | null | undefined): string | null 
   }
 }
 
-/** True when a stored value is a well-formed, currently-decryptable secret. */
-export function credentialReadable(stored: string | null | undefined): boolean {
-  return decryptSecret(stored) !== null;
-}
-
-/**
- * Test seam: drops the memoised key. Only useful if a test ever runs with two
- * different AUTH_SECRET values in one process.
- */
-export function resetCredentialKey(): void {
-  cachedKey = null;
-}

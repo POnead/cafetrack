@@ -13,7 +13,6 @@ import {
 } from "@/components/ui";
 import { fmtQty, fmtDate, daysUntil, toCsv } from "@/lib/format";
 import { stockStatus } from "@/lib/status";
-import { printStockReport } from "@/lib/report-print";
 
 const TRANSACTION_PAGE_SIZE = 500;
 
@@ -71,6 +70,8 @@ export default function ReportsPage() {
   } | null>(null);
 
   const [emailModalOpen, setEmailModalOpen] = useState(false);
+  const [exportingPdf, setExportingPdf] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   const [emailTo, setEmailTo] = useState("");
   const [emailSending, setEmailSending] = useState(false);
 
@@ -147,8 +148,6 @@ export default function ReportsPage() {
           .catch(() => ({ items: [] })),
       ]);
       setCategories(c.items ?? []);
-      setCategories(c.items ?? []);
-      if (i.error) throw new Error(i.error);
       if (i.error) throw new Error(i.error);
 
       setItems(i.items ?? []);
@@ -214,24 +213,42 @@ export default function ReportsPage() {
     [txns]
   );
 
-  const low = shownItems.filter(
-    (i) => stockStatus(i.quantity, i.low_stock_threshold).key === "low"
+  /*
+   * Everything below here walks the whole transaction snapshot. With "all time"
+   * selected that is every movement the cafe has ever made, so these are all
+   * memoised: without it, typing one character into the email-recipient field
+   * re-ran four full passes over the array on every keystroke.
+   */
+  const low = useMemo(
+    () =>
+      shownItems.filter(
+        (i) => stockStatus(i.quantity, i.low_stock_threshold).key === "low"
+      ),
+    [shownItems]
   );
-  const out = shownItems.filter(
-    (i) => stockStatus(i.quantity, i.low_stock_threshold).key === "out"
+  const out = useMemo(
+    () =>
+      shownItems.filter(
+        (i) => stockStatus(i.quantity, i.low_stock_threshold).key === "out"
+      ),
+    [shownItems]
   );
 
-  const movement = (["checkout", "restock", "waste"] as const).map((type) => {
-    const rows = filteredTransactions.filter((t) => t.type === type);
-    const qty = rows.reduce(
-      (n, t) =>
-        n + (t.transaction_items ?? []).reduce((m, li) => m + Number(li.quantity), 0),
-      0
-    );
-    return { type, count: rows.length, qty };
-  });
+  const movement = useMemo(
+    () =>
+      (["checkout", "restock", "waste"] as const).map((type) => {
+        const rows = filteredTransactions.filter((t) => t.type === type);
+        const qty = rows.reduce(
+          (n, t) =>
+            n + (t.transaction_items ?? []).reduce((m, li) => m + Number(li.quantity), 0),
+          0
+        );
+        return { type, count: rows.length, qty };
+      }),
+    [filteredTransactions]
+  );
 
-  const topMovers = (() => {
+  const topMovers = useMemo(() => {
     const tally = new Map<string, { name: string; qty: number }>();
     for (const t of filteredTransactions) {
       if (t.type !== "checkout") continue;
@@ -245,12 +262,12 @@ export default function ReportsPage() {
       .map(([sku, v]) => ({ sku, ...v }))
       .sort((a, b) => b.qty - a.qty)
       .slice(0, 5);
-  })();
+  }, [filteredTransactions]);
 
   // Waste tracking: total waste quantity and top wasted items
   const wasteTotal = movement.find((m) => m.type === "waste")?.qty ?? 0;
   const wasteCount = movement.find((m) => m.type === "waste")?.count ?? 0;
-  const wasteByItem = (() => {
+  const wasteByItem = useMemo(() => {
     const tally = new Map<string, { name: string; qty: number; count: number }>();
     for (const t of filteredTransactions) {
       if (t.type !== "waste") continue;
@@ -265,8 +282,8 @@ export default function ReportsPage() {
       .map(([sku, v]) => ({ sku, ...v }))
       .sort((a, b) => b.qty - a.qty)
       .slice(0, 5);
-  })();
-  const wasteByCategory = (() => {
+  }, [filteredTransactions]);
+  const wasteByCategory = useMemo(() => {
     const tally = new Map<string, number>();
     for (const t of filteredTransactions) {
       if (t.type !== "waste") continue;
@@ -279,20 +296,24 @@ export default function ReportsPage() {
     return [...tally.entries()]
       .map(([name, qty]) => ({ name, qty }))
       .sort((a, b) => b.qty - a.qty);
-  })();
+  }, [filteredTransactions, itemsBySku]);
 
-  const filterDescription = [
-    rangeParams.from || rangeParams.to
-      ? `Dates: ${rangeParams.from || "beginning"} to ${rangeParams.to || "today"}`
-      : "All dates",
-    staff ? `Staff: ${staff}` : null,
-    typeFilter ? `Movement: ${MOVEMENT_LABEL[typeFilter] ?? typeFilter}` : null,
-    catFilter
-      ? `Category: ${categories.find((category) => category.id === catFilter)?.name ?? "selected category"}`
-      : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  const filterDescription = useMemo(
+    () =>
+      [
+        rangeParams.from || rangeParams.to
+          ? `Dates: ${rangeParams.from || "beginning"} to ${rangeParams.to || "today"}`
+          : "All dates",
+        staff ? `Staff: ${staff}` : null,
+        typeFilter ? `Movement: ${MOVEMENT_LABEL[typeFilter] ?? typeFilter}` : null,
+        catFilter
+          ? `Category: ${categories.find((category) => category.id === catFilter)?.name ?? "selected category"}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    [rangeParams.from, rangeParams.to, staff, typeFilter, catFilter, categories]
+  );
 
   function exportCsv() {
     const stockRows: Record<string, unknown>[] = shownItems.map((i) => {
@@ -373,29 +394,63 @@ export default function ReportsPage() {
     });
   }
 
-  function exportPdf() {
-    printStockReport({
-      businessName,
-      items: shownItems,
-      movement,
-      topMovers,
-      wasteByItem,
-      movementLines: filteredTransactions.flatMap((transaction) =>
-        (transaction.transaction_items ?? []).map((line) => ({
-          date: transaction.created_at,
-          actorName: transaction.actor_name,
-          type: transaction.type,
-          sku: line.sku,
-          itemName: line.item_name,
-          category: itemsBySku.get(line.sku)?.category?.name ?? "Uncategorized",
-          quantity: Number(line.quantity),
-          note: transaction.note,
-        }))
-      ),
-      filterDescription,
-      lowCount: low.length,
-      outCount: out.length,
-    });
+  /**
+   * Download the report as a PDF (FR-09).
+   *
+   * Fetched rather than printed: "Export PDF" that opens a print dialog is not an
+   * export. The server builds the file — see src/app/api/report-export — so the
+   * PDF carries the same filtered rows and the same snapshot the page is showing,
+   * rather than a second rendering of them assembled here.
+   *
+   * The filters go in the body, including the category. Everything else is a
+   * query parameter the report route already understands.
+   */
+  async function exportPdf() {
+    setExportingPdf(true);
+    setExportError(null);
+    try {
+      const res = await fetch("/api/report-export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from: rangeParams.from,
+          to: rangeParams.to,
+          staff,
+          type: typeFilter,
+          category_id: catFilter,
+        }),
+      });
+
+      if (!res.ok) {
+        // A failed export is an error, not a silent no-op: the person pressed
+        // the button expecting a file.
+        const data = await res.json().catch(() => ({ error: null }));
+        throw new Error(data.error || `Export failed (${res.status})`);
+      }
+
+      const blob = await res.blob();
+
+      // The server names the file in Content-Disposition; reusing it means the
+      // download is called what the server called it rather than something this
+      // function invented.
+      const disposition = res.headers.get("content-disposition") ?? "";
+      const named = /filename="([^"]+)"/.exec(disposition);
+      const name = named?.[1] ?? `cafetrack-report-${new Date().toISOString().slice(0, 10)}.pdf`;
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      setToast({ msg: `Downloaded ${name}`, tone: "success" });
+    } catch (e: any) {
+      setExportError(e.message || "Could not export the report");
+      setToast({ msg: e.message || "Export failed", tone: "error" });
+    } finally {
+      setExportingPdf(false);
+    }
   }
 
   async function sendEmailReport() {
@@ -442,9 +497,9 @@ export default function ReportsPage() {
           <button
             className="btn-ghost"
             onClick={exportPdf}
-            disabled={items.length === 0}
+            disabled={items.length === 0 || exportingPdf}
           >
-            Export PDF
+            {exportingPdf ? "Preparing PDF..." : "Export PDF"}
           </button>
           <button
             className="btn-primary"
@@ -589,6 +644,12 @@ export default function ReportsPage() {
       {error && (
         <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
           {error}
+        </div>
+      )}
+
+      {exportError && (
+        <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
+          {exportError}
         </div>
       )}
 

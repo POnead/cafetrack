@@ -22,7 +22,57 @@ insert into settings (key, value) values
   ('email_dedupe_hours', '24'),
   ('email_max_attempts', '3'),
   ('email_from', 'CafeTrack <no-reply@cafetrack.local>'),
-  ('email_daily_summary_hour', '7')
+  ('email_daily_summary_hour', '7'),
+  -- Duty verification. Off by default for the same reason email is: this one
+  -- puts a camera prompt between a staff member and the till, so it must not
+  -- start until an admin has asked for it AND enrolled the people it covers.
+  --
+  -- face_duty_hours is the rolling window. A barista who verifies at 7am is not
+  -- asked again until 4pm, which is roughly a cafe duty rather than a fixed
+  -- shift grid — someone covering an early shift one day and a late one the next
+  -- should not be tied to a timetable the cafe does not really keep.
+  ('face_verification_enabled', '0'),
+  ('face_duty_hours', '9'),
+  ('face_match_threshold', '0.033'),
+  -- Signing in with a face instead of a password (staff only).
+  --
+  -- Off by default, and separate from face_verification_enabled on purpose: one
+  -- asks for a face every duty, the other changes how someone gets *into* the
+  -- app at all. A cafe that wants both should be able to turn on the second
+  -- without implying anything about the first, and an admin trialling face sign-in
+  -- should not silently switch their staff over to duty checks as well.
+  ('face_login_enabled', '0'),
+  -- The https address a staff phone can open, when the register itself has no
+  -- camera. Empty until a tunnel exists: a QR pointing at `localhost` gives the
+  -- user a page with a dead camera and no explanation.
+  ('face_verify_public_url', ''),
+  -- ID verification at hiring. Off by default for the same reason the rest of the
+  -- switches are: adding a feature must not change what an admin can do until an
+  -- admin has asked for it. While this is off an account can be verified (the
+  -- admin can still upload an ID and get the checks) but nothing is *required* —
+  -- no account is refused a sign-in.
+  ('id_verification_required', '0'),
+  -- Which engine reads the ID. Empty means "use the best one that is configured",
+  -- which is the local checker until a vendor key is present in the environment.
+  -- Setting it to a name that is not available falls back to the same choice
+  -- rather than failing — a feature that stops working when a key expires is
+  -- worse than one that quietly gets less thorough.
+  ('id_provider', ''),
+  -- Read the text off the card on this machine, for free, with nothing sent
+  -- anywhere. '1' is the default; store '0' to turn the on-device reader off
+  -- without removing ID verification. Absent is read as on, so this row existing
+  -- at all is a convenience rather than a requirement.
+  --
+  -- Its templates are hand-written, not trained — see
+  -- src/lib/id-verification/ocr/templates.ts for why no open library exists for
+  -- PhilSys or LTO — so this is the switch to reach for if it reads a card wrong.
+  ('local_ocr_enabled', '1'),
+  -- How close the portrait printed on the card and the photo of the person must
+  -- be to count as the same person. Cosine distance, like every other threshold
+  -- in this app, so lower is stricter — but see lib/id-verification/local.ts,
+  -- where the default is far looser than face_match_threshold and the reason is
+  -- measured rather than chosen.
+  ('id_face_match_threshold', '0.55')
 on conflict (key) do nothing;
 
 -- ---------- roles ----------
@@ -76,6 +126,182 @@ alter table users add column if not exists deactivation_reason text;
 alter table users add column if not exists deactivated_at timestamptz;
 alter table users add column if not exists can_manage_items boolean not null default false;
 alter table users add column if not exists approval_code text;
+
+-- Employment details an admin records when hiring. Both optional, both editable
+-- later — a cafe learns them after the interview: someone starts as "Crew" and is
+-- a Barista a fortnight in, and a start date is often only settled once the first
+-- payroll has been run.
+--
+-- `start_date` is a plain date, not a timestamp: "the day they started" has no
+-- time of day, and storing one only invites a timezone to be interpreted against
+-- it later.
+alter table users add column if not exists position   text;
+alter table users add column if not exists start_date date;
+
+-- First name and surname, kept apart because that is how a cafe refers to the
+-- people it hires — "who is on bar today" — and because a roster sorted by
+-- surname is a different thing from one sorted by full name.
+--
+-- `full_name` stays as the canonical display string rather than being replaced,
+-- so every screen that already shows a name — the staff list, the printed badge
+-- label, the audit log, transaction history — keeps working untouched, and an
+-- account enrolled before these columns existed is not left nameless. The two are
+-- composed on the way in; see api/users.
+--
+-- Both nullable, and both empty on every row that predates this. The staff page
+-- falls back to the stored full_name when either is missing, so nothing renders
+-- blank for an existing account.
+alter table users add column if not exists first_name text;
+alter table users add column if not exists last_name text;
+
+-- ---------- duty face verification ----------
+-- Staff confirm who they are once per duty, at the point where they would
+-- otherwise walk straight into the app. After that they work normally until the
+-- window runs out — this is a gate on entering, not a check on every action.
+--
+-- The reference photo and the face embedding taken from it. Both are `text`,
+-- deliberately: supabase-js returns a `bytea` column in one representation and
+-- PGlite in another, and src/lib/local-db.ts is a hand-written subset of the
+-- PostgREST builder that would then have to know both. Text arrives identically
+-- from both. The cost is ~33% over base64, which is nothing — a 256x256 JPEG at
+-- q0.85 is ~30KB and the embedding ~1.5KB.
+alter table users add column if not exists face_image       text;
+alter table users add column if not exists face_embedding   text;
+alter table users add column if not exists face_enabled     boolean not null default false;
+alter table users add column if not exists face_enrolled_at timestamptz;
+-- Which admin took the picture. Kept apart from the photo because "who put this
+-- face on this account" is the first question when a barista who looks nothing
+-- like the picture cannot get in.
+alter table users add column if not exists face_enrolled_by uuid references users(id) on delete set null;
+
+-- When this person last passed the check. The whole window is one comparison
+-- against this column, so it is on `users` rather than in a table: the history
+-- of individual attempts is already in the hash-chained audit log, and a query
+-- per page load does not want a join to find one timestamp.
+--
+-- Null means never, which always reads as "must verify" — the safe direction for
+-- an account that has a face enrolled.
+alter table users add column if not exists last_face_verified_at timestamptz;
+
+-- ---------- ID verification ----------
+-- When an admin hires someone they photograph the person's government ID and a
+-- photo of the person, and decide whether the two agree. The account cannot be
+-- used until an admin has done that.
+--
+-- Nothing here is automatic. The checks a machine can run — reading the text off
+-- the card, comparing the printed portrait with the photo, spotting an obviously
+-- doctored image — produce *signals* that the admin sees beside the two images.
+-- `verification_status` is only ever moved by a human pressing Approve or Reject.
+-- That is deliberate: a false "verified" is a stranger with a till, and a false
+-- "rejected" is a real hire who cannot work, so the call has to be someone's.
+--
+-- The images are `text`, for the same reason users.face_image is: supabase-js and
+-- PGlite serialise `bytea` differently and src/lib/local-db.ts is a hand-written
+-- subset of the PostgREST builder that would otherwise have to know both.
+--
+-- The cost is real and it is why these columns are never in the users list
+-- query. A front ID plus a back plus a portrait, base64-encoded, is a few hundred
+-- kilobytes per person; USER_COLUMNS is selected on every page load. See
+-- api/users/route.ts.
+alter table users add column if not exists id_doc_front  text;
+alter table users add column if not exists id_doc_back   text;
+alter table users add column if not exists id_photo      text;
+
+-- What kind of ID it is, and the number printed on it. The number is kept because
+-- an admin re-checking a hire months later needs to know which card was seen, and
+-- a cafe verifying its staff is not a regulated KYC process with a retention
+-- schedule — it is a small business keeping a record of who works there.
+alter table users add column if not exists id_doc_type   text;
+alter table users add column if not exists id_doc_number text;
+
+-- A 64-bit perceptual fingerprint of the front of the card, as 16 hex characters.
+--
+-- Compared against every other account's fingerprint to catch one card covering two
+-- people — the reuse that actually happens in a cafe, and the one no format check
+-- or portrait comparison can see. See src/lib/id-verification/card-hash.ts.
+--
+-- A fingerprint, not the image and not anything reversible: 64 bits describing
+-- where the light and dark fall across the card. It cannot be turned back into a
+-- photograph, and the photograph is already in `id_doc_front` next to it.
+alter table users add column if not exists id_card_hash  text;
+
+-- The live step-two ticket for this account, or null.
+--
+-- Staff sign-in is two steps: a password, then a face or an ID card. The ticket
+-- carrying "who is signing in" between them keeps its nonce here, and redeeming
+-- it overwrites this column. That is what makes a ticket single-use across a
+-- restart and across processes, which an in-memory "already spent" set is not.
+-- See src/lib/auth/step2-ticket.ts.
+alter table users add column if not exists step2_nonce text;
+
+-- What the checks read off the document, and what they concluded. Both jsonb:
+-- the shape of a provider's answer is not something to freeze into a migration,
+-- and neither backend needs a column list for them. `id_signals` is the evidence
+-- shown to the admin beside the images — never a bare verdict.
+alter table users add column if not exists id_fields  jsonb;
+alter table users add column if not exists id_signals jsonb;
+
+-- Which provider produced `id_signals`, so an admin looking at a stored result
+-- six months later can tell whether it came from a local check or a vendor call.
+alter table users add column if not exists id_provider text;
+
+-- Added nullable first, then backfilled, then constrained — see below. A plain
+-- `add column not null default` would be one statement and would also be wrong,
+-- because the default would then apply to the very rows being grandfathered.
+alter table users add column if not exists verification_status text;
+
+-- Who was hired, who was rejected, and why.
+--
+-- 'unverified' is the only status a new account starts in. The seeded first-run
+-- accounts are grandfathered to 'verified' below, because they were created by
+-- the setup script rather than by an admin who had an ID in front of them, and
+-- locking the owner out of a fresh install on the first sign-in would make the
+-- app look broken.
+update users set verification_status = 'verified' where verification_status is null;
+
+alter table users alter column verification_status set default 'unverified';
+
+alter table users drop constraint if exists users_verification_status_check;
+alter table users add constraint users_verification_status_check
+  check (verification_status in ('unverified','verified','rejected'));
+
+-- The note an admin gave when rejecting. Kept beside the status rather than only
+-- in the audit log because it is the thing they will want to read first when
+-- someone asks why this account was refused.
+alter table users add column if not exists verification_notes text;
+alter table users add column if not exists verified_at timestamptz;
+alter table users add column if not exists verified_by uuid references users(id) on delete set null;
+
+-- A pending "check this person on their phone instead" handover, for a register
+-- with no camera of its own.
+--
+-- The code is the credential here and nowhere else: it identifies *which* duty
+-- check is being confirmed and proves nothing about *who* is confirming. The
+-- match is against the embedding already enrolled for `user_id`, which the phone
+-- never gets to choose. So a photographed QR, a guessed code and a stranger's
+-- phone all still need the enrolled person's actual face.
+create table if not exists face_challenges (
+  id          uuid primary key default gen_random_uuid(),
+  -- 128 bits of randomness. The QR encodes this and nothing else.
+  code        text unique not null,
+  -- The session that asked, as a hash of its cookie rather than the cookie
+  -- itself: a challenge must die with the session that made it, and a database
+  -- that leaked should not leak a live session token. Same technique as
+  -- tokenKey() in src/lib/rate-limit.ts.
+  session_key text not null,
+  user_id     uuid not null references users(id) on delete cascade,
+  attempts    int not null default 0,
+  created_at  timestamptz not null default now(),
+  expires_at  timestamptz not null,
+  -- Set the moment a face matches. A challenge is single-use: a QR left on a
+  -- till for a shift must not stay good for the next person who photographs it.
+  consumed_at timestamptz
+);
+
+-- Sweeping expired and spent rows walks this; the session lookup uses the other.
+create index if not exists idx_face_challenges_session on face_challenges(session_key);
+create index if not exists idx_face_challenges_live    on face_challenges(expires_at)
+  where consumed_at is null;
 
 -- ---------- categories / locations ----------
 create table if not exists categories (
@@ -144,6 +370,16 @@ alter table items add column if not exists submitted_at timestamptz;
 alter table items add column if not exists reviewed_by uuid references users(id) on delete set null;
 alter table items add column if not exists reviewed_at timestamptz;
 alter table items add column if not exists review_note text;
+
+-- Smart inventory columns (added 2026-10-09).
+alter table items add column if not exists expirable boolean not null default true;
+alter table items add column if not exists par_level numeric(12,3);
+alter table items add column if not exists target_days numeric(12,3);
+
+-- Enforce: a non-expirable item must not carry an expiry date.
+alter table items drop constraint if exists items_expirable_check;
+alter table items add constraint items_expirable_check
+  check (expirable = true or expiration_date is null);
 
 -- Approving a submission or rejecting one is an ordinary item update with two
 -- things a plain UPDATE cannot do: it must refuse to run on an item that is not
@@ -214,7 +450,8 @@ create table if not exists item_change_requests (
   quantity           numeric(12,3) check (quantity is null or quantity >= 0),
   low_stock_threshold numeric(12,3),
   expiration_date    date,
-  correction_reason  text
+  correction_reason  text,
+  unit_price        numeric(12,2)
 );
 
 create or replace function review_change_request(
@@ -258,6 +495,7 @@ begin
            quantity = coalesce(v_req.quantity, quantity),
            low_stock_threshold = coalesce(v_req.low_stock_threshold, low_stock_threshold),
            expiration_date = coalesce(v_req.expiration_date, expiration_date),
+           unit_price = coalesce(v_req.unit_price, unit_price),
            version = version + case when v_req.quantity is not null then 1 else 0 end,
            updated_at = now()
      where id = v_req.item_id
@@ -291,7 +529,8 @@ create table if not exists transaction_items (
   item_name      text not null,
   quantity       numeric(12,3) not null,
   qty_before     numeric(12,3) not null,
-  qty_after      numeric(12,3) not null
+  qty_after      numeric(12,3) not null,
+  expiration_date date
 );
 
 -- ---------- audit trail (hash chained, append-only) ----------
@@ -403,6 +642,38 @@ create index if not exists idx_audit_seq       on audit_log(seq);
 create index if not exists idx_alerts_resolved on alerts(resolved);
 create index if not exists idx_txn_created     on transactions(created_at desc);
 create index if not exists idx_txn_items_txn   on transaction_items(transaction_id);
+
+-- ---------- indexes for the queries the app actually makes ----------
+--
+-- The item list is the busiest query in the app: it runs on every page of the
+-- list, behind the search box on every keystroke, and under the checkout page's
+-- 500-row fetch. These cover what it does that was unindexed.
+--
+-- On the embeds: local-db.ts renders `category:categories(id, name)` as a
+-- correlated subquery, `... where c.id = t.category_id`, which probes
+-- categories' *primary* key once per row. So the embed never needed an index on
+-- the foreign key. These two exist because `?category=` is a real filter
+-- (api/items/route.ts) and because locations and categories are deleted with
+-- `on delete set null`, which has to find their items first — the same reason
+-- idx_items_supplier exists below.
+create index if not exists idx_items_category    on items(category_id);
+create index if not exists idx_items_location    on items(location_id);
+
+-- The default sort for GET /api/items is name, sku. Without this the list
+-- sorted every matching row on every request; with it Postgres walks the index
+-- and only sorts ties.
+create index if not exists idx_items_name        on items(name);
+
+-- `?submitted_by=me` is how a barista sees their own submissions across every
+-- approval state (api/items/route.ts).
+create index if not exists idx_items_submitted_by on items(submitted_by);
+
+-- History and reports both filter transactions by kind and by who moved the
+-- stock; idx_txn_created above covers the date window these combine with. The
+-- staff filter takes a uuid or a display name, so it needs both.
+create index if not exists idx_txn_type        on transactions(type);
+create index if not exists idx_txn_actor_id    on transactions(actor_id);
+create index if not exists idx_txn_actor_name  on transactions(actor_name);
 
 -- ============================================================
 -- FUNCTION: append_audit  (atomic hash-chained append)
@@ -614,6 +885,10 @@ begin
     end if;
 
     if p_type in ('checkout','waste') then
+      if v_row.quantity <= 0 then
+        raise exception 'cannot deduct from % — out of stock (have 0, need %)',
+          v_row.sku, v_req.qty;
+      end if;
       if v_row.quantity < v_req.qty then
         raise exception 'insufficient stock for % (have %, need %)',
           v_row.sku, v_row.quantity, v_req.qty;
@@ -643,9 +918,13 @@ begin
     end if;
 
     insert into transaction_items
-      (transaction_id, item_id, sku, item_name, quantity, qty_before, qty_after)
+      (transaction_id, item_id, sku, item_name, quantity, qty_before, qty_after, expiration_date)
     values
-      (v_txn_id, v_row.id, v_row.sku, v_row.name, v_req.qty, v_row.quantity, v_new_qty);
+      (v_txn_id, v_row.id, v_row.sku, v_row.name, v_req.qty, v_row.quantity, v_new_qty,
+       case
+         when p_type = 'restock' and v_exp is not null then v_exp
+         else v_row.expiration_date
+       end);
 
     v_results := v_results || jsonb_build_object(
       'sku', v_row.sku,
@@ -953,7 +1232,7 @@ begin
         and a.type in ('low_stock','out_of_stock')
     );
 
-  -- open expiry alerts
+  -- open expiry alerts (skip non-expirable items)
   insert into alerts (item_id, type, message)
   select i.id,
          case when i.expiration_date < current_date then 'expired' else 'near_expiry' end,
@@ -963,6 +1242,7 @@ begin
          end
   from items i
   where i.item_status = 'active'
+    and i.expirable = true
     and i.expiration_date is not null
     and i.expiration_date <= current_date + (v_days || ' days')::interval
     and not exists (
@@ -1001,7 +1281,9 @@ begin
      and exists (
        select 1 from items i
        where i.id = a.item_id
-         and (i.expiration_date is null
+         and (i.expirable = false
+              or i.expiration_date is null
+              or i.quantity <= 0
               or i.expiration_date > current_date + (v_days || ' days')::interval)
      );
 end;
@@ -1021,6 +1303,87 @@ alter table audit_log         enable row level security;
 alter table alerts            enable row level security;
 alter table login_attempts    enable row level security;
 alter table settings          enable row level security;
+alter table face_challenges   enable row level security;
+
+-- ============================================================
+-- SMART INVENTORY additions (appended 2026-10-09)
+-- ============================================================
+
+-- ---------- category_defaults ----------
+-- Default physical properties for new items in a category. When a new item is
+-- added under a category that has a row here, the form pre-fills with these
+-- values. One row per category (category_id is the primary key).
+create table if not exists category_defaults (
+  category_id          uuid primary key references categories(id) on delete cascade,
+  default_unit         text,
+  default_physical_form text
+    check (default_physical_form is null
+           or default_physical_form in ('liquid','powder','solid')),
+  default_expirable    boolean not null default true
+);
+
+-- ---------- waste_events ----------
+-- Detailed waste tracking. Each row is one waste event for one item, with the
+-- reason and who recorded it. Separate from the transaction log so waste can
+-- be analysed on its own (e.g. total waste cost per item per week) without
+-- having to filter transactions by type.
+create table if not exists waste_events (
+  id          uuid primary key default gen_random_uuid(),
+  item_id     uuid not null references items(id) on delete cascade,
+  quantity    numeric(12,3) not null check (quantity > 0),
+  reason      text not null,
+  recorded_by uuid references users(id) on delete set null,
+  created_at  timestamptz not null default now()
+);
+
+create index if not exists idx_waste_events_item    on waste_events(item_id);
+create index if not exists idx_waste_events_created on waste_events(created_at desc);
+
+-- RLS on new tables (same pattern as the rest of the schema)
+alter table category_defaults enable row level security;
+alter table waste_events     enable row level security;
 
 -- No policies created = no access for anon/authenticated roles.
 -- The service role bypasses RLS, which is what our API routes use.
+
+-- ============================================================
+-- SUPPLIERS (appended 2026-10-09)
+-- ============================================================
+
+-- ---------- suppliers ----------
+create table if not exists suppliers (
+  id           uuid primary key default gen_random_uuid(),
+  name         text not null,
+  contact_name text,
+  phone        text,
+  email        text,
+  created_at   timestamptz not null default now()
+);
+
+-- Add supplier_id to items (nullable, references suppliers(id) on delete set null)
+alter table items add column if not exists supplier_id uuid references suppliers(id) on delete set null;
+
+-- RLS on new table
+alter table suppliers enable row level security;
+
+-- Index for the foreign key
+create index if not exists idx_items_supplier on items(supplier_id);
+
+-- ============================================================
+-- ACTIVE SESSION TRACKING (FR-16)
+-- ============================================================
+alter table users add column if not exists session_token text;
+create unique index if not exists idx_users_session_token on users(session_token) where session_token is not null;
+-- ============================================================
+-- COST PRICE tracking (appended 2026-10-09)
+-- ============================================================
+alter table items add column if not exists unit_price numeric(12,2);
+alter table item_change_requests add column if not exists unit_price numeric(12,2);
+
+-- The ID-card sign-in lookup reads the staff rows and compares an OCR'd number
+-- against this column. Indexed so that is a lookup rather than a scan as the table
+-- grows; deliberately not unique, because two accounts holding one card is
+-- something an admin resolves on the review screen, not something the database
+-- should refuse outright. See db/migrate.sql for the full reasoning.
+create index if not exists idx_users_id_doc_number on users(id_doc_number)
+  where id_doc_number is not null;

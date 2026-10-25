@@ -1,5 +1,5 @@
 /**
- * CafeTrack browser tests ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â drives the real UI in Chrome.
+ * CafeTrack browser tests — drives the real UI in Chrome.
  *
  *   npm run dev                     (in one terminal)
  *   npm run test:ui                 (in another)
@@ -27,6 +27,16 @@ import { assertTestTarget } from "./_guard.mjs";
 // and localhost is already permitted. Using the IP would log a blocked-request
 // warning and stop the page hydrating.
 const BASE = process.env.BASE_URL || "http://localhost:3100";
+
+/**
+ * The checkout scan field, located by its accessible name.
+ *
+ * See the note in scripts/_usertour.mjs — matching on placeholder copy meant a
+ * routine rewrite of the search field broke both suites at once, and the one
+ * failure that mattered (the scan field stopped reclaiming focus) was buried under
+ * two that just meant "wording changed".
+ */
+const scanFieldOn = (page) => page.getByLabel("Scan an item barcode").first();
 const SHOTS = "ui-screenshots";
 
 let pass = 0;
@@ -108,9 +118,22 @@ async function signInAdmin(page) {
 async function signInStaff(page, token) {
   await page.goto(`${BASE}/login`, { waitUntil: "networkidle" });
   await page.getByRole("button", { name: /staff/i }).click();
-  await page.getByPlaceholder(/barcode/i).first().fill(token);
+  // By aria-label, not by placeholder. The field's placeholder reads "Scan your
+  // staff ID" — aimed at someone holding a scanner, not someone reading a test —
+  // and the wording has already broken this selector once.
+  // Password first, then the code. A scan submits the form immediately — that is
+  // the point of the field, since a scanner sends the code and then Enter — so
+  // filling the code first would post an empty password and fail.
   await page.locator('input[type="password"]').first().fill("staff123");
-  await page.getByRole("button", { name: /^(login|sign in|log in)$/i }).first().click();
+  // `#staff-username`, not a label match. See the note in signInStaff in
+  // scripts/_usertour.mjs — the staff field has never been called "staff barcode
+  // code", and asking for it costs this suite a thirty-second timeout.
+  const codeField = page.locator("#staff-username").first();
+  await codeField.fill(token);
+  // Enter is required. ScanInput holds what was typed as local state and only
+  // hands it up on Enter or the Add button, so filling the field alone submits
+  // nothing.
+  await codeField.press("Enter");
   await page.waitForURL(/dashboard/, { timeout: 15000 });
 }
 
@@ -182,15 +205,15 @@ try {
   await admin.screenshot({ path: `${SHOTS}/05-checkout.png`, fullPage: true });
 
   // The scan field is what a USB scanner types into, and it must hold focus on
-  // its own ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â a barcode gun types and presses Enter with no click at all.
-  const scanField = admin.getByPlaceholder(/scan the item label or type the sku/i).first();
+  // its own — a barcode gun types and presses Enter with no click at all.
+  const scanField = scanFieldOn(admin);
   check("the scan field is present", await scanField.isVisible());
 
   await admin.evaluate(() => document.body.click());
   await admin.waitForTimeout(1000); // past the 800ms refocus interval
   const focusedWithoutClick = await admin.evaluate(() => {
     const el = document.activeElement;
-    return el?.tagName === "INPUT" && /scan the item label or type the sku/i.test(el.placeholder || "");
+    return el?.getAttribute("aria-label") === "Scan an item barcode";
   });
   check("it reclaims focus without being clicked", focusedWithoutClick);
 
@@ -257,7 +280,15 @@ try {
     const r = await fetch("/api/users");
     return (await r.json()).users;
   });
-  const staffUser = (usersRes ?? []).find((u) => u.role === "staff" && u.is_active);
+  // The seeded account specifically, not merely the first active staff member.
+// Every other suite in this repository creates throwaway staff accounts with
+// their own passwords, so "the first active staff user" can be one of those — and
+// signing in with the seed password then fails for reasons that have nothing to
+// do with the UI under test. The seeded name is stable because it comes from
+// src/lib/local-db.ts.
+const staffUser =
+    (usersRes ?? []).find((u) => u.username === "barista1" && u.is_active) ??
+    (usersRes ?? []).find((u) => u.role === "staff" && u.is_active);
   check("an active staff account exists to sign in as", Boolean(staffUser), staffUser?.username ?? "none");
 
   if (staffUser) {
@@ -330,18 +361,16 @@ try {
   /* ================================================================= */
   section("RESPONSIVE - the checkout page on a phone");
   /* ================================================================= */
+  // Borrows the admin's session — see the note on the parity contexts below for
+  // why a second admin login breaks every context that signed in before it.
   const phoneCtx = await browser.newContext({
     viewport: { width: 390, height: 844 },
     isMobile: true,
     hasTouch: true,
+    storageState: await adminCtx.storageState(),
   });
   const phone = await newPage(phoneCtx, "phone");
-  await phone.goto(`${BASE}/login`, { waitUntil: "networkidle" });
-  await phone.getByRole("button", { name: /admin/i }).click();
-  await phone.getByPlaceholder(/username/i).first().fill("admin");
-  await phone.locator('input[type="password"]').first().fill("admin123");
-  await phone.getByRole("button", { name: /^(login|sign in|log in)$/i }).first().click();
-  await phone.waitForURL(/dashboard/, { timeout: 15000 });
+  await phone.goto(`${BASE}/dashboard`, { waitUntil: "networkidle" });
   await phone.waitForTimeout(1500);
   await phone.screenshot({ path: `${SHOTS}/14-phone-dashboard.png`, fullPage: true });
 
@@ -357,14 +386,166 @@ try {
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth
   );
   check("checkout does not overflow at 390px", overflow2 <= 1, `${overflow2}px`);
-  check("the scan field is usable on a phone", await phone.getByPlaceholder(/scan the item label or type the sku/i).first().isVisible());
+  check("the scan field is usable on a phone", await scanFieldOn(phone).isVisible());
   await phoneCtx.close();
+
+  /* ================================================================= */
+  section("RESPONSIVE PARITY — no control that only exists on a phone");
+  /* ================================================================= */
+
+  // Every page renders two layouts: a `lg:hidden` card list and a `hidden
+  // lg:block` table. They are meant to be the same page, so anything a person
+  // can do in one they should be able to do in the other.
+  //
+  // This exists because that was not true and nothing noticed. The item-management
+  // grant and the approval-code control were rendered inside the mobile card
+  // only, so on a desktop an admin had no route to either — the "let staff skip
+  // the approvals queue" feature was entirely unreachable on a laptop, while the
+  // API behind it worked perfectly and every request-level test passed. The
+  // failure was invisible to the whole suite because the API was fine and the
+  // markup was fine; only the two layouts disagreed.
+  //
+  // So: collect the controls a person can actually reach at 390px, and require
+  // each one to be present at 1440px as well. Duplicates are fine and expected —
+  // they are how the two layouts stay in step. A control that exists on only one
+  // is a feature nobody on the other screen can use.
+
+  /*
+   * Both parity contexts borrow the admin's cookies rather than logging in again.
+   *
+   * Signing in as admin three times in one run is what broke this suite. Only one
+   * session per account is valid at a time — by design, FR-16 — so the second
+   * login overwrote `users.session_token` and the original desktop context's
+   * cookie stopped validating. Everything after it failed on 401s, and the
+   * console check then reported those 401s as uncaught JavaScript errors, which
+   * is how a session problem presented as a front-end one.
+   *
+   * `storageState` copies cookies and localStorage without minting a token, so all
+   * three screens are demonstrably the same person rather than three logins.
+   */
+  const parityCtx = await browser.newContext({
+    viewport: { width: 1440, height: 900 },
+    storageState: await adminCtx.storageState(),
+  });
+  const parityDesktop = await newPage(parityCtx, "parity-desktop");
+  await parityDesktop.goto(`${BASE}/dashboard`, { waitUntil: "networkidle" });
+
+  const parityCtxPhone = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    storageState: await adminCtx.storageState(),
+  });
+  const parityPhone = await newPage(parityCtxPhone, "parity-phone");
+  await parityPhone.goto(`${BASE}/dashboard`, { waitUntil: "networkidle" });
+
+  /** Visible, reachable controls on the page, identified by a stable label. */
+  const controlsOn = async (page) =>
+    page.evaluate(() => {
+      const visible = (el) => {
+        const s = getComputedStyle(el);
+        if (s.display === "none" || s.visibility === "hidden") return false;
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+      };
+      const label = (el) => {
+        const aria = el.getAttribute("aria-label");
+        if (aria) return `${el.tagName.toLowerCase()}[aria=${aria}]`;
+        const id = el.getAttribute("id");
+        if (id && el.labels?.[0]) return `${el.tagName.toLowerCase()}[for=${id}]`;
+        const text = (el.innerText || el.value || el.placeholder || "").replace(/\s+/g, " ").trim();
+        return text ? `${el.tagName.toLowerCase()}[${text.slice(0, 40)}]` : "";
+      };
+      return [...document.querySelectorAll("button, input, select, textarea")]
+        .filter(visible)
+        .map(label)
+        .filter(Boolean);
+    });
+
+  // Controls that are legitimately one-breakpoint-only. Kept short on purpose —
+  // every entry is a case where having the control on one screen is the correct
+  // design, not an oversight.
+  //
+  // Where the entry names a `because`, that is not an explanation but a
+  // requirement: the desktop must actually have that control, or the check
+  // fails. An allowlist that takes the assertion's word for it is how a guard
+  // quietly stops guarding, so these are verified rather than trusted.
+  const EXPECTED_MOBILE_ONLY = [
+    {
+      re: /^button\[aria=(Open|Close) menu\]$/,
+      because: null,
+      why: "the sidebar is permanent from lg up, so a drawer toggle has nothing to do",
+    },
+    {
+      // ScanInput renders a small "Add" at every width and a full-width "Add
+      // item" under sm: for thumb-sized tapping.
+      re: /^button\[Add item\]$/,
+      because: /^button\[Add\]$/,
+      why: "a larger tap target; the plain 'Add' must still exist at both widths",
+    },
+  ];
+
+  const PARITY_PAGES = [
+    "/dashboard", "/items", "/checkout", "/alerts", "/reports",
+    "/approvals", "/users", "/settings", "/audit", "/email",
+  ];
+
+  for (const path of PARITY_PAGES) {
+    await parityPhone.goto(`${BASE}${path}`, { waitUntil: "networkidle" });
+    await parityPhone.waitForTimeout(700);
+    const phoneControls = await controlsOn(parityPhone);
+
+    await parityDesktop.goto(`${BASE}${path}`, { waitUntil: "networkidle" });
+    await parityDesktop.waitForTimeout(700);
+    const desktopControls = await controlsOn(parityDesktop);
+
+    // Ignore controls that are legitimately page furniture rather than actions:
+    // the search box and filters are duplicated in both layouts but are matched
+    // by placeholder/aria, and a handful of labelled inputs legitimately differ
+    // in wording between the two. Only *buttons* are compared, because a button
+    // is an action a person is being offered, and those must match.
+    const phoneButtons = phoneControls.filter((c) => c.startsWith("button["));
+    const desktopTexts = new Set(desktopControls);
+
+    // Only a control that is actually absent from the desktop needs an
+    // exemption. An entry matching a button that both layouts share is not a
+    // phone-only control at all, and treating it as one would test its
+    // `because` requirement for no reason.
+    const missing = phoneButtons.filter((c) => !desktopTexts.has(c));
+    const exempted = missing.filter((c) => EXPECTED_MOBILE_ONLY.some((e) => e.re.test(c)));
+    const unaccounted = missing.filter((c) => !EXPECTED_MOBILE_ONLY.some((e) => e.re.test(c)));
+
+    check(
+      `${path} — every phone-only action is also on a desktop`,
+      unaccounted.length === 0,
+      unaccounted.length === 0
+        ? `${phoneButtons.length} phone actions, all present` +
+          (exempted.length ? ` (${exempted.length} known responsive duplicate)` : "")
+        : `missing on desktop: ${unaccounted.slice(0, 4).join(" , ")}`
+    );
+
+    // An exemption is honoured only while its stated requirement holds, so
+    // removing the desktop counterpart fails here instead of passing quietly.
+    for (const c of exempted) {
+      const entry = EXPECTED_MOBILE_ONLY.find((e) => e.re.test(c));
+      if (!entry?.because) continue;
+      const has = [...desktopTexts].some((d) => entry.because.test(d));
+      check(
+        `${path} — the desktop really does have the control behind "${entry.why}"`,
+        has,
+        has ? "present" : "MISSING — the exemption no longer applies"
+      );
+    }
+  }
+
+  await parityCtx.close();
+  await parityCtxPhone.close();
 
   /* ================================================================= */
   section("CLEANUP - leave the database as it was found");
   /* ================================================================= */
+  // `limit` because `/api/items` pages and defaults to 50 rows; the test item is
+  // not on the first page once the database has any history behind it. Same bug
+  // the tour had — see its cleanup section.
   const del = await admin.evaluate(async (name) => {
-    const list = await (await fetch("/api/items")).json();
+    const list = await (await fetch("/api/items?limit=500")).json();
     const hit = (list.items ?? []).find((i) => i.name === name);
     if (!hit) return "not found";
     const r = await fetch(`/api/items/${hit.id}`, { method: "DELETE" });

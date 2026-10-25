@@ -7,6 +7,7 @@ import {
   setSessionCookie,
 } from "@/lib/auth";
 import { getSessionMinutes } from "@/lib/settings";
+import { getFaceStatus } from "@/lib/face-gate";
 
 export const runtime = "nodejs";
 
@@ -26,5 +27,20 @@ export const GET = handler(async () => {
     await setSessionCookie(await signSession(session, minutes), minutes);
   }
 
-  return ok({ user: session, sessionMinutes: minutes });
+  /*
+   * Whether this person still owes a face check, read fresh from the database.
+   *
+   * This is already polled on every route change and every activity ping, which
+   * is why it belongs here rather than behind its own request: by the time a
+   * nine-hour duty window runs out mid-shift, the next ping is what discovers it,
+   * and a screen that had to ask separately would either be a stale guess or a
+   * second poll for a number the browser is already fetching.
+   *
+   * See lib/face-gate.ts for why this is a database read rather than a field on
+   * the session. Admins always get required: false without the query mattering —
+   * it short-circuits inside verificationRequired.
+   */
+  const face = await getFaceStatus(session.id, session.role);
+
+  return ok({ user: session, sessionMinutes: minutes, face });
 });

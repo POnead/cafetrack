@@ -2,7 +2,7 @@ import { db } from "@/lib/supabase";
 import { handler, ok, fail, readBody } from "@/lib/api";
 import { requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
-import { queueDirectEmail } from "@/lib/email";
+import { queueDirectEmail, dispatchSoon } from "@/lib/email";
 
 export const runtime = "nodejs";
 
@@ -133,6 +133,15 @@ export const POST = handler(async (req: Request) => {
   } catch (e: any) {
     return fail(e.message || "Could not queue the report email", 400);
   }
+
+  // Queueing is not sending. Without this the report sat in the queue until
+  // something else happened to dispatch it — up to ten minutes later on the
+  // scheduler, or not at all if the scheduler was disabled — so pressing "Email
+  // this report" and then waiting at the inbox was the only way to tell whether
+  // it had worked. Fired without awaiting: a slow mail server must not hold the
+  // response open, and a failure to send is reported in the delivery log either
+  // way.
+  dispatchSoon();
 
   await audit(
     session,

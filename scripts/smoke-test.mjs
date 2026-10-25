@@ -293,13 +293,25 @@ async function main() {
   res = await call("DELETE", `/api/items/${newItem?.id}`);
   check("DELETE /api/items/:id", res.status === 200, `got ${res.status}`);
 
+  // A deactivation without a reason is refused. The reason is what the person
+  // sees when their barcode stops working, and it is the only record of why an
+  // account went dead, so the route takes it as mandatory rather than advisory.
+  res = await call("PATCH", `/api/users/${staffUser?.id}`, { is_active: false });
+  check(
+    "deactivating without a reason is refused",
+    res.status === 400,
+    `got ${res.status}`
+  );
+
   res = await call("PATCH", `/api/users/${staffUser?.id}`, {
     is_active: false,
+    deactivation_reason: "Replaced by a new hire",
     regenerate_token: true,
   });
   check(
     "deactivate + rotate the test account",
-    res.status === 200 && res.data?.user?.is_active === false
+    res.status === 200 && res.data?.user?.is_active === false,
+    `got ${res.status} ${res.data?.error ?? ""}`
   );
 
   section("deactivation reason reaches the sign-in screen");
@@ -311,11 +323,34 @@ async function main() {
     rotatedToken || ""
   );
 
+  // Re-activation now demands the admin's own password. Checked without one
+  // first: a dialog that the route does not enforce is not a control, and this
+  // is the assertion that says so.
   res = await call("PATCH", `/api/users/${staffUser?.id}`, { is_active: true });
+  check(
+    "re-activating without the admin password is refused",
+    res.status === 400,
+    `got ${res.status}`
+  );
+
+  res = await call("PATCH", `/api/users/${staffUser?.id}`, {
+    is_active: true,
+    confirm_password: "definitely-not-the-password",
+  });
+  check(
+    "re-activating with the wrong password is refused",
+    res.status === 401,
+    `got ${res.status}`
+  );
+
+  res = await call("PATCH", `/api/users/${staffUser?.id}`, {
+    is_active: true,
+    confirm_password: ADMIN.password,
+  });
   check(
     "re-activate the test account",
     res.status === 200 && res.data?.user?.is_active === true,
-    `got ${res.status}`
+    `got ${res.status} ${res.data?.error ?? ""}`
   );
 
   res = await call("PATCH", `/api/users/${staffUser?.id}`, {
@@ -364,7 +399,10 @@ async function main() {
     `${res.status} ${res.data?.error ?? ""}`
   );
 
-  res = await call("PATCH", `/api/users/${staffUser?.id}`, { is_active: true });
+  res = await call("PATCH", `/api/users/${staffUser?.id}`, {
+    is_active: true,
+    confirm_password: ADMIN.password,
+  });
   check(
     "re-activating clears the stored reason",
     res.status === 200 &&
@@ -385,11 +423,17 @@ async function main() {
   cookie = adminCookie;
 
   // Park the test account the way the suite found it: inactive, token rotated.
+  // Carries a reason because the route now requires one.
   res = await call("PATCH", `/api/users/${staffUser?.id}`, {
     is_active: false,
+    deactivation_reason: "Replaced by a new hire",
     regenerate_token: true,
   });
-  check("test account parked inactive again", res.status === 200 && res.data?.user?.is_active === false);
+  check(
+    "test account parked inactive again",
+    res.status === 200 && res.data?.user?.is_active === false,
+    `got ${res.status} ${res.data?.error ?? ""}`
+  );
 
   res = await call("GET", `/api/items/lookup?code=${encodeURIComponent(newItem?.sku ?? "x")}`);
   check("deleted item no longer resolves -> 404", res.status === 404);

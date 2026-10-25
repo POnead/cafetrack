@@ -1,11 +1,11 @@
-/**
- * CafeTrack full user tour â€” the whole application the way a person uses it.
+﻿/**
+ * CafeTrack full user tour — the whole application the way a person uses it.
  *
  *   npm run dev                     (in one terminal)
  *   npm run test:tour               (in another)
  *
  * _journeys.mjs proves whole stories over HTTP. This one drives the *entire*
- * site in a real browser, in the order a cafÃ© actually works: sign in, take
+ * site in a real browser, in the order a café actually works: sign in, take
  * the day's movements at the till, restock a delivery, spoil something, chase
  * the alerts that fall out of it, read the report, onboard a hire, and close
  * the day. Every step clicks and types what a person would; the API is only
@@ -40,6 +40,26 @@ import { assertTestTarget } from "./_guard.mjs";
 const BASE = process.env.BASE_URL || "http://localhost:3100";
 const SHOTS = "ui-screenshots";
 const PREFIX = "tour-";
+
+/**
+ * The checkout scan field.
+ *
+ * Located by its **accessible name**, not its placeholder, and that is the whole
+ * point of this helper existing.
+ *
+ * The old wording matched `/scan the item label or type the sku/i` against the
+ * placeholder. When the checkout search was rewritten — legitimately, it gained a
+ * results dropdown and a clear button — the placeholder became "Scan barcode or
+ * type item name..." and every assertion here failed at once. Three failures that
+ * all said "the scan field is missing" when the scan field was on screen the entire
+ * time, hiding the one that mattered: the rewrite had also dropped the
+ * self-refocusing that lets a USB scanner work without a click, which is a
+ * genuine regression this suite was correctly reporting.
+ *
+ * So the locator is on `aria-label`, which is the field's name for assistive
+ * technology anyway, and which no copy edit should be able to break.
+ */
+const scanFieldOn = (page) => page.getByLabel("Scan an item barcode").first();
 
 let pass = 0;
 let fail = 0;
@@ -147,12 +167,34 @@ async function signInAdmin(page) {
   await page.waitForURL(/dashboard/, { timeout: 20000 });
 }
 
+/**
+ * Sign in by barcode, the way a member of staff actually does it.
+ *
+ * Password first, then the code, then Enter. All three matter:
+ *
+ *   - the field is selected by aria-label, not by placeholder. The placeholder
+ *     reads "Scan your staff ID" and has already broken this selector once.
+ *   - the password is filled first because sending the code submits the form
+ *     immediately — that is the point of the field, since a scanner types the
+ *     code and then Enter. Filling the code first posts an empty password.
+ *   - Enter is pressed rather than clicking the button, because ScanInput keeps
+ *     what was typed as local state and only hands it up on Enter or Add. Filling
+ *     the field alone submits nothing.
+ */
 async function signInStaff(page, token, password = "staff123") {
   await page.goto(`${BASE}/login`, { waitUntil: "networkidle" });
   await page.getByRole("button", { name: /^staff$/i }).click();
-  await page.getByPlaceholder(/barcode/i).first().fill(token);
   await page.locator('input[type="password"]').first().fill(password);
-  await page.getByRole("button", { name: /^login$/i }).first().click();
+  /*
+   * Located by id, not by label text. This asked for /staff barcode code/i, which
+   * no field has ever been called — the staff form's field is `#staff-username`
+   * under the label "Username or scan barcode", because it accepts either. Every
+   * sign-in in this suite then sat for thirty seconds on a field that was on screen
+   * the whole time.
+   */
+  const codeField = page.locator("#staff-username").first();
+  await codeField.fill(token);
+  await codeField.press("Enter");
   await page.waitForURL(/dashboard/, { timeout: 20000 });
 }
 
@@ -497,7 +539,7 @@ try {
   await admin.goto(`${BASE}/checkout`, { waitUntil: "networkidle" });
   await settled(admin, 800);
 
-  const scanField = admin.getByPlaceholder(/scan the item label or type the sku/i).first();
+  const scanField = scanFieldOn(admin);
   check("the scan field is present", await scanField.isVisible());
 
   // A USB scanner types and presses Enter with no click at all, so the field
@@ -508,7 +550,7 @@ try {
     "the scan field reclaims focus without being clicked",
     await admin.evaluate(() => {
       const el = document.activeElement;
-      return el?.tagName === "INPUT" && /scan the item label or type the sku/i.test(el.placeholder || "");
+      return el?.getAttribute("aria-label") === "Scan an item barcode";
     })
   );
 
@@ -521,8 +563,39 @@ try {
   await scanField.pressSequentially(sku, { delay: 10 });
   await scanField.press("Enter");
   await admin.waitForTimeout(1400);
-  const cartText = await admin.getByText(/this transaction/i).first().isVisible();
-  check("the cart shows a transaction summary", cartText);
+  /*
+   * The summary must reflect *two of the same thing* as one line, not two.
+   *
+   * That distinction is why this is not a "some text is visible" check: a cart
+   * that appends a duplicate row instead of incrementing a quantity is wrong in a
+   * way an operator cannot see without doing the arithmetic by hand. This is what
+   * the assertion originally tried to catch — by looking for a heading that no
+   * longer exists, so it had quietly stopped catching it at all.
+   */
+  const summaryText = await admin
+    .locator("text=Total qty")
+    .first()
+    .locator("..")
+    .innerText()
+    .catch(() => "");
+
+  const linesText = await admin
+    .locator("text=Lines")
+    .first()
+    .locator("..")
+    .innerText()
+    .catch(() => "");
+
+  check(
+    "the cart summary shows one line",
+    /\b1\b/.test(linesText),
+    linesText.replace(/\s+/g, " ").trim()
+  );
+  check(
+    "and a total quantity of two",
+    /\b2\b/.test(summaryText),
+    summaryText.replace(/\s+/g, " ").trim()
+  );
 
   // A damaged label that is not an item must not clear the cart.
   await admin.evaluate(() => document.body.click());
@@ -574,7 +647,7 @@ try {
   // Switching movement type must clear the cart: one transaction is one
   // movement type, and mixing them silently would corrupt the stock ledger.
   // Something has to be in the cart first, or there is nothing to clear.
-  const cartFirst = admin.getByPlaceholder(/scan the item label or type the sku/i).first();
+  const cartFirst = scanFieldOn(admin);
   await cartFirst.pressSequentially(sku, { delay: 10 });
   await cartFirst.press("Enter");
   await admin.waitForTimeout(1500);
@@ -591,7 +664,7 @@ try {
   // The cart renders twice — a mobile card and a desktop table — so the same
   // control exists twice and the hidden copy is first in the DOM. Every
   // selector below is `:visible` so it lands on the one a person can use.
-  const restockScan = admin.getByPlaceholder(/scan the item label or type the sku/i).first();
+  const restockScan = scanFieldOn(admin);
   await restockScan.pressSequentially(sku, { delay: 10 });
   await restockScan.press("Enter");
   await admin.waitForTimeout(1500);
@@ -643,7 +716,7 @@ try {
     (await admin.getByText(/box.*added/i).first().innerText().catch(() => "")).trim()
   );
 
-  // Three boxes of twelve is thirty-six â€” the arithmetic the database owns.
+  // Three boxes of twelve is thirty-six — the arithmetic the database owns.
   // The quantity input carries no id, so it is found by the row it sits in.
   await admin
     .locator("tr", { hasText: ITEM })
@@ -723,7 +796,7 @@ try {
   // database could not convert one and would reject the whole transaction.
   await admin.getByRole("button", { name: /checkout/i }).first().click();
   await admin.waitForTimeout(900);
-  const looseScan = admin.getByPlaceholder(/scan the item label or type the sku/i).first();
+  const looseScan = scanFieldOn(admin);
   await admin.getByRole("button", { name: /^restock/i }).first().click();
   await admin.waitForTimeout(900);
   await looseScan.pressSequentially(looseSku, { delay: 10 });
@@ -758,7 +831,7 @@ try {
     (await admin.getByText(/logging waste/i).count()) > 0
   );
 
-  const wasteScan = admin.getByPlaceholder(/scan the item label or type the sku/i).first();
+  const wasteScan = scanFieldOn(admin);
   await wasteScan.pressSequentially(sku, { delay: 10 });
   await wasteScan.press("Enter");
   await admin.waitForTimeout(1500);
@@ -787,7 +860,15 @@ try {
   const looseRow = admin.locator("tr", { hasText: LOOSE }).filter({ visible: true }).first();
   await looseRow.getByRole("button", { name: /^edit$/i }).first().click();
   await admin.waitForTimeout(900);
-  check("an item can be opened for editing", await admin.getByText(new RegExp(`Edit — ${LOOSE}`, "i")).count() > 0);
+  // The dash is matched loosely on purpose. This used to spell out a literal
+  // em-dash, and the file had been through a Windows-1252 round-trip at some point
+  // that turned it into three characters (`—`). The test then failed against a
+  // page rendering exactly the right heading, and the failure read as "editing is
+  // broken" rather than "a string literal got mangled". See scripts/_mojibake.mjs.
+  check(
+    "an item can be opened for editing",
+    await admin.getByText(new RegExp(`Edit\\s*[-\u2010-\u2015]\\s*${LOOSE}`, "i")).count() > 0
+  );
 
   const editModal = admin
     .locator("div.fixed")
@@ -807,7 +888,7 @@ try {
   // exact situation the warning exists for.
   await admin.goto(`${BASE}/checkout`, { waitUntil: "networkidle" });
   await settled(admin, 800);
-  const noticeScan = admin.getByPlaceholder(/scan the item label or type the sku/i).first();
+  const noticeScan = scanFieldOn(admin);
   await noticeScan.pressSequentially(looseSku, { delay: 10 });
   await noticeScan.press("Enter");
   await admin.waitForTimeout(1600);
@@ -837,7 +918,7 @@ try {
   check("the loose item was drawn down to zero", (await stockOf(admin, looseSku)) === 0, `now ${await stockOf(admin, looseSku)}`);
 
   await admin.waitForTimeout(600);
-  const emptyScan = admin.getByPlaceholder(/scan the item label or type the sku/i).first();
+  const emptyScan = scanFieldOn(admin);
   await emptyScan.pressSequentially(looseSku, { delay: 10 });
   await emptyScan.press("Enter");
   await admin.waitForTimeout(1600);
@@ -923,7 +1004,10 @@ try {
 
   await admin.getByRole("button", { name: /add account/i }).first().click();
   await admin.waitForTimeout(700);
-  await admin.locator("#u-name").fill("Tour Hire");
+  // Two fields, not one. The form used to have a single `#u-name`; it was split
+  // into first and last when staff records started carrying the two separately.
+  await admin.locator("#u-first").fill("Tour");
+  await admin.locator("#u-last").fill("Hire");
   await admin.locator("#u-username").fill(HIRE);
   await admin.locator("#u-password").fill("tourpass123");
   await admin.getByRole("button", { name: /create account/i }).last().click();
@@ -935,7 +1019,25 @@ try {
   // before anything else on the page can be clicked.
   const labelDialog = admin.locator("div.fixed").filter({ hasText: /print this label/i }).first();
   check("the new hire's barcode label is shown straight away", await labelDialog.isVisible());
-  check("it shows the code the hire will scan", (await labelDialog.getByText(HIRE).count()) > 0);
+  /*
+   * Assert on the barcode itself, not on the username.
+   *
+   * What the hire needs from this dialog is the *code* — the thing a scanner
+   * reads off the printed label. Checking for the username was checking for
+   * something the label does not carry: it shows the holder's name and a scannable
+   * `CT-STF-…` code. So the assertion now looks for the code element and the
+   * barcode graphic, which is what would actually be useless to a hire if missing.
+   */
+  const printedCode = labelDialog.locator("code").first();
+  check(
+    "it shows the code the hire will scan",
+    /CT-STF-[A-Z0-9]+/i.test(await printedCode.innerText().catch(() => "")),
+    (await printedCode.innerText().catch(() => "<no code element>")).trim()
+  );
+  check(
+    "and a scannable barcode graphic",
+    (await labelDialog.locator('svg[role="img"][aria-label*="arcode"]').count()) > 0
+  );
   await admin.screenshot({ path: `${SHOTS}/${PREFIX}16a-barcode-label.png` });
   await labelDialog.getByRole("button", { name: /^close$/i }).click();
   await admin.waitForTimeout(700);
@@ -970,12 +1072,20 @@ try {
   await admin.getByPlaceholder(/search name or username/i).first().fill("");
   await admin.waitForTimeout(900);
 
-  // Deactivation asks for a reason, and that reason is what the account
-  // holder is shown at sign-in.
-  // Accounts are rendered as table rows (plus a mobile card copy), so the row
-  // is found by its username rather than by list item.
+  /*
+   * "Deactivate" is no longer a button in the table row. Every action on an
+   * account lives in a details panel the row opens via a "View" button, so the
+   * tour has to open it first. Clicking the row does nothing: the handler is on
+   * the button, not on the `<tr>`.
+   */
   const hireRow = admin.locator("tr", { hasText: HIRE }).filter({ visible: true }).first();
-  await hireRow.getByRole("button", { name: /^deactivate$/i }).first().click();
+  await hireRow.getByRole("button", { name: /^view$/i }).first().click();
+  await admin.waitForTimeout(900);
+
+  const detailsPanel = admin.locator("div.fixed").filter({ hasText: /Print this label/i }).first();
+  check("the account opens a details panel", await detailsPanel.isVisible());
+
+  await detailsPanel.getByRole("button", { name: /^deactivate$/i }).first().click();
   await admin.waitForTimeout(800);
   await admin.locator("#deactivation-reason").fill("Tour ended, replaced by a new hire");
   await admin.getByRole("button", { name: /deactivate account/i }).last().click();
@@ -988,9 +1098,16 @@ try {
     const dead = await newPage(deadCtx, "deactivated");
     await dead.goto(`${BASE}/login`, { waitUntil: "networkidle" });
     await dead.getByRole("button", { name: /^staff$/i }).click();
-    await dead.getByPlaceholder(/barcode/i).first().fill(hire.qr_token);
+    // Same order as signInStaff: password, then code, then Enter. The code
+    // submitting immediately is what lets the deactivation panel appear — which
+    // is exactly what this check is looking for.
     await dead.locator('input[type="password"]').first().fill("tourpass123");
-    await dead.getByRole("button", { name: /^login$/i }).first().click();
+    // Same field as signInStaff uses, and for the same reason — see the note
+    // there. This one had its own copy of the old selector, which is why fixing
+    // the helper did not fix this call site.
+    const deadCode = dead.locator("#staff-username").first();
+    await deadCode.fill(hire.qr_token);
+    await deadCode.press("Enter");
     await dead.waitForTimeout(2000);
     check(
       "the deactivated hire is refused at sign-in",
@@ -1122,13 +1239,30 @@ try {
   /* ================================================================= */
   section("RESPONSIVE - the new restock controls on a phone");
   /* ================================================================= */
+  /*
+   * The phone borrows the admin's cookies rather than signing in again.
+   *
+   * It used to call `signInAdmin(phone)`, and that silently killed every
+   * assertion in the cleanup section. `getSession` treats a login elsewhere as
+   * superseding the old token — one active session per account, which is FR-16
+   * and is deliberate — so the second admin login overwrote `users.session_token`
+   * and the desktop admin's cookie stopped validating. Nothing said so. The
+   * cleanup then reported "not found" for its items, its reference rows and its
+   * test hire, "settings unchanged" because every PATCH was a 401, and a broken
+   * audit chain because it could not read itself: six failures, one cause.
+   *
+   * `storageState` carries cookies and localStorage across without minting a new
+   * token, which is the whole point — the phone is the same person on a smaller
+   * screen, not a second person.
+   */
   const phoneCtx = await browser.newContext({
     viewport: { width: 390, height: 844 },
     isMobile: true,
     hasTouch: true,
+    storageState: await adminCtx.storageState(),
   });
   const phone = await newPage(phoneCtx, "phone");
-  await signInAdmin(phone);
+  await phone.goto(`${BASE}/dashboard`, { waitUntil: "networkidle" });
   await settled(phone, 800);
 
   const overflowAt = async (p) =>
@@ -1140,7 +1274,7 @@ try {
   await settled(phone, 800);
   await phone.getByRole("button", { name: /^restock/i }).first().click();
   await phone.waitForTimeout(900);
-  const phoneScan = phone.getByPlaceholder(/scan the item label or type the sku/i).first();
+  const phoneScan = scanFieldOn(phone);
   await phoneScan.pressSequentially(sku, { delay: 10 });
   await phoneScan.press("Enter");
   await phone.waitForTimeout(1600);
@@ -1155,11 +1289,40 @@ try {
 
   /* ================================================================= */
   section("CLEANUP - leave the database as it was found");
+
+  /*
+   * Asserted rather than assumed. Everything below this line needs the admin
+   * session: it deletes the tour's items, its reference rows, parks its hire and
+   * restores every setting it touched. When that session has gone, each of those
+   * fails in a way that looks like its own problem — items "not found", settings
+   * "undefined", an audit chain that reports itself broken because it could not
+   * read itself — and the real cause appears nowhere in the output.
+   *
+   * It died here because the phone context signed in as admin a second time, and
+   * a second login supersedes the first by design. See the note on storageState
+   * in the responsive section.
+   */
+  const sessionAtCleanup = await admin
+    .evaluate(async () => (await fetch("/api/auth/me")).status)
+    .catch((e) => `threw: ${e.message}`);
+  check("the admin session survived the whole tour", sessionAtCleanup === 200, String(sessionAtCleanup));
+
   /* ================================================================= */
-  const removed = await admin.evaluate(async (names) => {
+  /*
+   * `limit` on every read below, and that is a fix rather than a precaution.
+   *
+   * These endpoints page, and default to 50 rows. The tour creates its test
+   * records after a database that may already hold more than that, sorts by name,
+   * and then looks for one specific item in the first page — where it is not.
+   * Every cleanup step therefore reported "not found", left its record behind, and
+   * the run started again with more litter each time.
+   */
+  const ALL = 500;
+
+  const removed = await admin.evaluate(async ({ names, limit }) => {
     const out = [];
     for (const n of names) {
-      const list = await (await fetch("/api/items")).json();
+      const list = await (await fetch(`/api/items?limit=${limit}`)).json();
       const hit = (list.items ?? []).find((i) => i.name === n);
       if (!hit) {
         out.push(`${n}: not found`);
@@ -1169,7 +1332,7 @@ try {
       out.push(`${n}: ${r.status}`);
     }
     return out;
-  }, [ITEM, LOOSE]);
+  }, { names: [ITEM, LOOSE], limit: ALL });
   check(
     "the two test ingredients were removed",
     removed.every((r) => r.endsWith("200")),
@@ -1180,12 +1343,13 @@ try {
   // hire is parked inactive, which is the resting state a test account wants.
   const refs = await admin.evaluate(async ({ loc, cat }) => {
     const out = [];
+
     const ls = await (await fetch("/api/refs/locations")).json();
     const l = (ls.items ?? []).find((x) => x.name === loc);
     out.push(
       l
         ? `location: ${(await fetch(`/api/refs/locations/${l.id}`, { method: "DELETE" })).status}`
-        : "location: not found"
+        : `location: not found (looking for "${loc}", saw ${(ls.items ?? []).length})`
     );
 
     const cs = await (await fetch("/api/refs/categories")).json();
@@ -1193,7 +1357,7 @@ try {
     out.push(
       c
         ? `category: ${(await fetch(`/api/refs/categories/${c.id}`, { method: "DELETE" })).status}`
-        : "category: not found"
+        : `category: not found (looking for "${cat}", saw ${(cs.items ?? []).length})`
     );
     return out;
   }, { loc: LOCATION, cat: CATEGORY });
@@ -1206,15 +1370,40 @@ try {
   const parked = await admin.evaluate(async (u) => {
     const list = await (await fetch("/api/users")).json();
     const hit = (list.users ?? []).find((x) => x.username === u);
-    if (!hit) return "not found";
+    if (!hit) {
+      return `not found (looking for "${u}", saw ${(list.users ?? []).length}: ${(list.users ?? [])
+        .map((x) => x.username)
+        .slice(0, 10)
+        .join(" / ")})`;
+    }
+
+    /*
+     * Only deactivate if it is not already off.
+     *
+     * The tour deactivated this hire earlier to test that the reason is shown at
+     * sign-in, so by cleanup time the desired end state already holds. Sending the
+     * PATCH anyway returned 400 — the route requires a deactivation reason, and
+     * the cleanup supplied none — and the check reported a failure for an account
+     * that was in exactly the state it wanted.
+     */
+    if (hit.is_active === false) return "already inactive";
+
     const r = await fetch(`/api/users/${hit.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ is_active: false, regenerate_token: true }),
+      body: JSON.stringify({
+        is_active: false,
+        deactivation_reason: "Created by the user tour",
+        regenerate_token: true,
+      }),
     });
     return String(r.status);
   }, HIRE);
-  check("the test hire was parked inactive", parked === "200", parked);
+  check(
+    "the test hire was parked inactive",
+    parked === "200" || parked === "already inactive",
+    parked
+  );
 
   // Settings must be back where they started, or the next run measures drift.
   const restored = await admin.evaluate(async (before) => {
@@ -1227,11 +1416,17 @@ try {
       });
     }
     const after = (await (await fetch("/api/settings")).json()).settings ?? {};
-    return Object.entries(before)
+    const drift = Object.entries(before)
       .filter(([, v]) => v !== null && v !== undefined)
-      .every(([k, v]) => String(after[k]) === String(v));
+      .filter(([k, v]) => String(after[k]) !== String(v))
+      .map(([k, v]) => `${k}: was ${JSON.stringify(v)}, now ${JSON.stringify(after[k])}`);
+    return drift;
   }, originalSettings);
-  check("the settings this tour read are unchanged", restored);
+  check(
+    "the settings this tour read are unchanged",
+    Array.isArray(restored) && restored.length === 0,
+    Array.isArray(restored) ? restored.slice(0, 4).join("; ") : String(restored)
+  );
 
   const chain = await admin.evaluate(async () => {
     const d = await (await fetch("/api/audit/verify")).json();

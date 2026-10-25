@@ -1,6 +1,8 @@
 ﻿"use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState, useRef } from "react";
+
+import { useScanFocus } from "@/lib/use-scan-focus";
 
 /**
  * Keyboard-wedge scanner input.
@@ -12,12 +14,20 @@ import { useEffect, useRef, useState } from "react";
  */
 export function ScanInput({
   onScan,
+  onChange,
   placeholder = "Scan or type code, then press Enter",
   label = "Barcode scanner",
   disabled = false,
   autoFocus = true,
 }: {
   onScan: (code: string) => void;
+  /**
+   * Fires on every keystroke so the parent's state stays in sync with what the
+   * user has typed. Without this, typing into the field and then clicking a
+   * submit button elsewhere on the form sends an empty string — the parent never
+   * saw the value because onScan only fires on Enter/Add.
+   */
+  onChange?: (value: string) => void;
   placeholder?: string;
   /**
    * The accessible name. A placeholder disappears as soon as anything is typed
@@ -33,22 +43,10 @@ export function ScanInput({
   const [lastScanAt, setLastScanAt] = useState<number>(0);
   const ref = useRef<HTMLInputElement>(null);
 
-  // Keep focus on the scan field unless the user is typing somewhere else.
-  useEffect(() => {
-    if (!autoFocus || disabled) return;
-
-    const refocus = () => {
-      const el = document.activeElement as HTMLElement | null;
-      if (!el) return;
-      const tag = el.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-      if (el.isContentEditable) return;
-      ref.current?.focus();
-    };
-
-    const t = setInterval(refocus, 800);
-    return () => clearInterval(t);
-  }, [autoFocus, disabled]);
+  // Shared with the inline search field on the checkout page, which lost this
+  // behaviour once when it stopped being built from this component. See
+  // src/lib/use-scan-focus.ts.
+  useScanFocus(ref, autoFocus && !disabled);
 
   const submit = () => {
     const code = value.trim();
@@ -71,7 +69,10 @@ export function ScanInput({
         autoCapitalize="characters"
         spellCheck={false}
         placeholder={placeholder}
-        onChange={(e) => setValue(e.target.value)}
+        onChange={(e) => {
+          setValue(e.target.value);
+          onChange?.(e.target.value);
+        }}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
             e.preventDefault();

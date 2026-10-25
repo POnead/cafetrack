@@ -115,6 +115,40 @@ body {
   }
 }
 
+/*
+ * Suppress the browser's native password-reveal button, keeping any password
+ * field's own.
+ *
+ * Chromium draws one inside password fields as soon as you type or focus them,
+ * and drops it again when you look away — a control appearing and vanishing on
+ * its own, right next to a deliberate reveal that never moves. These pseudo-
+ * elements are the handles for it.
+ *
+ * Deliberately unlayered, outside `@layer components`. Tailwind's utilities live
+ * in a cascade layer, and anything inside one loses to the unlayered user-agent
+ * stylesheet no matter how specific the selector is — placed in there, this rule
+ * was computed and ignored.
+ *
+ * Edge's equivalent is `::-ms-reveal` and is NOT here: it is Edge-only, so the
+ * pipeline discards the selector outright. It is in an inline <style> in
+ * layout.tsx, which does not go through PostCSS.
+ *
+ * `!important` because the button is styled by the user-agent sheet and does not
+ * yield to a plain declaration. Password saving and autofill are untouched —
+ * this removes only the chrome the browser draws over the field.
+ */
+input[type="password"]::-webkit-textfield-decoration-container,
+input[type="password"]::-webkit-textfield-decoration,
+input[type="password"]::-webkit-credentials-auto-fill-button,
+input[type="password"]::-webkit-contacts-auto-fill-button,
+input[type="password"]::-webkit-clear-button,
+input[type="password"]::-webkit-inner-spin-button,
+input[type="password"]::-webkit-outer-spin-button {
+  display: none !important;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
 /* Custom scrollbar so the warm theme carries into scroll areas */
 ::-webkit-scrollbar {
   width: 10px;

@@ -110,7 +110,11 @@ async function expiryOf(sku, cookie) {
 (async () => {
   await assertTestTarget(BASE);
   console.log(`CafeTrack user journeys against ${BASE}\n`);
-  const A = await signInAdmin();
+  /*
+   * Mutable, because JOURNEY 5 signs in again and has to rebind it. See the note
+   * at the end of that journey.
+   */
+  let A = await signInAdmin();
   check("admin signed in", Boolean(A));
   if (!A) {
     console.error("Cannot continue without an admin session.");
@@ -725,6 +729,19 @@ async function expiryOf(sku, cookie) {
   r = await call("GET", "/api/auth/me", undefined, cookieOf(shortSession));
   check("the short session still authenticates", r.status === 200, `${r.status}`);
 
+  /*
+   * Rebind to the short session *before* the next call.
+   *
+   * CafeTrack keeps one live session per account (FR-16): signing in writes
+   * users.session_token, and any older cookie for that account is then refused.
+   * The sign-in above therefore killed the session this suite has been holding
+   * since it started, so without this line every call from here to the end of the
+   * file answered 401 — settings, refs, item cleanup, the user cleanup and the
+   * audit check — which reads as a cascade of unrelated failures rather than as
+   * one superseded cookie.
+   */
+  A = cookieOf(shortSession);
+
   r = await call("PATCH", "/api/settings", { session_timeout_minutes: "5000" }, A);
   check("an out-of-range timeout is rejected", r.status === 400, `${r.status} ${r.data?.error ?? ""}`);
 
@@ -735,6 +752,17 @@ async function expiryOf(sku, cookie) {
     r.data?.settings?.session_timeout_minutes === "15",
     r.data?.settings?.session_timeout_minutes ?? "?"
   );
+
+  /*
+   * And take a fresh one now the timeout is back to fifteen.
+   *
+   * The cookie rebound above still carries Max-Age=300 from the moment it was
+   * issued, and the rest of this file can outlast five minutes on a cold dev
+   * server — which would turn the very session bug being fixed here into a
+   * timeout halfway through the cleanup.
+   */
+  A = await signInAdmin();
+  check("the admin session was renewed after the short sign-in", Boolean(A));
 
   /* ================================================================= */
   section("JOURNEY 6 - the guardrails around shared reference data");
@@ -796,10 +824,11 @@ async function expiryOf(sku, cookie) {
   // This account was switched off in journey 1, so it has to come back on
   // before it can be parked off again. Ending on is_active: false is what
   // leaves the database as found.
-  r = await call("PATCH", `/api/users/${newHire.id}`, { is_active: true }, A);
-  check("the hire was re-activated for cleanup", r.status === 200 && r.data?.user?.is_active === true, `${r.status}`);
+  // Re-activation carries the admin's password; the route refuses without it.
+  r = await call("PATCH", `/api/users/${newHire.id}`, { is_active: true, confirm_password: "admin123" }, A);
+  check("the hire was re-activated for cleanup", r.status === 200 && r.data?.user?.is_active === true, `${r.status} ${r.data?.error ?? ""}`);
 
-  r = await call("PATCH", `/api/users/${newHire.id}`, { is_active: false, regenerate_token: true }, A);
+  r = await call("PATCH", `/api/users/${newHire.id}`, { is_active: false, deactivation_reason: "Journey test cleanup", regenerate_token: true }, A);
   check("parked the test account inactive", r.status === 200 && r.data?.user?.is_active === false, `${r.status}`);
 
   r = await call("GET", "/api/audit/verify", undefined, A);

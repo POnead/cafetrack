@@ -108,6 +108,26 @@ export function parseUnitsPerBox(raw: unknown): number | null {
 }
 
 /**
+ * unit_price on an item, or null when no cost price is set.
+ *
+ * A blank clears the field, which is how an item loses its cost price. A
+ * negative value is refused rather than stored: it is a `check` constraint,
+ * so letting it through would turn a bad number into a 500 from Postgres when
+ * the insert is written.
+ */
+export function parseUnitPrice(raw: unknown): number | null {
+  if (raw === null || raw === undefined || raw === "") return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) {
+    throw new FieldError("Unit price must be a number");
+  }
+  if (n < 0) {
+    throw new FieldError("Unit price cannot be negative");
+  }
+  return n;
+}
+
+/**
  * A location's minimum shelf life on arrival, in days, or null for no rule.
  *
  * Zero is meaningful and allowed — it means "no minimum", which is the same

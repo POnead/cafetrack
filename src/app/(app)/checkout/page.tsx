@@ -1,18 +1,17 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import {
   Card,
   Modal,
-  Empty,
   Badge,
   Toast,
   DataCard,
   DataField,
 } from "@/components/ui";
-import { ScanInput } from "@/components/ScanInput";
 import { fmtQty, fmtDate, daysUntil } from "@/lib/format";
-import { expiryStatus } from "@/lib/status";
+import { expiryStatus, stockStatus } from "@/lib/status";
+import { useScanFocus } from "@/lib/use-scan-focus";
 
 type Mode = "checkout" | "restock" | "waste";
 
@@ -59,7 +58,13 @@ type Looked = {
 type Notice = {
   /** sku + kind, so re-scanning the same item replaces the notice. */
   id: string;
-  tone: "warn" | "error";
+  /**
+   * `info` is for a confirmation — "you scanned the batch dated March" — which
+   * is neither good nor bad news and must not be painted the same amber as a
+   * genuine warning. It was missing from this union while call sites were
+   * already passing it, so every such notice rendered as a warning.
+   */
+  tone: "info" | "warn" | "error";
   title: string;
   detail?: string;
 };
@@ -92,6 +97,14 @@ const MODE_BADGE: Record<Mode, "blue" | "green" | "amber"> = {
   waste: "amber",
 };
 
+const QUICK_ITEMS: Looked[] = [
+  { sku: "QC-ARABICA", name: "Arabica Coffee Beans", unit: "kg", units_per_box: null, quantity: 50, low_stock_threshold: 10, expiration_date: null, location: null },
+  { sku: "QC-MILK", name: "Fresh Milk", unit: "L", units_per_box: null, quantity: 40, low_stock_threshold: 8, expiration_date: null, location: null },
+  { sku: "QC-VANILLA", name: "Vanilla Syrup", unit: "bottles", units_per_box: null, quantity: 25, low_stock_threshold: 5, expiration_date: null, location: null },
+  { sku: "QC-CUPS", name: "16oz Paper Cups", unit: "pcs", units_per_box: null, quantity: 500, low_stock_threshold: 100, expiration_date: null, location: null },
+  { sku: "QC-LIDS", name: "Cup Lids", unit: "pcs", units_per_box: null, quantity: 500, low_stock_threshold: 100, expiration_date: null, location: null },
+];
+
 export default function CheckoutPage() {
   const [mode, setMode] = useState<Mode>("checkout");
   const [cart, setCart] = useState<CartLine[]>([]);
@@ -107,10 +120,182 @@ export default function CheckoutPage() {
     tone: "info" | "error" | "success";
   } | null>(null);
   const [notices, setNotices] = useState<Notice[]>([]);
+  const [quickQtys, setQuickQtys] = useState<Record<string, number>>({});
+
+  /* ---------------- search ---------------- */
+  const [searchText, setSearchText] = useState("");
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [searchResults, setSearchResults] = useState<Looked[]>([]);
+  const [allItems, setAllItems] = useState<Looked[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const searchRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  /*
+   * A USB scanner types and presses Enter with no click, so the field has to take
+   * focus back after the operator touches something else. `autoFocus` only fires
+   * on mount and is not enough on a till.
+   *
+   * Suspended while the results dropdown is open: it is a listbox, it holds focus,
+   * and stealing it back mid-arrow-key-navigation would make the dropdown
+   * unusable. See src/lib/use-scan-focus.ts.
+   */
+  useScanFocus(searchInputRef, !showDropdown);
+
+  // Fetch all items once for local search
+  useEffect(() => {
+    fetch("/api/items?limit=500")
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.items) {
+          setAllItems(
+            data.items.map((i: any) => ({
+              sku: i.sku,
+              name: i.name,
+              unit: i.unit,
+              units_per_box: i.units_per_box,
+              quantity: i.quantity,
+              low_stock_threshold: i.low_stock_threshold,
+              expiration_date: i.expiration_date,
+              location: i.location,
+            }))
+          );
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // Filter items as the user types. `allItems` is a dependency because it
+  // arrives asynchronously: without it, a query typed before the fetch landed
+  // matched against an empty list and never re-ran, so the dropdown stayed shut.
+  useEffect(() => {
+    const query = searchText.trim().toLowerCase();
+    if (query.length === 0) {
+      setSearchResults([]);
+      setShowDropdown(false);
+      return;
+    }
+    const matches = allItems.filter(
+      (item) =>
+        item.name.toLowerCase().includes(query) ||
+        item.sku.toLowerCase().includes(query)
+    );
+    setSearchResults(matches.slice(0, 8));
+    setShowDropdown(matches.length > 0);
+  }, [searchText, allItems]);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (
+        searchRef.current &&
+        !searchRef.current.contains(e.target as Node)
+      ) {
+        setShowDropdown(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  function handleSearchAdd(item: Looked) {
+    setSearchText("");
+    setShowDropdown(false);
+    setSearchResults([]);
+
+    // Blocking: out of stock
+    if (deducting && Number(item.quantity) <= 0) {
+      setScanError(`${item.name} is out of stock — nothing left to deduct.`);
+      pushNotice({
+        id: `${item.sku}:out`,
+        tone: "error",
+        title: `${item.name} is out of stock`,
+        detail: "Nothing left to deduct, so it was not added to the cart.",
+      });
+      return;
+    }
+
+    // Blocking: expired — only in checkout and restock modes.
+    // Waste mode ALLOWS expired items (that is its purpose).
+    const exp = expiryStatus(item.expiration_date);
+    if (mode === "checkout" && exp.key === "expired") {
+      setScanError(
+        `${item.name} expired on ${fmtDate(item.expiration_date)} — log it as waste instead.`
+      );
+      pushNotice({
+        id: `${item.sku}:expired`,
+        tone: "error",
+        title: `${item.name} is expired`,
+        detail:
+          "Expired items cannot be checked out. Use \"Log Waste\" to remove them from stock.",
+      });
+      return;
+    }
+
+    if (mode === "restock" && exp.key === "expired") {
+      setScanError(
+        `${item.name} expired on ${fmtDate(item.expiration_date)} — log it as waste before restocking.`
+      );
+      pushNotice({
+        id: `${item.sku}:expired`,
+        tone: "error",
+        title: `${item.name} is expired`,
+        detail:
+          "Expired items cannot be restocked. Use \"Log Waste\" to remove them from stock first.",
+      });
+      return;
+    }
+
+    upsert(item);
+
+    // Non-blocking warnings
+    if (deducting && Number(item.quantity) <= (Number(item.low_stock_threshold) || 0)) {
+      pushNotice({
+        id: `${item.sku}:low`,
+        tone: "warn",
+        title: `Low stock: ${fmtQty(Number(item.quantity), item.unit)} of ${item.name} left`,
+        detail: `At or below the ${fmtQty(
+          Number(item.low_stock_threshold) || 0,
+          item.unit
+        )} threshold — consider restocking.`,
+      });
+    }
+
+    if (exp.key === "soon") {
+      pushNotice({
+        id: `${item.sku}:soon`,
+        tone: "warn",
+        title: `${item.name} expires in ${exp.days} day(s)`,
+        detail: deducting ? "Use this one first." : "Consider using the existing stock first.",
+      });
+    }
+  }
 
   const deducting = DEDUCTING.includes(mode);
-  const totalQty = cart.reduce((n, l) => n + l.qty, 0);
+  const totalQty = useMemo(() => cart.reduce((n, l) => n + l.qty, 0), [cart]);
   const ready = cart.length > 0 && totalQty > 0;
+
+  /*
+   * The "needs attention" rail.
+   *
+   * Memoised because it filters the full item list — up to 500 rows, fetched at
+   * :135 — and the render below reads it twice, for the count and for the list.
+   * Unmemoised, that scan ran twice on every single render, including every
+   * keystroke in the search box and every qty stepper click in the cart.
+   */
+  const needsAttention = useMemo(
+    () =>
+      allItems.filter((item) => {
+        const s = stockStatus(item.quantity, item.low_stock_threshold);
+        const e = expiryStatus(item.expiration_date);
+        return s.key === "out" || s.key === "low" || e.key === "expired" || e.key === "soon";
+      }),
+    [allItems]
+  );
+
+  function isOutOfStock(item: Looked): boolean {
+    return deducting && Number(item.quantity) <= 0;
+  }
 
   /* ---------------- notices ---------------- */
 
@@ -242,6 +427,9 @@ export default function CheckoutPage() {
     setScanError(null);
     setSubmitError(null);
     setNotices([]);
+    setSearchText("");
+    setSearchResults([]);
+    setShowDropdown(false);
     if (cart.length > 0) {
       setCart([]);
       setToast({
@@ -281,8 +469,50 @@ export default function CheckoutPage() {
         return;
       }
 
+      // Blocking: cannot check out expired items — they must be logged as waste.
+      // Waste mode ALLOWS expired items (that is its purpose).
+      if (mode === "checkout" && expiry.key === "expired") {
+        setScanError(
+          `${item.name} expired on ${fmtDate(item.expiration_date)} — log it as waste instead.`
+        );
+        pushNotice({
+          id: `${item.sku}:expired`,
+          tone: "error",
+          title: `${item.name} is expired`,
+          detail:
+            "Expired items cannot be checked out. Use \"Log Waste\" to remove them from stock.",
+        });
+        return;
+      }
+
+      // Blocking: cannot restock an expired item — it must be written off first.
+      if (mode === "restock" && expiry.key === "expired") {
+        setScanError(
+          `${item.name} expired on ${fmtDate(item.expiration_date)} — log it as waste before restocking.`
+        );
+        pushNotice({
+          id: `${item.sku}:expired`,
+          tone: "error",
+          title: `${item.name} is expired`,
+          detail:
+            "Expired items cannot be restocked. Use \"Log Waste\" to remove them from stock first.",
+        });
+        return;
+      }
+
       upsert(item);
       setScanError(null);
+
+      // If the barcode carried a date suffix, show it so the operator knows
+      // which batch they just scanned — old items have a different code.
+      if (data.batchExpiry) {
+        pushNotice({
+          id: `${item.sku}:batch`,
+          tone: "info",
+          title: `${item.name} — batch dated ${fmtDate(data.batchExpiry)}`,
+          detail: "Scanned a dated barcode.",
+        });
+      }
 
       // Non-blocking warnings — the line is still added, because the operator
       // may be recording what actually happened rather than what should happen.
@@ -298,21 +528,17 @@ export default function CheckoutPage() {
         });
       }
 
-      if (expiry.key === "expired") {
-        pushNotice({
-          id: `${item.sku}:expired`,
-          tone: "error",
-          title: `${item.name} expired on ${fmtDate(item.expiration_date)}`,
-          detail: deducting
-            ? "Check before using it — log it as waste if it cannot be served."
-            : "Double-check the date before adding it back.",
-        });
-      } else if (expiry.key === "soon") {
+      if (expiry.key === "soon") {
         pushNotice({
           id: `${item.sku}:soon`,
           tone: "warn",
           title: `${item.name} expires in ${expiry.days} day(s)`,
-          detail: "Use this one first.",
+          detail:
+            mode === "restock"
+              ? "The existing stock is still expiring soon. Consider using it before this new batch, or the dates will be combined."
+              : deducting
+              ? "Use this one first."
+              : "Consider using the existing stock first.",
         });
       }
     } catch (e: any) {
@@ -568,6 +794,24 @@ export default function CheckoutPage() {
         </p>
       );
     }
+
+    if (line.newExpiry && line.expiry && line.newExpiry !== line.expiry) {
+      const oldDays = daysUntil(line.expiry);
+      const newDays = daysUntil(line.newExpiry);
+      const overwriting =
+        oldDays !== null &&
+        oldDays < 30 &&
+        (newDays === null || newDays > oldDays);
+      return (
+        <p
+          className={`mt-1 text-[11px] font-semibold ${overwriting ? "text-ochre-700" : "text-cocoa-400"}`}
+        >
+          {overwriting
+            ? `Warning: existing stock expires on ${fmtDate(line.expiry)} and is being combined with the new batch dated ${fmtDate(line.newExpiry)}. Use the existing stock first if possible.`
+            : `New date replaces the previous expiry of ${fmtDate(line.expiry)}.`}
+        </p>
+      );
+    }
     return null;
   }
 
@@ -617,261 +861,419 @@ export default function CheckoutPage() {
         })}
       </div>
 
-      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,22rem)]">
-        {/* ---------- scan ---------- */}
-        <Card className="space-y-3">
-          <div className="flex items-center justify-between gap-3">
-            <h2 className="text-sm font-bold text-cocoa-800">Scan item</h2>
-            <Badge tone={MODE_BADGE[mode]}>{modeLabel}</Badge>
+      {/* ---------- workspace: left item list + right panel ---------- */}
+      <div className="grid gap-4 lg:grid-cols-[240px_1fr]">
+        {/* ========== LEFT: notifications (low stock, expiring, out, expired) ========== */}
+        <div className="rounded-2xl border border-cream-200 bg-white flex flex-col max-h-[70vh]">
+          <div className="flex items-center justify-between border-b border-cream-200 bg-cream-50 px-3 py-2">
+            <span className="text-[11px] font-bold uppercase tracking-wide text-cocoa-500">Alerts</span>
+            <span className="text-[10px] text-cocoa-400">
+              {needsAttention.length} active
+            </span>
           </div>
-
-          <ScanInput
-            key={mode}
-            onScan={handleScan}
-            disabled={scanning}
-            label="Scan an item barcode"
-            placeholder="Scan the item label or type the SKU, then press Enter"
-          />
-
-          {notices.length > 0 && (
-            <ul className="space-y-2">
-              {notices.map((n) => (
-                <li
-                  key={n.id}
-                  className={`flex items-start justify-between gap-3 rounded-xl border px-3.5 py-2.5 text-sm ${
-                    n.tone === "error"
-                      ? "border-terracotta-500/40 bg-terracotta-50 text-terracotta-700"
-                      : "border-ochre-500/40 bg-ochre-50 text-ochre-700"
-                  }`}
+          <div className="flex-1 overflow-y-auto p-1.5 space-y-0.5">
+            {needsAttention.map((item) => {
+              const status = stockStatus(item.quantity, item.low_stock_threshold);
+              const exp = expiryStatus(item.expiration_date);
+              const tips: string[] = [
+                `${item.quantity} ${item.unit} on hand`,
+                `Threshold: ${item.low_stock_threshold} ${item.unit}`,
+              ];
+              if (exp.days !== null) {
+                tips.push(exp.days < 0 ? `Expired ${Math.abs(exp.days)} days ago` : `Expires in ${exp.days} days`);
+              }
+              const tip = tips.join("\n");
+              let badge = "";
+              let tone = "green";
+              if (status.key === "out") { badge = "Out"; tone = "red"; }
+              else if (exp.key === "expired") { badge = "Expired"; tone = "red"; }
+              else if (exp.key === "soon") { badge = "Expiring"; tone = "amber"; }
+              else if (status.key === "low") { badge = "Low"; tone = "amber"; }
+              return (
+                <div
+                  key={item.sku}
+                  title={tip}
+                  className="w-full rounded-lg px-2.5 py-2 text-left text-xs"
                 >
-                  <div className="min-w-0">
-                    <div className="font-semibold">{n.title}</div>
-                    {n.detail && (
-                      <div className="mt-0.5 text-[11px] leading-snug opacity-80">
-                        {n.detail}
-                      </div>
-                    )}
+                  <div className="flex items-center justify-between gap-1.5">
+                    <span className="min-w-0 truncate font-medium text-cocoa-800">{item.name}</span>
+                    <span
+                      className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide ${
+                        tone === "red"
+                          ? "bg-red-100 text-red-700"
+                          : tone === "amber"
+                          ? "bg-amber-100 text-amber-700"
+                          : "bg-green-100 text-green-700"
+                      }`}
+                    >
+                      {badge}
+                    </span>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => dismissNotice(n.id)}
-                    aria-label="Dismiss"
-                    className="shrink-0 rounded-full px-1.5 text-xs font-bold opacity-60 transition-opacity hover:opacity-100"
-                  >
-                    ✕
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-
-          <p className="text-[11px] text-cocoa-300">
-            {scanning
-              ? "Looking up..."
-              : "The scanner types into this field automatically. Re-scanning an item bumps its quantity."}
-          </p>
-
-          {scanError && (
-            <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
-              {scanError}
-            </div>
-          )}
-        </Card>
-
-        {/* ---------- summary + confirm ---------- */}
-        <Card className="flex flex-col gap-3">
-          <h2 className="text-sm font-bold text-cocoa-800">This transaction</h2>
-
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-cocoa-500">Lines</span>
-            <span className="font-bold tabular-nums text-cocoa-900">
-              {cart.length}
-            </span>
+                  <div className="mt-0.5 text-[10px] text-cocoa-400">
+                    {fmtQty(Number(item.quantity), item.unit)} · {item.sku}
+                  </div>
+                </div>
+              );
+            })}
           </div>
-
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-cocoa-500">Total quantity</span>
-            <span className="font-bold tabular-nums text-cocoa-900">
-              {fmtQty(totalQty)}
-            </span>
-          </div>
-
-          <div>
-            <label className="label" htmlFor="txn-note">
-              Note (optional)
-            </label>
-            <textarea
-              id="txn-note"
-              className="input min-h-[72px] resize-y"
-              value={note}
-              maxLength={500}
-              placeholder="e.g. morning shift, 3 spilled"
-              onChange={(e) => setNote(e.target.value)}
-            />
-          </div>
-
-          <button
-            className="btn-primary mt-auto w-full"
-            disabled={!ready}
-            onClick={() => {
-              setSubmitError(null);
-              setPassword("");
-              setConfirmOpen(true);
-            }}
-          >
-            Review &amp; commit
-          </button>
-
-          <p className="text-center text-[11px] text-cocoa-300">
-            {ready
-              ? "You will confirm this with your password."
-              : "Scan at least one item to continue."}
-          </p>
-        </Card>
-      </div>
-      {/* ---------- cart ---------- */}
-      <Card className="!p-0">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-cream-200 bg-cream-50 px-4 py-3">
-          <h2 className="text-sm font-bold text-cocoa-800">Scanned items</h2>
-          <span className="text-[11px] text-cocoa-400">
-            {deducting
-              ? "Quantities are capped at what is on hand"
-              : "Quantities add on top of current stock"}
-          </span>
         </div>
 
-        {cart.length === 0 ? (
-          <Empty>Nothing scanned yet — scan or type a SKU to begin.</Empty>
-        ) : (
-          <>
-            <div className="space-y-2.5 pb-3 lg:hidden">
-              {cart.map((l) => (
-                <DataCard key={l.sku}>
-                  <div className="min-w-0">
-                    <div className="font-semibold text-cocoa-800">{l.name}</div>
-                    <div className="font-mono text-xs text-cocoa-400">{l.sku}</div>
-                  </div>
+        {/* ========== RIGHT: unified card (search + cart + summary) ========== */}
+        <div className="rounded-2xl border border-cream-200 bg-white">
+          {/* Header: badge + clear all */}
+          <div className="flex items-center justify-between border-b border-cream-200 bg-cream-50 px-4 py-3 rounded-t-2xl">
+            <Badge tone={MODE_BADGE[mode]}>{modeLabel}</Badge>
+            {cart.length >= 2 && (
+              <button
+                type="button"
+                className="btn-danger !px-3 !py-1.5 text-xs"
+                onClick={() => {
+                  setCart([]);
+                  setToast({
+                    msg: "All items cleared from the cart.",
+                    tone: "info",
+                  });
+                }}
+              >
+                Clear All
+              </button>
+            )}
+          </div>
 
-                  <DataField label="On hand">{fmtQty(l.onHand, l.unit)}</DataField>
-
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-[11px] font-bold uppercase tracking-wide text-cocoa-400">
-                      Quantity
-                    </span>
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        className="btn-ghost min-h-[40px] !px-3.5 !py-2 text-sm"
-                        onClick={() => setQty(l.sku, l.qty - 1)}
-                        aria-label={`Decrease ${l.name}`}
-                      >
-                        -
-                      </button>
-                      <input
-                        className="input w-24 text-center"
-                        type="number"
-                        inputMode="decimal"
-                        min="0"
-                        step="0.001"
-                        value={l.qty}
-                        onChange={(e) => setQty(l.sku, Number(e.target.value))}
-                      />
-                      <button
-                        className="btn-ghost min-h-[40px] !px-3.5 !py-2 text-sm"
-                        onClick={() => setQty(l.sku, l.qty + 1)}
-                        aria-label={`Increase ${l.name}`}
-                      >
-                        +
-                      </button>
-                    </div>
-                  </div>
-
-                  <DataField label="Projected">
-                    <span className="font-semibold tabular-nums text-cocoa-900">
-                      {fmtQty(projected(l), l.unit)}
-                    </span>
-                  </DataField>
-
-                  {restockFields(l, "card")}
-
-                  <button
-                    className="btn-danger min-h-[40px] w-full !py-1.5 text-sm"
-                    onClick={() => removeLine(l.sku)}
+          <div className="p-4 space-y-4">
+            {/* Notices — above search */}
+            {notices.length > 0 && (
+              <div className="space-y-2">
+                {notices.map((n) => (
+                  <div
+                    key={n.id}
+                    className={`flex items-start justify-between gap-3 rounded-xl border px-3.5 py-2.5 text-sm ${
+                      n.tone === "error"
+                        ? "border-terracotta-500/40 bg-terracotta-50 text-terracotta-700"
+                        : n.tone === "warn"
+                          ? "border-ochre-500/40 bg-ochre-50 text-ochre-700"
+                          : // Neutral, so a confirmation does not read as a problem.
+                            "border-cocoa-200 bg-cream-50 text-cocoa-700"
+                    }`}
                   >
-                    Remove
+                    <div className="min-w-0">
+                      <div className="font-semibold">{n.title}</div>
+                      {n.detail && (
+                        <div className="mt-0.5 text-[11px] leading-snug opacity-80">
+                          {n.detail}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => dismissNotice(n.id)}
+                      aria-label="Dismiss"
+                      className="shrink-0 rounded-full px-1.5 text-xs font-bold opacity-60 transition-opacity hover:opacity-100"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Search + scan */}
+            <div ref={searchRef} className="relative">
+              <div className="relative">
+                <input
+                  ref={searchInputRef}
+                  type="text"
+                  className="input w-full !pl-10 text-base"
+                  placeholder="Scan barcode or type item name..."
+                  aria-label="Scan an item barcode"
+                  value={searchText}
+                  onChange={(e) => {
+                    setSearchText(e.target.value);
+                    setScanError(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      const exact = allItems.find(
+                        (i) =>
+                          i.sku.toLowerCase() === searchText.trim().toLowerCase() ||
+                          i.name.toLowerCase() === searchText.trim().toLowerCase()
+                      );
+                      if (exact) {
+                        handleSearchAdd(exact);
+                      } else if (searchText.trim()) {
+                        handleScan(searchText.trim());
+                        setSearchText("");
+                      }
+                    }
+                  }}
+                  onFocus={() => {
+                    if (searchResults.length > 0) setShowDropdown(true);
+                  }}
+                  autoFocus
+                />
+                <svg
+                  className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-cocoa-300"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                  />
+                </svg>
+                {searchText && (
+                  <button
+                    type="button"
+                    className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full p-0.5 text-cocoa-300 hover:text-cocoa-500"
+                    onClick={() => {
+                      setSearchText("");
+                      setSearchResults([]);
+                      setShowDropdown(false);
+                      searchInputRef.current?.focus();
+                    }}
+                  >
+                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
                   </button>
-                </DataCard>
-              ))}
+                )}
+              </div>
+
+              {/* Search results dropdown */}
+              {showDropdown && searchResults.length > 0 && (
+                <div className="absolute z-20 mt-1 w-full overflow-hidden rounded-xl border border-cream-200 bg-white shadow-lg">
+                  <ul className="max-h-64 overflow-y-auto">
+                    {searchResults.map((item) => {
+                      const out = isOutOfStock(item);
+                      const exp = expiryStatus(item.expiration_date);
+                      return (
+                        <li key={item.sku}>
+                          <button
+                            type="button"
+                            disabled={out}
+                            className={`flex w-full items-center justify-between gap-3 px-3.5 py-2.5 text-left text-sm transition-colors ${
+                              out
+                                ? "cursor-not-allowed bg-cream-50 opacity-50"
+                                : "hover:bg-cream-50"
+                            }`}
+                            onClick={() => handleSearchAdd(item)}
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="font-medium text-cocoa-800">{item.name}</div>
+                              <div className="font-mono text-[11px] text-cocoa-400">{item.sku}</div>
+                            </div>
+                            <div className="shrink-0 text-right">
+                              <div className="text-xs text-cocoa-500">
+                                {fmtQty(Number(item.quantity), item.unit)}
+                              </div>
+                              {exp.key === "expired" && (
+                                <div className="text-[10px] font-semibold text-terracotta-600">Expired</div>
+                              )}
+                              {exp.key === "soon" && (
+                                <div className="text-[10px] font-semibold text-ochre-600">
+                                  {exp.days}d left
+                                </div>
+                              )}
+                            </div>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              )}
             </div>
 
-            <div className="hidden overflow-x-auto lg:block">
-            <table className="w-full">
-              <thead>
-                <tr className="bg-cream-100/60">
-                  <th className="th">Item</th>
-                  <th className="th">SKU</th>
-                  <th className="th text-right">On hand</th>
-                  <th className="th text-center">Quantity</th>
-                  {mode === "restock" && <th className="th">Received</th>}
-                  <th className="th text-right">Projected</th>
-                  <th className="th text-right">Remove</th>
-                </tr>
-              </thead>
-              <tbody>
-                {cart.map((l) => (
-                  <tr key={l.sku} className="transition-colors hover:bg-cream-50">
-                    <td className="td font-semibold text-cocoa-800">{l.name}</td>
-                    <td className="td font-mono text-xs text-cocoa-400">{l.sku}</td>
-                    <td className="td text-right tabular-nums">
-                      {fmtQty(l.onHand, l.unit)}
-                    </td>
-                    <td className="td">
-                      <div className="flex items-center justify-center gap-1.5">
-                        <button
-                          className="btn-ghost !px-2.5 !py-1 text-xs"
-                          onClick={() => setQty(l.sku, l.qty - 1)}
-                          aria-label={`Decrease ${l.name}`}
-                        >
-                          -
-                        </button>
-                        <input
-                          className="input w-24 text-center"
-                          type="number"
-                          min="0"
-                          step="0.001"
-                          value={l.qty}
-                          onChange={(e) => setQty(l.sku, Number(e.target.value))}
-                        />
-                        <button
-                          className="btn-ghost !px-2.5 !py-1 text-xs"
-                          onClick={() => setQty(l.sku, l.qty + 1)}
-                          aria-label={`Increase ${l.name}`}
-                        >
-                          +
-                        </button>
+            <p className="text-[11px] text-cocoa-300">
+              {scanning
+                ? "Looking up..."
+                : "Scan a barcode, type an item name, or type a SKU. Results appear instantly."}
+            </p>
+
+            {scanError && (
+              <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
+                {scanError}
+              </div>
+            )}
+
+            {/* Cart items */}
+            {cart.length === 0 ? (
+              <div className="py-8 text-center text-sm text-cocoa-400">
+                Nothing added yet — scan, search, or check the alerts.
+              </div>
+            ) : (
+              <>
+                <div className="space-y-2.5 lg:hidden">
+                  {cart.map((l) => (
+                    <DataCard key={l.sku}>
+                      <div className="min-w-0">
+                        <div className="font-semibold text-cocoa-800">{l.name}</div>
+                        <div className="font-mono text-xs text-cocoa-400">{l.sku}</div>
                       </div>
-                    </td>
-                    {mode === "restock" && (
-                      <td className="td min-w-[12rem]">{restockFields(l, "row")}</td>
-                    )}
-                    <td className="td text-right font-semibold tabular-nums text-cocoa-900">
-                      {fmtQty(projected(l), l.unit)}
-                    </td>
-                    <td className="td text-right">
+                      <DataField label="On hand">{fmtQty(l.onHand, l.unit)}</DataField>
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-[11px] font-bold uppercase tracking-wide text-cocoa-400">
+                          Quantity
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            className="btn-ghost min-h-[40px] !px-3.5 !py-2 text-sm"
+                            onClick={() => setQty(l.sku, l.qty - 1)}
+                            aria-label={`Decrease ${l.name}`}
+                          >
+                            -
+                          </button>
+                          <input
+                            className="input w-24 text-center"
+                            type="number"
+                            inputMode="decimal"
+                            min="0"
+                            step="0.001"
+                            value={l.qty}
+                            onChange={(e) => setQty(l.sku, Number(e.target.value))}
+                          />
+                          <button
+                            className="btn-ghost min-h-[40px] !px-3.5 !py-2 text-sm"
+                            onClick={() => setQty(l.sku, l.qty + 1)}
+                            aria-label={`Increase ${l.name}`}
+                          >
+                            +
+                          </button>
+                        </div>
+                      </div>
+                      <DataField label="Projected">
+                        <span className="font-semibold tabular-nums text-cocoa-900">
+                          {fmtQty(projected(l), l.unit)}
+                        </span>
+                      </DataField>
+                      {restockFields(l, "card")}
                       <button
-                        className="btn-danger !px-3 !py-1 text-xs"
+                        className="btn-danger min-h-[40px] w-full !py-1.5 text-sm"
                         onClick={() => removeLine(l.sku)}
                       >
                         Remove
                       </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                    </DataCard>
+                  ))}
+                </div>
+                <div className="hidden overflow-x-auto lg:block">
+                  <table className="w-full">
+                    <thead>
+                      <tr className="bg-cream-100/60">
+                        <th className="th">Item</th>
+                        <th className="th">SKU</th>
+                        <th className="th text-right">On hand</th>
+                        <th className="th text-center">Quantity</th>
+                        {mode === "restock" && <th className="th">Received</th>}
+                        <th className="th text-right">Projected</th>
+                        <th className="th text-right">Remove</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {cart.map((l) => (
+                        <tr key={l.sku} className="transition-colors hover:bg-cream-50">
+                          <td className="td font-semibold text-cocoa-800">{l.name}</td>
+                          <td className="td font-mono text-xs text-cocoa-400">{l.sku}</td>
+                          <td className="td text-right tabular-nums">
+                            {fmtQty(l.onHand, l.unit)}
+                          </td>
+                          <td className="td">
+                            <div className="flex items-center justify-center gap-1.5">
+                              <button
+                                className="btn-ghost !px-2.5 !py-1 text-xs"
+                                onClick={() => setQty(l.sku, l.qty - 1)}
+                                aria-label={`Decrease ${l.name}`}
+                              >
+                                -
+                              </button>
+                              <input
+                                className="input w-24 text-center"
+                                type="number"
+                                min="0"
+                                step="0.001"
+                                value={l.qty}
+                                onChange={(e) => setQty(l.sku, Number(e.target.value))}
+                              />
+                              <button
+                                className="btn-ghost !px-2.5 !py-1 text-xs"
+                                onClick={() => setQty(l.sku, l.qty + 1)}
+                                aria-label={`Increase ${l.name}`}
+                              >
+                                +
+                              </button>
+                            </div>
+                          </td>
+                          {mode === "restock" && (
+                            <td className="td min-w-[12rem]">{restockFields(l, "row")}</td>
+                          )}
+                          <td className="td text-right font-semibold tabular-nums text-cocoa-900">
+                            {fmtQty(projected(l), l.unit)}
+                          </td>
+                          <td className="td text-right">
+                            <button
+                              className="btn-danger !px-3 !py-1 text-xs"
+                              onClick={() => removeLine(l.sku)}
+                            >
+                              Remove
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+
+            {/* Summary + commit */}
+            <div className="border-t border-cream-200 pt-4 space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-xl bg-cream-50 px-3.5 py-2.5 text-center">
+                  <div className="text-[11px] font-bold uppercase tracking-wide text-cocoa-400">Lines</div>
+                  <div className="text-xl font-bold tabular-nums text-cocoa-900">{cart.length}</div>
+                </div>
+                <div className="rounded-xl bg-cream-50 px-3.5 py-2.5 text-center">
+                  <div className="text-[11px] font-bold uppercase tracking-wide text-cocoa-400">Total qty</div>
+                  <div className="text-xl font-bold tabular-nums text-cocoa-900">{fmtQty(totalQty)}</div>
+                </div>
+              </div>
+              <div>
+                <label className="label" htmlFor="txn-note">
+                  Note (optional)
+                </label>
+                <textarea
+                  id="txn-note"
+                  className="input min-h-[72px] resize-y"
+                  value={note}
+                  maxLength={500}
+                  placeholder="e.g. morning shift, 3 spilled"
+                  onChange={(e) => setNote(e.target.value)}
+                />
+              </div>
+              <button
+                className="btn-primary w-full !py-3 text-base"
+                disabled={!ready}
+                onClick={() => {
+                  setSubmitError(null);
+                  setPassword("");
+                  setConfirmOpen(true);
+                }}
+              >
+                Review &amp; commit
+              </button>
+              <p className="text-center text-[11px] text-cocoa-300">
+                {ready
+                  ? "You will confirm this with your password."
+                  : "Scan, search, or check the alerts to add items."}
+              </p>
+            </div>
           </div>
-          </>
-        )}
-      </Card>
+        </div>
+      </div>
 
       {/* ---------- password confirmation ---------- */}
       <Modal

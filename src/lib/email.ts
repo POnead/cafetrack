@@ -3,6 +3,7 @@ import nodemailer, { type Transporter } from "nodemailer";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { readSmtpConfig, describeSmtpConfig, type SmtpConfig } from "./smtp-config";
+import { describeSmtpFailure, type SmtpDiagnosis } from "./smtp-errors";
 
 /**
  * Email notifications (FR-11).
@@ -41,22 +42,57 @@ async function getSetting(key: string, fallback = ""): Promise<string> {
   return data?.value ?? fallback;
 }
 
+/** One prerequisite on the way to working email, done or not. */
+export type SetupStep = {
+  key: "account" | "recipient";
+  label: string;
+  /** What to do about it, when it is not done. */
+  hint: string;
+  /**
+   * The missing thing as a noun phrase, so an error can name it: "email needs a
+   * sending account". Kept apart from `label`, which is written to be read as a
+   * checklist line rather than spliced into a sentence.
+   */
+  need: string;
+  done: boolean;
+};
+
+export type EmailSetup = {
+  /** In the order they have to be done: account, then recipient. */
+  steps: SetupStep[];
+  /** True when both steps are done and the toggle may be flipped on. */
+  ready: boolean;
+  /** Why the toggle is unavailable, or null when it is available. */
+  blocked: string | null;
+};
+
 /**
  * Whether email can actually be sent, and if not, exactly what is missing.
  *
  * Checks the resolved configuration rather than the environment directly, so the
  * answer is the same one a send would give — an admin who set it on the website
  * is told it works, and one who has not is told what to do.
+ *
+ * `setup` is the part that was previously implicit. Email needs an account and a
+ * recipient before it means anything, in that order, and nothing about a page
+ * full of independent controls forces an admin to discover the order. Deriving it
+ * here rather than in the UI means the checklist and a real send always agree.
+ *
+ * `detail` is gone. It was one sentence saying "what is missing", which is the
+ * same job as `setup.steps[].hint` — so the two could disagree, and the one
+ * worth acting on (a recipient is missing) was the one the page could not reach:
+ * it led with "switched off", which is the absence of a fault rather than a
+ * fault. Callers that want a sentence should read the outstanding step's hint.
  */
 export async function emailStatus(): Promise<{
   enabled: boolean;
   configured: boolean;
-  detail: string;
   from: string;
   recipients: number;
   source: "website" | "environment" | "none";
   user: string | null;
   unreadable: boolean;
+  setup: EmailSetup;
 }> {
   const enabled = (await getSetting("email_enabled", "0")) === "1";
   const smtp = await describeSmtpConfig();
@@ -66,26 +102,47 @@ export async function emailStatus(): Promise<{
     .select("id", { count: "exact", head: true })
     .eq("is_active", true);
 
-  let detail = "";
-  if (!enabled) {
-    detail = "Email notifications are switched off in Settings.";
-  } else if (!smtp.configured) {
-    detail = smtp.unreadable
-      ? "The saved mail password can no longer be read — re-enter it below."
-      : "Set the sending account below (Settings > Email), or SMTP_HOST / SMTP_USER / SMTP_PASS in .env.local.";
-  } else if (!count) {
-    detail = "Add at least one recipient.";
-  }
+  const recipients = count ?? 0;
+
+  const steps: SetupStep[] = [
+    {
+      key: "account",
+      label: "Set the account email is sent from",
+      // A password that will not decrypt is worth naming separately: it is a
+      // different problem from never having set one, and "not configured" would
+      // send the admin looking for a field that is already filled in.
+      hint: smtp.unreadable
+        ? "The saved app password can no longer be read — enter it again."
+        : "Choose Gmail or Outlook, then paste an app password.",
+      need: "a sending account",
+      done: smtp.configured,
+    },
+    {
+      key: "recipient",
+      label: "Add someone to send to",
+      hint: "Add at least one email address to receive the alerts.",
+      need: "at least one recipient",
+      done: recipients > 0,
+    },
+  ];
+
+  const setup: EmailSetup = {
+    steps,
+    ready: steps.every((s) => s.done),
+    blocked: steps.every((s) => s.done)
+      ? null
+      : "Finish the setup above before switching email on.",
+  };
 
   return {
     enabled,
     configured: smtp.configured,
-    detail,
     from: smtp.from ?? "",
-    recipients: count ?? 0,
+    recipients,
     source: smtp.source,
     user: smtp.user,
     unreadable: smtp.unreadable,
+    setup,
   };
 }
 
@@ -286,10 +343,6 @@ export function dispatchSoon(): void {
 }
 
 /* ------------------------------------------------------------------ */
-/* send-by-hand                                                        */
-/* ------------------------------------------------------------------ */
-
-/* ------------------------------------------------------------------ */
 /* scheduler                                                           */
 /* ------------------------------------------------------------------ */
 
@@ -356,6 +409,83 @@ export function startEmailScheduler(): void {
   timer.unref?.();
 }
 
+/* ------------------------------------------------------------------ */
+/* verification                                                       */
+/* ------------------------------------------------------------------ */
+
+export type VerifyResult =
+  | {
+      ok: true;
+      /** How long the send took, so the page can say it rather than imply it. */
+      ms: number;
+      /** The address that was reached. */
+      to: string;
+    }
+  | ({ ok: false; to: string } & SmtpDiagnosis & { server: string });
+
+/**
+ * Send one real message and report what happened, in words the admin can act on.
+ *
+ * This is deliberately *not* the queue. Two reasons, and both matter:
+ *
+ *   - The queue skips everything when email is switched off, so verifying through
+ *     it would only be possible once the feature is on — which is the wrong
+ *     order. Verifying is how you find out whether the account works, so it has
+ *     to work while the switch is still off.
+ *   - A queued failure is reported as "queued, will retry", which reads like
+ *     patience rather than a problem. A misconfigured account would sit in the
+ *     log looking like a transient hiccup.
+ *
+ * Nothing is recorded in the delivery log. This is a connection check, not
+ * something the café was told would be emailed to them, and a log row that
+ * appears with no visible cause is its own confusion.
+ */
+export async function verifySmtpAccount(to: string): Promise<VerifyResult> {
+  const address = String(to).trim();
+
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(address)) {
+    return {
+      ok: false,
+      to: address,
+      title: "That is not an email address.",
+      fix: "Check the address it should be sent to.",
+      transient: false,
+      server: "",
+    };
+  }
+
+  const config = await readSmtpConfig();
+  if (!config) {
+    return {
+      ok: false,
+      to: address,
+      title: "There is no sending account saved yet.",
+      fix: "Set the server, account and app password first, then check again.",
+      transient: false,
+      server: "",
+    };
+  }
+
+  const started = Date.now();
+  try {
+    await transport(config).sendMail({
+      from: config.from,
+      to: address,
+      subject: "CafeTrack: your email is set up",
+      text: [
+        "This is a test message from CafeTrack.",
+        "",
+        "If you are reading it, email notifications are working.",
+        "Nothing else was sent — no alerts, no summary.",
+      ].join("\n"),
+    });
+
+    return { ok: true, ms: Date.now() - started, to: address };
+  } catch (e) {
+    return { ok: false, to: address, ...describeSmtpFailure(e) };
+  }
+}
+
 /**
  * Queue a one-off message to a specific address — the "email me this report"
  * button. Goes through the same queue as everything else rather than sending
@@ -369,34 +499,47 @@ export async function queueDirectEmail(to: string, subject: string, body: string
     throw new Error("That does not look like an email address");
   }
 
-  // `onConflict` is an ARRAY. Passing the bare string compiles under
-  // supabase-js, whose option accepts either, but local-db declared
-  // `string[]` and called `.map()` on it — so in local mode this threw
-  // "this.upsertConflict.map is not a function", the adapter swallowed it into
-  // `error`, and nothing below knew the recipient had not been written. Every
-  // test message and every emailed report then queued with `recipient_id` null
-  // and failed as "Recipient has no email address on file".
-  const { error: upsertError } = await db()
-    .from("email_recipients")
-    .upsert(
-      { email_address: address, display_name: "Report recipient", is_active: true, subscriptions: ["reports"] },
-      { onConflict: ["email_address"] }
-    );
-
-  // Checked rather than ignored, so a future failure here is reported instead
-  // of surfacing later as a message that mysteriously cannot be addressed.
-  if (upsertError) throw new Error(`Could not save the recipient: ${upsertError.message}`);
-
-  const { data: recipient, error: lookupError } = await db()
+  // Look the address up before writing anything.
+  //
+  // This used to be an `upsert` on email_address that supplied display_name,
+  // is_active and subscriptions, which silently *replaced* those columns on a row
+  // that already existed. So the owner adds themselves as a recipient for
+  // alerts, ticks "low stock", then emails themselves a report — and their
+  // subscriptions are rewritten to `["reports"]`, after which
+  // `enqueue_email_alerts` correctly skips them and no alert mail ever arrives
+  // again. It is invisible: nothing errors, the delivery log looks normal, and
+  // the cafe just quietly stops being told when it runs out of milk.
+  //
+  // An existing recipient is therefore left exactly as the admin configured it.
+  // Only a genuinely new address is created, and it is created subscribed to
+  // reports alone — sending a one-off report to a stranger should not enrol that
+  // stranger in anything.
+  const { data: existing } = await db()
     .from("email_recipients")
     .select("id")
     .eq("email_address", address)
     .maybeSingle();
 
-  if (lookupError) throw new Error(`Could not look up the recipient: ${lookupError.message}`);
+  let recipientId: string | null = existing?.id ?? null;
+
+  if (!recipientId) {
+    const { data: inserted, error: insertError } = await db()
+      .from("email_recipients")
+      .insert({
+        email_address: address,
+        display_name: "Report recipient",
+        is_active: true,
+        subscriptions: ["reports"],
+      })
+      .select("id")
+      .single();
+
+    if (insertError) throw new Error(`Could not save the recipient: ${insertError.message}`);
+    recipientId = inserted?.id ?? null;
+  }
 
   await db().from("email_notifications").insert({
-    recipient_id: recipient?.id ?? null,
+    recipient_id: recipientId,
     kind: "report",
     subject,
     body,

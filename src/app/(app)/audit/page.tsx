@@ -19,10 +19,68 @@ type Entry = {
   entity_type: string | null;
   entity_id: string | null;
   details: Record<string, unknown>;
+  /**
+   * Where the action came from and how it turned out.
+   *
+   * Both are written by lib/audit.ts and both sit outside the hash chain by
+   * design, so a forged IP cannot make a forged entry look authentic. They are
+   * the difference between "Maria checked out 2 kg" and "Maria checked out 2 kg,
+   * from the till, and the confirmation password was wrong".
+   */
+  ip_address: string | null;
+  outcome: string | null;
   created_at: string;
 };
 
 type Verify = { intact: boolean; broken: { broken_seq: number; reason: string }[] };
+
+/**
+ * What each action is, in words.
+ *
+ * The raw names are the wire format, kept in the log so the audit trail and the
+ * code agree exactly. This is only for the reading: `STOCK_CHECKOUT_DENIED` is
+ * precise and useless to an owner scanning a list. Unknown actions fall through
+ * to the raw name, so an action added later is never shown as blank.
+ */
+const ACTION_LABEL: Record<string, string> = {
+  LOGIN: "Signed in",
+  LOGOUT: "Signed out",
+  LOGIN_FAILED: "Sign-in rejected",
+  ITEM_CREATE: "Item added",
+  ITEM_UPDATE: "Item edited",
+  ITEM_DELETE: "Item deleted",
+  ITEM_APPROVE: "Item approved",
+  ITEM_REJECT: "Item rejected",
+  ITEM_CHANGE_REQUEST: "Edit submitted for approval",
+  ITEM_CHANGE_APPROVE: "Edit approved",
+  ITEM_CHANGE_REJECT: "Edit rejected",
+  ITEM_PERMISSION_GRANT: "Item permission granted",
+  ITEM_PERMISSION_REVOKE: "Item permission revoked",
+  STOCK_CHECKOUT: "Checked out",
+  STOCK_RESTOCK: "Restocked",
+  WASTE_LOG: "Waste logged",
+  CHECKOUT_DENIED: "Checkout refused",
+  RESTOCK_DENIED: "Restock refused",
+  WASTE_LOG_DENIED: "Waste entry refused",
+  ALERT_RESOLVE: "Alert resolved",
+  ALERT_REOPEN: "Alert reopened",
+  USER_CREATE: "User added",
+  USER_UPDATE: "User edited",
+  EMAIL_RECIPIENT_CREATE: "Email recipient added",
+  EMAIL_RECIPIENT_UPDATE: "Email recipient edited",
+  EMAIL_RECIPIENT_DELETE: "Email recipient removed",
+  EMAIL_SMTP_SAVE: "Sending account saved",
+  EMAIL_SMTP_CLEAR: "Sending account cleared",
+  EMAIL_REPORT_SENT: "Report emailed",
+  CATEGORY_CREATE: "Category added",
+  CATEGORY_DELETE: "Category removed",
+  LOCATION_CREATE: "Location added",
+  LOCATION_UPDATE: "Location edited",
+  LOCATION_DELETE: "Location removed",
+  SETTINGS_UPDATE: "Settings changed",
+  BACKUP_RUN: "Backup taken",
+  SEED: "Database seeded",
+};
 
 const ACTION_TONE: Record<
   string,
@@ -54,11 +112,63 @@ const ACTION_TONE: Record<
   EMAIL_RECIPIENT_CREATE: "green",
   EMAIL_RECIPIENT_UPDATE: "amber",
   EMAIL_RECIPIENT_DELETE: "red",
+  EMAIL_SMTP_SAVE: "blue",
+  EMAIL_SMTP_CLEAR: "amber",
+  EMAIL_REPORT_SENT: "blue",
+  // Reference data and configuration.
+  CATEGORY_CREATE: "green",
+  CATEGORY_DELETE: "red",
+  LOCATION_CREATE: "green",
+  LOCATION_UPDATE: "amber",
+  LOCATION_DELETE: "red",
+  SETTINGS_UPDATE: "amber",
+  BACKUP_RUN: "slate",
 };
+
+/** The outcome column, when one was recorded. */
+const OUTCOME_TONE: Record<string, "green" | "red" | "amber" | "slate"> = {
+  success: "green",
+  denied: "red",
+  failed: "red",
+};
+
+/**
+ * Whether an outcome is bad news.
+ *
+ * Used for the dot beside the action as well as the badge, so a refused action is
+ * findable without reading every row — which is the entire reason the column
+ * exists.
+ */
+function outcomeTone(outcome: string | null): "green" | "red" | "amber" | "slate" {
+  if (!outcome) return "slate";
+  return OUTCOME_TONE[outcome] ?? "amber";
+}
+
+const PAGE_SIZE = 200;
+
+/**
+ * The value `query` held this many milliseconds ago.
+ *
+ * The filter below matches against a searchable string built for every loaded
+ * entry, which is the most expensive thing this page does. Debouncing keeps
+ * that off the keystroke path: the box still updates as fast as anyone can
+ * type, but the list settles once they pause.
+ */
+function useDebounced<T>(value: T, ms = 250): T {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setSettled(value), ms);
+    return () => clearTimeout(timer);
+  }, [value, ms]);
+  return settled;
+}
 
 export default function AuditPage() {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [nextBefore, setNextBefore] = useState<number | null>(null);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [query, setQuery] = useState("");
   const [actionFilter, setActionFilter] = useState("");
   const [actorFilter, setActorFilter] = useState("");
@@ -80,11 +190,13 @@ export default function AuditPage() {
     inFlight.current = true;
 
     try {
-      const res = await fetch("/api/audit?limit=200");
+      const res = await fetch(`/api/audit?limit=${PAGE_SIZE}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not load the audit trail");
       setEntries(data.entries ?? []);
       setTotal(data.total ?? 0);
+      setHasMore(Boolean(data.has_more));
+      setNextBefore(data.next_before ?? null);
       setError(null);
     } catch (e: any) {
       setError(e.message || "Could not load the audit trail");
@@ -97,6 +209,33 @@ export default function AuditPage() {
   useEffect(() => {
     load();
   }, []);
+
+  /**
+   * One more page, older than everything already shown (NFR-05).
+   *
+   * Appended rather than replaced: the point of paging an audit trail is to read
+   * it in order, and dropping what is already on screen to show something older
+   * loses a person's place. `before` is the oldest seq loaded, so the rows that
+   * come back are strictly older than the whole current view.
+   */
+  async function loadOlder() {
+    if (nextBefore === null || loadingOlder) return;
+    setLoadingOlder(true);
+
+    try {
+      const res = await fetch(`/api/audit?limit=${PAGE_SIZE}&before=${nextBefore}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not load older entries");
+
+      setEntries((current) => [...current, ...(data.entries ?? [])]);
+      setHasMore(Boolean(data.has_more));
+      setNextBefore(data.next_before ?? null);
+    } catch (e: any) {
+      setError(e.message || "Could not load older entries");
+    } finally {
+      setLoadingOlder(false);
+    }
+  }
 
   async function checkChain() {
     setVerifying(true);
@@ -129,12 +268,38 @@ export default function AuditPage() {
     [entries]
   );
 
+  /*
+   * One lowercase search string per entry, built once per load of the trail.
+   *
+   * This used to call JSON.stringify on every entry's `details` inside the
+   * filter, which meant re-serialising up to 200 payloads on every keystroke.
+   * The details do not change until the trail is reloaded, so the text is built
+   * once here and the filter below just scans it.
+   */
+  const searchable = useMemo(
+    () =>
+      entries.map((e) =>
+        [
+          e.actor_name,
+          e.action,
+          e.entity_type ?? "",
+          e.entity_id ?? "",
+          JSON.stringify(e.details),
+        ]
+          .join(" ")
+          .toLowerCase()
+      ),
+    [entries]
+  );
+
+  const debouncedQuery = useDebounced(query);
+
   const shown = useMemo(() => {
-    const needle = query.trim().toLowerCase();
+    const needle = debouncedQuery.trim().toLowerCase();
     const from = fromDate ? new Date(`${fromDate}T00:00:00`).getTime() : null;
     const to = toDate ? new Date(`${toDate}T23:59:59.999`).getTime() : null;
 
-    return entries.filter((e) => {
+    return entries.filter((e, index) => {
       if (actionFilter && e.action !== actionFilter) return false;
       if (actorFilter && e.actor_name !== actorFilter) return false;
 
@@ -143,18 +308,9 @@ export default function AuditPage() {
       if (to !== null && at > to) return false;
 
       if (!needle) return true;
-      return [
-        e.actor_name,
-        e.action,
-        e.entity_type ?? "",
-        e.entity_id ?? "",
-        JSON.stringify(e.details),
-      ]
-        .join(" ")
-        .toLowerCase()
-        .includes(needle);
+      return searchable[index].includes(needle);
     });
-  }, [entries, query, actionFilter, actorFilter, fromDate, toDate]);
+  }, [entries, searchable, debouncedQuery, actionFilter, actorFilter, fromDate, toDate]);
 
   const hasFilters = Boolean(
     query || actionFilter || actorFilter || fromDate || toDate
@@ -171,9 +327,8 @@ export default function AuditPage() {
     if (entries.length === 0) return null;
     const newest = entries[0].seq;
     const oldest = entries[entries.length - 1].seq;
-    const truncated = total > entries.length;
-    return { newest, oldest, truncated, total };
-  }, [entries, total]);
+    return { newest, oldest };
+  }, [entries]);
 
   function clearFilters() {
     setQuery("");
@@ -301,12 +456,14 @@ export default function AuditPage() {
               <>
                 {" · "}
                 <span className="font-mono">seq {window.oldest}–{window.newest}</span>
-                {window.truncated && (
-                  <span title={`Older entries exist — the table loads the newest ${entries.length} of ${window.total}. Numbers skip because the log is append-only.`}>
-                    {" · "}newest {entries.length} of {window.total}
-                  </span>
-                )}
               </>
+            )}
+            {hasMore && (
+              <span
+                title={`Older entries exist. The newest ${entries.length} of ${total} are loaded; the log is append-only, so sequences continue to skip numbers as new entries arrive.`}
+              >
+                {" · "}newest {entries.length} of {total}
+              </span>
             )}
           </div>
         </div>
@@ -331,13 +488,25 @@ export default function AuditPage() {
                       </div>
                     </div>
                     <Badge tone={ACTION_TONE[e.action] ?? "slate"}>
-                      {e.action}
+                      {ACTION_LABEL[e.action] ?? e.action}
                     </Badge>
                   </div>
 
                   <DataField label="Seq">
                     <span className="font-mono">{e.seq}</span>
                   </DataField>
+                  {e.outcome && (
+                    <DataField label="Outcome">
+                      <Badge tone={outcomeTone(e.outcome)} variant="tag">
+                        {e.outcome}
+                      </Badge>
+                    </DataField>
+                  )}
+                  {e.ip_address && (
+                    <DataField label="From">
+                      <span className="font-mono text-xs">{e.ip_address}</span>
+                    </DataField>
+                  )}
                   <DataField label="Entity">
                     <span className="text-xs">
                       {e.entity_type ?? "—"}
@@ -368,6 +537,8 @@ export default function AuditPage() {
                   <th className="th">When</th>
                   <th className="th">Actor</th>
                   <th className="th">Action</th>
+                  <th className="th">Outcome</th>
+                  <th className="th">From</th>
                   <th className="th">Entity</th>
                   <th className="th">Details</th>
                 </tr>
@@ -383,9 +554,26 @@ export default function AuditPage() {
                     </td>
                     <td className="td text-cocoa-700">{e.actor_name}</td>
                     <td className="td">
-                      <Badge tone={ACTION_TONE[e.action] ?? "slate"}>
-                        {e.action}
-                      </Badge>
+                      {/* The wire name stays in the tooltip: the log and the
+                          code agree on it, and someone reading a defect report
+                          needs to be able to search for the exact string. */}
+                      <span title={e.action}>
+                        <Badge tone={ACTION_TONE[e.action] ?? "slate"}>
+                          {ACTION_LABEL[e.action] ?? e.action}
+                        </Badge>
+                      </span>
+                    </td>
+                    <td className="td whitespace-nowrap">
+                      {e.outcome ? (
+                        <Badge tone={outcomeTone(e.outcome)} variant="tag">
+                          {e.outcome}
+                        </Badge>
+                      ) : (
+                        <span className="text-cocoa-200">—</span>
+                      )}
+                    </td>
+                    <td className="td whitespace-nowrap font-mono text-xs text-cocoa-400">
+                      {e.ip_address ?? "—"}
                     </td>
                     <td className="td text-xs text-cocoa-400">
                       {e.entity_type ?? "—"}
@@ -406,6 +594,25 @@ export default function AuditPage() {
               </tbody>
             </table>
             </div>
+
+            {/* Older entries, one page at a time. Shown after the table rather
+                than before it, because the newest activity is what someone
+                opening an audit trail is nearly always looking for. */}
+            {hasMore && (
+              <div className="flex items-center justify-center gap-3 border-t border-cream-200 bg-cream-50 px-4 py-3">
+                <span className="text-xs text-cocoa-400">
+                  Showing the newest {entries.length} of {total} entries
+                </span>
+                <button
+                  type="button"
+                  className="btn-ghost !px-3 !py-1.5 text-xs"
+                  onClick={loadOlder}
+                  disabled={loadingOlder}
+                >
+                  {loadingOlder ? "Loading..." : "Load older entries"}
+                </button>
+              </div>
+            )}
           </>
         )}
       </Card>

@@ -2,7 +2,7 @@ import { db } from "@/lib/supabase";
 import { handler, ok, fail, badId, readBody } from "@/lib/api";
 import { requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
-import { emailStatus, dispatchQueued, queueDirectEmail } from "@/lib/email";
+import { emailStatus, dispatchQueued, verifySmtpAccount } from "@/lib/email";
 import {
   describeSmtpConfig,
   validateSmtp,
@@ -15,8 +15,14 @@ import { decryptSecret } from "@/lib/credential-store";
 
 export const runtime = "nodejs";
 
-/** The families a recipient can subscribe to, and how the UI labels them. */
-export const KINDS = [
+/**
+ * The families a recipient can subscribe to, and how the UI labels them.
+ *
+ * Not exported: a route module may only export the HTTP handlers and the
+ * config keys Next documents (`runtime`, `dynamic`, ...). Anything else is
+ * rejected by the generated route types, so this stays local to the file.
+ */
+const KINDS = [
   { key: "low_stock", label: "Low stock" },
   { key: "out_of_stock", label: "Out of stock" },
   { key: "near_expiry", label: "Expiring soon" },
@@ -70,7 +76,12 @@ export const GET = handler(async (req: Request) => {
     const queue = await db()
       .from("email_notifications")
       .select(
-        `id, kind, subject, status, attempts, last_error, queued_at, sent_at,
+        // `body` is selected deliberately. The delivery log is how an admin
+        // answers "why did I get that email?", and a low-stock message is titled
+        // "CafeTrack: Low Stock" for every item — the item is named only in the
+        // body. Without it the log shows a column of identical subjects and
+        // cannot answer the question it exists for.
+        `id, kind, subject, body, status, attempts, last_error, queued_at, sent_at,
          email_recipients(email_address, display_name)`
       )
       .order("queued_at", { ascending: false })
@@ -183,7 +194,8 @@ export const DELETE = handler(async (req: Request) => {
  *   { action: 'clear_smtp' }     forget it and fall back to the environment
  *   { action: 'send_now' }       try to deliver whatever is queued
  *   { action: 'retry_failed' }   return failed rows to the queue
- *   { action: 'test', to }       send one message to prove the account works
+ *   { action: 'test', to }       send one message directly to prove the account
+ *                               works, whether or not email is switched on
  *   { action: 'summary_now' }    queue the daily summary without waiting for it
  */
 export const PATCH = handler(async (req: Request) => {
@@ -226,7 +238,33 @@ export const PATCH = handler(async (req: Request) => {
       password_changed: Boolean(body.pass),
     });
 
-    return ok({ smtp: await describeSmtpConfig(), saved: true });
+    // Verify straight away, and say what failed.
+    //
+    // Saving an account and then being told "now go and find the test button and
+    // hope" is how a café ends up believing email works when it does not: nothing
+    // happens for days, and the first sign of it is a stockout nobody was warned
+    // about. The send is the only proof that exists, so it happens here, while the
+    // password that was just typed is still the thing being checked.
+    //
+    // The save is kept even when verification fails. An account that is correct
+    // but temporarily unreachable — the provider rate-limiting, the network down —
+    // is still worth having stored, and throwing it away would mean retyping an
+    // app password over a transient outage. So the failure is reported alongside
+    // the save, not instead of it.
+    const verifyTo = String(body.verify_to || checked.values.user).trim();
+    const verification =
+      body.verify === false
+        ? null
+        : await verifySmtpAccount(verifyTo).catch((e) => ({
+            ok: false as const,
+            to: verifyTo,
+            title: "Could not check the account.",
+            fix: "The details were saved. Try checking again in a moment.",
+            transient: true,
+            server: String(e?.message ?? e ?? "").slice(0, 300),
+          }));
+
+    return ok({ smtp: await describeSmtpConfig(), saved: true, verification });
   }
 
   if (action === "clear_smtp") {
@@ -238,6 +276,14 @@ export const PATCH = handler(async (req: Request) => {
   }
 
   if (action === "send_now") {
+    // The dispatcher swallows "email is off" into a zero-count result, which is
+    // correct for its scheduler caller but reads as "0 sent, success" here. For a
+    // person pressing a button the answerable question is "was anything sent?",
+    // and the honest one is often "no, and the reason is…".
+    const status = await emailStatus();
+    if (!status.enabled) return fail("Email is switched off.", 409);
+    if (!status.configured) return fail("No sending account is set up.", 409);
+
     const result = await dispatchQueued(50);
     return ok(result);
   }
@@ -258,8 +304,24 @@ export const PATCH = handler(async (req: Request) => {
     const { data, error } = await db().rpc("enqueue_daily_summary");
     if (error) return fail(error.message, 500);
 
-    const queued = Number((data as any)?.out ?? 0);
+    const queued = Number(
+      // `enqueue_daily_summary` returns an integer, so the value arrives
+      // unwrapped: the local adapter hands back `rows[0].out`, and PostgREST
+      // hands back the scalar itself. Reading `data.out` therefore found
+      // `undefined`, `Number(undefined)` was 0, and this branch answered "already
+      // sent today" every time — the summary queued correctly and was then
+      // reported as a failure, so an admin could never send one on demand and had
+      // no way to tell that from the real condition. Both shapes are accepted
+      // rather than assuming one, because being wrong here is a silent no-op.
+      typeof data === "number" ? data : (data as any)?.out ?? 0
+    );
     if (queued === 0) {
+      // Two quite different reasons produce a zero, and naming the wrong one
+      // sends the admin hunting for a summary they already received.
+      const status = await emailStatus();
+      if (status.recipients === 0) {
+        return fail("There is nobody to send it to. Add an email recipient first.");
+      }
       return fail(
         "Today's summary has already been sent. It goes out once a day, so try again tomorrow.",
         409
@@ -271,34 +333,35 @@ export const PATCH = handler(async (req: Request) => {
   }
 
   if (action === "test") {
+    // A direct send rather than a queued one.
+    //
+    // This used to queue the message and dispatch it, which meant it could only
+    // work once email was switched on — so the button was dead exactly when it was
+    // needed. Verifying an account is what you do *before* switching it on; asking
+    // someone to switch on a feature they are trying to find out whether it works
+    // is asking them to take the risk in order to reduce it.
+    //
+    // The failure now carries a diagnosis, so "535" arrives as an instruction.
     const to = String(body.to || "").trim();
-    try {
-      await queueDirectEmail(
-        to,
-        "CafeTrack: test message",
-        [
-          "This is a test message from CafeTrack.",
-          "",
-          "If you are reading it, email notifications are working.",
-          "Nothing else was sent — no alerts, no summary.",
-        ].join("\n")
-      );
-    } catch (e: any) {
-      return fail(e?.message || "Could not queue the test message");
+    const result = await verifySmtpAccount(to).catch((e) => ({
+      ok: false as const,
+      to,
+      title: "Could not check the account.",
+      fix: "Try again in a moment.",
+      transient: true,
+      server: String(e?.message ?? e ?? "").slice(0, 300),
+    }));
+
+    if (!result.ok) {
+      return fail(result.title, 502, {
+        fix: result.fix,
+        transient: result.transient,
+        server: result.server,
+        to: result.to,
+      });
     }
 
-    const result = await dispatchQueued(5);
-
-    // A queued-but-unsent message is a real failure to report. "Send test" that
-    // answers "ok" while nothing went out is worse than no button.
-    if (result.sent === 0) {
-      const detail =
-        result.errors[0] ||
-        "Email is switched off, or SMTP_HOST / SMTP_USER / SMTP_PASS are not set in .env.local.";
-      return fail(`Test message was not sent. ${detail}`, 502);
-    }
-
-    return ok({ sent: result.sent });
+    return ok({ sent: 1, to: result.to, ms: result.ms });
   }
 
   return fail("Unknown action");

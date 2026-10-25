@@ -4,7 +4,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Stat, ViewPill, Badge, Spinner, Empty } from "@/components/ui";
 import { BaristaArt } from "@/components/BrandArt";
+import { LiveRegion } from "@/components/LiveRegion";
 import { fmtQty, fmtDateTime, daysUntil } from "@/lib/format";
+import { useLiveRefresh } from "@/lib/use-live-refresh";
 
 type Item = {
   id: string;
@@ -33,12 +35,16 @@ export default function DashboardPage() {
   const inFlight = useRef(false);
 
   async function load(force = false) {
-    // A 2s poll is cheap, but a forgotten background tab has no reason to keep
-    // asking. The first load is forced, so a hidden tab still populates.
+    // Nothing on this page is time-critical to the millisecond, and a forgotten
+    // background tab has no reason to keep asking — whether the trigger was a
+    // poll or an event. The first load is forced, so a hidden tab still
+    // populates when the owner comes back to it.
     if (!force && document.hidden) return;
 
-    // Skip while a poll is still in flight so a slow response cannot land
-    // late and overwrite fresher data.
+    // Skip while a load is still in flight so a slow response cannot land late
+    // and overwrite fresher data. Both mechanisms funnel through here, so an
+    // event arriving during a poll is dropped — the poll already has the answer
+    // the event was announcing.
     if (inFlight.current) return;
     inFlight.current = true;
 
@@ -62,12 +68,16 @@ export default function DashboardPage() {
     }
   }
 
+  // First paint, then stay current.
+  //
+  // `useLiveRefresh` owns both the event subscription and the poll that backs it
+  // up, so this page carries no timers of its own — one hook rather than two
+  // independent refresh paths that could disagree about how fresh the figures
+  // are.
+  const { status: liveStatus } = useLiveRefresh(load);
+
   useEffect(() => {
     load(true);
-    // Near-real-time refresh, skipped while the tab is hidden (see load).
-    // Wrapped in an arrow so the interval cannot pass an argument into `force`.
-    const timer = setInterval(() => load(), 2000);
-    return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -143,6 +153,39 @@ export default function DashboardPage() {
 
       <div className="relative space-y-6">
         <h1 className="deco-title text-4xl">Inventory Dashboard</h1>
+
+        {/*
+          Announced, never shown as an alert. When the event stream is down the
+          figures are still correct — the poll is running — so the honest thing
+          is to say so quietly rather than put a red banner over a page that is
+          working. A sighted user gets the same information from the badge.
+        */}
+        <LiveRegion
+          message={
+            liveStatus === "live"
+              ? null
+              : "Live updates disconnected. Figures are still refreshing every few seconds."
+          }
+        />
+
+        {liveStatus !== "live" && (
+          <span
+            className="inline-flex items-center gap-1.5 rounded-full bg-cream-100 px-2.5 py-1 text-[11px] text-cocoa-500"
+            title={
+              liveStatus === "connecting"
+                ? "Connecting to live updates"
+                : "Live updates unavailable — refreshing every few seconds instead"
+            }
+          >
+            <span
+              className={`inline-block h-1.5 w-1.5 rounded-full ${
+                liveStatus === "connecting" ? "bg-amber-500" : "bg-cocoa-300"
+              }`}
+              aria-hidden="true"
+            />
+            {liveStatus === "connecting" ? "Connecting…" : "Refreshing every few seconds"}
+          </span>
+        )}
 
         {error && (
           <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">

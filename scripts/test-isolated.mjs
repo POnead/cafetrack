@@ -34,9 +34,12 @@ if (PORT === 3100) {
 const SUITES = [
   ["test:smoke", "smoke-test.mjs"],
   ["test:edge", "_edge-tests.mjs"],
+  ["test:id", "_id-verification-tests.mjs"],
   ["test:pages", "_pages.mjs"],
+  ["test:email", "_email-tests.mjs"],
   ["test:journeys", "_journeys.mjs"],
   ["test:ui", "_ui.mjs"],
+  ["test:camera", "_camera-tests.mjs"],
   ["test:tour", "_usertour.mjs"],
   ["perf", "perf-check.mjs"],
 ];

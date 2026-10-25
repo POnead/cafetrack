@@ -35,7 +35,13 @@
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts",
     ".next-test/types/**/*.ts",
-    ".next-test/dev/types/**/*.ts"
+    ".next-test/dev/types/**/*.ts",
+    ".next-bench-warm/types/**/*.ts",
+    ".next-bench-warm/dev/types/**/*.ts",
+    ".next-bench-wp/types/**/*.ts",
+    ".next-bench-wp/dev/types/**/*.ts",
+    ".next-bench-turbo/types/**/*.ts",
+    ".next-bench-turbo/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"

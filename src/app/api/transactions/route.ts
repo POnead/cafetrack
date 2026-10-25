@@ -54,7 +54,7 @@ export const GET = handler(async (req: Request) => {
     .from("transactions")
     .select(
       `id, type, actor_id, actor_name, note, created_at,
-       transaction_items(id, sku, item_name, quantity, qty_before, qty_after)`
+       transaction_items(id, sku, item_name, quantity, qty_before, qty_after, expiration_date)`
     )
     .order("created_at", { ascending: false })
     .order("id", { ascending: true })
@@ -189,7 +189,14 @@ export const POST = handler(async (req: Request) => {
   // crossing its threshold, or a new batch arriving close to its date). Dispatch
   // is fired without awaiting so a slow mail server cannot hold up the till.
   await db().rpc("refresh_alerts");
-  // Fire-and-forget: emit alerts_changed event when new alerts fire.
+  // Stock moved, so the item list is out of date as well as the movements and the
+  // alerts — three separate pages that each hold their own copy of these numbers.
+  eventBus.emit(Events.ITEMS_CHANGED, {
+    action: type,
+    skus: (data?.items ?? []).map((line: any) => line.sku),
+  });
+
+  // The alert pass has just run, so anything it opened or escalated is current.
   eventBus.emit(Events.ALERTS_CHANGED, { type: "new", count: 0 });
 
   dispatchSoon();

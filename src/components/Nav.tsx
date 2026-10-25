@@ -30,6 +30,7 @@ const ADMIN_NAV: NavGroup[] = [
     title: "Operations",
     items: [
       { href: "/checkout", label: "Checkout & Restock", icon: CartIcon },
+      { href: "/history", label: "History", icon: ChartIcon },
     ],
   },
   {
@@ -67,6 +68,7 @@ const STAFF_NAV: NavGroup[] = [
     title: "Operations",
     items: [
       { href: "/checkout", label: "Checkout & Restock", icon: CartIcon },
+      { href: "/history", label: "History", icon: ChartIcon },
     ],
   },
   // FR-03: staff can put new ingredients in. Whether their submission becomes

@@ -1,7 +1,7 @@
 ﻿"use client";
 
 import { useEffect, useRef, useState } from "react";
-import JsBarcode from "jsbarcode";
+import JsBarcode from "@/lib/jsbarcode-code128";
 
 export type BarcodeLabel = { value: string; title: string; subtitle?: string };
 
@@ -186,7 +186,7 @@ export async function printBarcodeLabelsAsync(labels: BarcodeLabel[]) {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     draw(svg, label.value, fit.moduleWidth, fit.width);
 
-    // Vector, so the printer draws the bars itself â€” nothing is resampled.
+    // Vector, so the printer draws the bars itself — nothing is resampled.
     const markup = new XMLSerializer().serializeToString(svg);
 
     cards.push(`
@@ -203,12 +203,6 @@ export async function printBarcodeLabelsAsync(labels: BarcodeLabel[]) {
     return;
   }
 
-  const win = window.open("", "_blank", "width=800,height=900");
-  if (!win) {
-    alert("Pop-up blocked. Allow pop-ups for this site to print barcode labels.");
-    return;
-  }
-
   const warning =
     (skipped.length
       ? `<div class="no-print skipped">Skipped (not encodable): ${escapeHtml(
@@ -221,10 +215,38 @@ export async function printBarcodeLabelsAsync(labels: BarcodeLabel[]) {
         )}</div>`
       : "");
 
-  win.document.write(`
+  /*
+   * Print via an embedded iframe rather than window.open().
+   *
+   * window.open("", "_blank", ...) is treated as an unsolicited pop-up by
+   * every modern browser, so the print window never appears and the person
+   * is left with nothing at all — no label, no error, just a button that
+   * seems to do nothing. An iframe is not a pop-up. It is part of this
+   * page, so it opens reliably everywhere, and it gives the same result: a
+   * document of labels that the browser can print.
+   */
+  const iframe = document.createElement("iframe");
+  iframe.style.position = "fixed";
+  iframe.style.top = "0";
+  iframe.style.left = "0";
+  iframe.style.width = "100vw";
+  iframe.style.height = "100vh";
+  iframe.style.border = "none";
+  iframe.style.background = "#fff";
+  iframe.style.zIndex = "99999";
+  iframe.setAttribute("aria-label", "Barcode label print preview");
+
+  const doc = iframe.contentDocument;
+  if (!doc) {
+    alert("This browser cannot print barcode labels.");
+    return;
+  }
+
+  doc.open();
+  doc.write(`
     <html>
       <head>
-        <title>CafeTrack â€” Barcode Labels</title>
+        <title>CafeTrack — Barcode Labels</title>
         <style>
           body { font-family: system-ui, sans-serif; padding: 24px; color: #3D2B1F; }
           .grid { display: flex; flex-wrap: wrap; gap: 16px; }
@@ -235,15 +257,17 @@ export async function printBarcodeLabelsAsync(labels: BarcodeLabel[]) {
           .title { font-weight: 700; font-size: 13px; margin-bottom: 2px; }
           .sub { font-size: 11px; color: #8B5E3C; margin-bottom: 8px; }
           .code { font-family: ui-monospace, monospace; font-size: 11px; color: #96755A; margin-top: 6px; }
-          /* Never stretch the bars â€” the module width is already exact. */
+          /* Never stretch the bars — the module width is already exact. */
           .bars svg { display: block; margin: 0 auto; }
           .skipped { margin-bottom: 16px; font-size: 12px; color: #B42318; }
+          .close { padding:8px 16px;border-radius:999px;border:1px solid #D99B3F;background:#E8B563;color:#3D2B1F;font-weight:600;font-size:14px;cursor:pointer;margin-right:8px; }
           @page { size: auto; margin: 8mm; }
           @media print { .no-print { display: none; } }
         </style>
       </head>
       <body>
         <div class="no-print" style="margin-bottom:16px">
+          <button class="close" onclick="window.frameElement.remove()">Close</button>
           <button onclick="window.print()" style="padding:8px 16px;border-radius:999px;border:1px solid #D99B3F;background:#E8B563;color:#3D2B1F;font-weight:600;font-size:14px;cursor:pointer">
             Print
           </button>
@@ -253,7 +277,17 @@ export async function printBarcodeLabelsAsync(labels: BarcodeLabel[]) {
       </body>
     </html>
   `);
-  win.document.close();
+  doc.close();
+
+  document.body.appendChild(iframe);
+
+  /*
+   * Clicking Close removes the iframe from the page. This runs inside the
+   * iframe's own window, so "this" is the Close button itself.
+   */
+  doc.querySelector("button.close")?.addEventListener("click", () => {
+    iframe.remove();
+  });
 }
 
 function escapeHtml(s: string) {

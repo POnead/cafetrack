@@ -70,7 +70,7 @@ export const GET = handler(
 /** Resolve or re-open a single alert. */
 export const PATCH = handler(
   async (req: Request, { params }: { params: Promise<{ id: string }> }) => {
-    // Resolving is an admin action (SR-F30). The GET above stays open to staff so
+    // Resolving is an admin action (FR-08). The GET above stays open to staff so
     // they can see why an item is unavailable, but a barista must not be able to
     // silence a low-stock or expiry alert that an admin still needs to act on.
     const user = await requireAdmin();

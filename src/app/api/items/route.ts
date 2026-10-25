@@ -3,6 +3,8 @@ import { handler, ok, fail, readBody, clientIp } from "@/lib/api";
 import { requireUser } from "@/lib/auth";
 import { canManageItems, approvalCodeMatches } from "@/lib/permissions";
 import { audit } from "@/lib/audit";
+import { eventBus, Events } from "@/lib/events";
+import { dispatchSoon } from "@/lib/email";
 import { randomBytes } from "node:crypto";
 import {
   FieldError,
@@ -11,10 +13,27 @@ import {
   parseExpiryDate,
   parsePhysicalForm,
   parseUnitsPerBox,
+  parseUnitPrice,
   assertRefExists,
 } from "@/lib/item-validation";
 
 export const runtime = "nodejs";
+
+/**
+ * Columns the item list may be sorted by, mapped to the real column name.
+ *
+ * A whitelist rather than passing `?sort=` through to the query, because the
+ * value would otherwise be caller-controlled text in an ORDER BY — and because
+ * an unmapped value has to fall back to something rather than error.
+ */
+const SORTS: Record<string, string> = {
+  name: "name",
+  sku: "sku",
+  quantity: "quantity",
+  threshold: "low_stock_threshold",
+  expiration: "expiration_date",
+  updated: "updated_at",
+};
 
 /* ---------------- list ---------------- */
 export const GET = handler(async (req: Request) => {
@@ -32,17 +51,45 @@ export const GET = handler(async (req: Request) => {
   const status = searchParams.get("status") ?? "active";
   const submittedByMe = searchParams.get("submitted_by") === "me";
 
+  // Paging (NFR-05: at least 500 items without performance loss). Before this,
+  // every row came back on every request and the browser filtered and sorted
+  // them. That is fine at twelve items and stops being fine at five hundred, and
+  // the fix has to be in the API rather than the page — a client-side filter
+  // over a truncated list quietly hides items, which is worse than being slow.
+  const requestedLimit = Number(searchParams.get("limit") ?? 200);
+  const limit = Math.min(
+    Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 200, 1),
+    500
+  );
+
+  const offsetValue = searchParams.get("offset") ?? "0";
+  const offset = Number(offsetValue);
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    return fail("Offset must be a non-negative whole number");
+  }
+
+  const order = searchParams.get("order");
+  const direction = order === "desc" ? false : true;
+  const sort = SORTS[searchParams.get("sort") ?? "name"] ?? SORTS.name;
+
   let query = db()
     .from("items")
     .select(
       `id, sku, name, physical_form, unit, units_per_box, quantity,
        low_stock_threshold, expiration_date, version, item_status,
        submitted_by, submitted_at, reviewed_by, reviewed_at, review_note,
-       created_at, updated_at,
+       created_at, updated_at, supplier_id,
        category:categories(id, name),
-       location:locations(id, name, min_shelf_life_days)`
+       location:locations(id, name, min_shelf_life_days),
+       supplier:suppliers(id, name)`,
+      { count: "exact" }
     )
-    .order("name", { ascending: true });
+    .order(sort, { ascending: direction })
+    // A stable second key. Without it Postgres may return equal rows in any
+    // order between two requests, so paging could show one twice and skip
+    // another — the classic duplicate-row paging bug.
+    .order("sku", { ascending: true })
+    .range(offset, offset + limit - 1);
 
   if (status === "active" || status === "pending" || status === "rejected") {
     query = query.eq("item_status", status);
@@ -65,7 +112,7 @@ export const GET = handler(async (req: Request) => {
     query = query.eq("category_id", categoryId);
   }
 
-  const { data, error } = await query;
+  const { data, error, count } = await query;
   if (error) return fail(error.message, 500);
 
   let items = data ?? [];
@@ -75,7 +122,20 @@ export const GET = handler(async (req: Request) => {
     );
   }
 
-  return ok({ items });
+  // `total` is the count *before* the low-stock filter, so the client can say
+  // how many match and still report honestly when the filter is on: it shows the
+  // returned rows and leaves the total alone rather than inventing a second
+  // count that could disagree with it.
+  const returned = items.length;
+
+  return ok({
+    items,
+    total: count ?? returned,
+    returned,
+    limit,
+    offset,
+    has_more: offset + returned < (count ?? returned),
+  });
 });
 
 /* ---------------- create ---------------- */
@@ -106,12 +166,14 @@ export const POST = handler(async (req: Request) => {
   let expiry: string | null;
   let physicalForm: string;
   let unitsPerBox: number | null;
+  let unitPrice: number | null;
   try {
     quantity = requireQuantity(body.quantity, "Quantity");
     lowStock = parseThreshold(body.low_stock_threshold ?? 5, "Low-stock threshold");
     expiry = parseExpiryDate(body.expiration_date);
     physicalForm = parsePhysicalForm(body.physical_form);
     unitsPerBox = parseUnitsPerBox(body.units_per_box);
+    unitPrice = parseUnitPrice(body.unit_price);
   } catch (e: any) {
     if (e instanceof FieldError) return fail(e.message);
     throw e;
@@ -123,6 +185,7 @@ export const POST = handler(async (req: Request) => {
   // person can act on.
   let categoryId: string | null;
   let locationId: string | null;
+  let supplierId: string | null;
   try {
     categoryId = await assertRefExists(body.category_id, "Category", async (id) => {
       const { data } = await db()
@@ -135,6 +198,14 @@ export const POST = handler(async (req: Request) => {
     locationId = await assertRefExists(body.location_id, "Location", async (id) => {
       const { data } = await db()
         .from("locations")
+        .select("id")
+        .eq("id", id)
+        .maybeSingle();
+      return Boolean(data);
+    });
+    supplierId = await assertRefExists(body.supplier_id, "Supplier", async (id) => {
+      const { data } = await db()
+        .from("suppliers")
         .select("id")
         .eq("id", id)
         .maybeSingle();
@@ -182,9 +253,11 @@ export const POST = handler(async (req: Request) => {
       name,
       category_id: categoryId,
       location_id: locationId,
+      supplier_id: supplierId,
       physical_form: physicalForm,
       unit: body.unit || "pcs",
       units_per_box: unitsPerBox,
+      unit_price: unitPrice,
       quantity,
       low_stock_threshold: lowStock,
       expiration_date: expiry,
@@ -214,6 +287,22 @@ export const POST = handler(async (req: Request) => {
   // A pending item is invisible to refresh_alerts by design, so this is safe to
   // call either way — it simply does nothing for an unapproved submission.
   await db().rpc("refresh_alerts");
+
+  // An item added below its own threshold raises a low-stock alert, and that
+  // alert's email is queued by refresh_alerts. Dispatching it here is what keeps
+  // NFR-07's "within 60 seconds of the triggering event" true for this path — the
+  // transaction route already dispatches, and without it here a new ingredient
+  // would sit in the queue until the ten-minute scheduler happened by.
+  dispatchSoon();
+
+  // The item list and the approvals list both care that the catalogue changed.
+  // Fire-and-forget, like the transaction route: a slow subscriber must not hold
+  // up the person who is trying to save an ingredient.
+  eventBus.emit(Events.ITEMS_CHANGED, {
+    action: "create",
+    sku,
+    item_status: itemStatus,
+  });
 
   return ok(
     {

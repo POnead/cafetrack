@@ -83,12 +83,34 @@ if (process.env.NODE_ENV !== "production") {
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  // PGlite ships PostgreSQL compiled to WebAssembly. Keep it out of the
-  // webpack bundle so it loads from node_modules at runtime instead.
+  // PGlite ships PostgreSQL compiled to WebAssembly, and pdfkit loads its font
+  // metrics from `data/*.afm` on disk at runtime. Neither survives being
+  // bundled: PGlite's WASM breaks, and pdfkit resolves its data directory
+  // relative to its own file location, so a bundled copy looks for it under the
+  // build directory and fails with ENOENT on the first document.
   //
   // Next 15 renamed this from `experimental.serverComponentsExternalPackages`
   // to the top-level `serverExternalPackages`; the old key is ignored.
-  serverExternalPackages: ["@electric-sql/pglite"],
+  //
+  // `tesseract.js` is here for a sharper version of the same reason as pdfkit.
+  // It does not merely read files relative to its own location — it spawns a Node
+  // worker thread and resolves that worker's entry point through the bundler's own
+  // module root. Bundled, that root becomes a placeholder, and the ID upload route
+  // died with:
+  //
+  //   Cannot find module 'C:\ROOT\node_modules\tesseract.js\src\worker-script\node\index.js'
+  //
+  // No build error and no useful stack, and because the failure happens in the
+  // worker's thread rather than this one it surfaced as an uncaughtException that
+  // took the request down with it. Marking the package external makes Next
+  // `require()` it from node_modules with ordinary Node resolution, which is the
+  // only thing that worker path survives.
+  serverExternalPackages: [
+    "@electric-sql/pglite",
+    "pdfkit",
+    "fontkit",
+    "tesseract.js",
+  ],
   // A package-lock.json exists above this folder, so Next would otherwise infer
   // the parent as the workspace root and warn on every start. Pin it here.
   outputFileTracingRoot: here,
@@ -99,6 +121,106 @@ const nextConfig = {
   // test-isolated server (scripts/dev-test.mjs) points this at its own
   // directory. Unset, nothing changes.
   ...(process.env.NEXT_DIST_DIR ? { distDir: process.env.NEXT_DIST_DIR } : {}),
+  // PGlite's WASM files break under Turbopack's module resolution on Windows
+  // (junction point creation fails with os error 145 — "directory not empty").
+  // Webpack handles this correctly, so we use it instead of Turbopack.
+  //
+  // Superseded: retested against Next 16.3.6 and PGlite now boots and serves
+  // queries under Turbopack on this machine. The junction error is gone. The
+  // webpack function below remains because the face-api alias it carries has no
+  // automatic Turbopack equivalent — hence the matching `turbopack.resolveAlias`
+  // further down. Switch between the two with the `--webpack` / `--turbopack`
+  // flags; the alias is declared for both so neither one silently falls back to
+  // the broken face-api build.
+  webpack: (config, { isServer }) => {
+    if (isServer) {
+      // `serverExternalPackages` covers Next's own resolution, but the webpack
+      // config is built separately and has to be told directly.
+      config.externals = [
+        ...(config.externals || []),
+        "@electric-sql/pglite",
+        "tesseract.js",
+      ];
+    }
+
+    /*
+     * face-api resolves to its `nobundle` build, and the wasm backend to a stub.
+     *
+     * The default browser bundle inlines tfjs-core but ships no compute backend
+     * with it, and exposes `tf` as a read-only ESM binding. So the two ways of
+     * feeding it a backend both fail: the bundle has none to find, and
+     * `faceapi.tf = tf` throws "Cannot set property tf ... which has only a
+     * getter", because module namespace properties are not writable.
+     *
+     * `esm-nobundle` imports `@tensorflow/tfjs` and its backends as ordinary
+     * modules instead. Webpack then hands face-api the very same tfjs instance
+     * this app already uses — the one with webgl and cpu registered — so there is
+     * a single copy of the library and no injection step at all.
+     *
+     * It imports `@tensorflow/tfjs-backend-wasm` unconditionally, and that package
+     * is installed even though this app never selects the wasm backend (the choice
+     * is webgl then cpu, both of which ship with `@tensorflow/tfjs`). Aliasing the
+     * import to a stub was tried first and abandoned: webpack rewrites the matched
+     * prefix and appends the remainder, so the deep specifier resolved to
+     * `<stub>/dist/index.js` and the resolver tried to scandir a file as a
+     * directory. The real package is simpler and cannot drift out of step with
+     * face-api's import path.
+     */
+    config.resolve = config.resolve ?? {};
+    config.resolve.alias = {
+      ...(config.resolve.alias ?? {}),
+      "@vladmandic/face-api": "@vladmandic/face-api/dist/face-api.esm-nobundle.js",
+    };
+
+    /*
+     * face-api's ESM build reaches for `require` in a couple of optional paths
+     * (node-only helpers it never takes in a browser). Webpack cannot statically
+     * resolve those and warns on every compile. The warning says nothing about
+     * whether the feature works, and repeated per recompile it was burying real
+     * build problems — so it is silenced for this one package rather than for the
+     * whole build, which would hide genuine ones.
+     *
+     * This lives here rather than as a top-level `ignoreWarnings` because that
+     * key is not part of NextConfig — Next validates the config object and
+     * refuses to start on an unrecognised key. `ignoreWarnings` is a webpack
+     * option, so it has to be set on the webpack config.
+     */
+    config.ignoreWarnings = [
+      ...(config.ignoreWarnings ?? []),
+      {
+        module: /@vladmandic[\\/]face-api/,
+        message: /Critical dependency: require function/,
+      },
+    ];
+
+    return config;
+  },
+
+  /*
+   * The Turbopack half of the face-api alias above.
+   *
+   * `webpack()` is ignored under Turbopack, so without this key a Turbopack
+   * build resolves `@vladmandic/face-api` through the package's own
+   * `browser` field to `dist/face-api.esm.js` — the build the comment above
+   * describes as broken: tfjs-core inlined, no compute backend, and `tf` as a
+   * read-only ESM binding. Face capture and face sign-in would then fail at
+   * runtime with no build-time error at all, which is the worst kind of
+   * difference between two bundlers.
+   *
+   * The alias is only needed for browser targets. The server never imports
+   * face-api — the matching maths lives in lib/face.ts, which is pure — so
+   * `browser` keeps it scoped to where the broken build actually lives.
+   *
+   * Declaring this key at all is also what lets Next 16 start under Turbopack
+   * at all: with a `webpack` key present and no `turbopack` key, it refuses.
+   */
+  turbopack: {
+    resolveAlias: {
+      "@vladmandic/face-api": {
+        browser: "@vladmandic/face-api/dist/face-api.esm-nobundle.js",
+      },
+    },
+  },
 };
 
 export default nextConfig;

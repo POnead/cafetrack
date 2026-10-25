@@ -112,6 +112,7 @@ export function Badge({
   tone = "slate",
   variant = "label",
   dot = true,
+  className = "",
 }: {
   children: ReactNode;
   tone?: BadgeTone;
@@ -128,6 +129,14 @@ export function Badge({
    * state is still readable without relying on hue alone.
    */
   dot?: boolean;
+  /**
+   * Escape hatch for a badge sitting somewhere its default type size is wrong —
+   * a dense table cell wants smaller text than a card header. Appended after
+   * the tone classes, so it wins on the properties it sets and leaves the rest
+   * alone. Every other primitive in this file takes one; this one did not, and
+   * call sites were passing it anyway.
+   */
+  className?: string;
 }) {
   const label = {
     slate: "bg-cocoa-50 text-cocoa-600",
@@ -150,7 +159,9 @@ export function Badge({
   const isTag = variant === "tag";
 
   return (
-    <span className={`${isTag ? "badge-tag" : "badge"} ${(isTag ? tag : label)[tone]}`}>
+    <span
+      className={`${isTag ? "badge-tag" : "badge"} ${(isTag ? tag : label)[tone]} ${className}`}
+    >
       {isTag && dot && (
         <span
           className="h-1.5 w-1.5 shrink-0 rounded-full bg-current"
@@ -165,6 +176,26 @@ export function Badge({
 /* ------------------------------------------------------------------ */
 /* Empty + Spinner                                                    */
 /* ------------------------------------------------------------------ */
+
+export function Tooltip({
+  label,
+  tip,
+}: {
+  label: string;
+  tip: string;
+}) {
+  return (
+    <span className="relative inline-flex items-center gap-1" title={tip}>
+      {label}
+      <span
+        className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-cocoa-300 text-[9px] font-bold leading-none text-cocoa-500"
+        aria-hidden="true"
+      >
+        !
+      </span>
+    </span>
+  );
+}
 
 export function Empty({ children }: { children: ReactNode }) {
   return <div className="py-10 text-center text-sm text-cocoa-300">{children}</div>;

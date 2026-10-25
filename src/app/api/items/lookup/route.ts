@@ -8,6 +8,9 @@ export const runtime = "nodejs";
 /**
  * Resolve a scanned code to an item.
  * Accepts a plain SKU or a URL containing /i/<SKU>.
+ * Barcodes printed with an expiry date suffix (SKU-YYYY-MM-DD) are split:
+ * the SKU part resolves the item, and the date is echoed back so the till
+ * can show which batch is being scanned.
  */
 export const GET = handler(async (req: Request) => {
   await requireUser();
@@ -18,8 +21,17 @@ export const GET = handler(async (req: Request) => {
   if (!raw) return fail("Missing code");
 
   let sku = raw;
+  let batchExpiry: string | null = null;
   const urlMatch = raw.match(/\/i\/([A-Za-z0-9\-]+)/);
   if (urlMatch) sku = urlMatch[1];
+
+  // A barcode printed with an expiry date looks like "CT-CAT-ABCD-2026-04-01".
+  // Split on the last YYYY-MM-DD pattern so the SKU stays intact.
+  const dateMatch = sku.match(/(.+)-(\d{4}-\d{2}-\d{2})$/);
+  if (dateMatch) {
+    sku = dateMatch[1];
+    batchExpiry = dateMatch[2];
+  }
 
   const { data, error } = await db()
     .from("items")
@@ -56,5 +68,5 @@ export const GET = handler(async (req: Request) => {
     return fail(`No item matches "${sku}"`, 404);
   }
 
-  return ok({ item: data });
+  return ok({ item: data, batchExpiry });
 });
