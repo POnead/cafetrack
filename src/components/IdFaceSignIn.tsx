@@ -36,12 +36,13 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { readFaceFor, useFaceEngine } from "@/lib/face-engine";
 import {
   cameraAvailable,
   cameraPermissionState,
   openCamera,
   permissionHelp,
-  readFace,
+  
 } from "@/lib/face-client";
 import { openIdCamera } from "@/lib/id-camera";
 import {
@@ -62,7 +63,24 @@ type Props = {
 /** Long edge for the card, matching what IdUpload sends. */
 const CARD_MAX_EDGE = 1600;
 
+/** Turn a Blob or File into a decoded image element. Returns null if it will not decode. */
+async function toImage(blob: Blob): Promise<HTMLImageElement | null> {
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = new Image();
+    img.src = url;
+    await img.decode().catch(() => {});
+    return img.naturalWidth > 0 ? img : null;
+  } finally {
+    // The element has decoded its pixels by now; the URL is only the source.
+    URL.revokeObjectURL(url);
+  }
+}
+
 export default function IdFaceSignIn({ onSignedIn, onCancel }: Props) {
+  // The café's engine, for the same reason StaffCheck reads it: the embedding
+  // has to be in the space the server compares against.
+  const engine = useFaceEngine();
   const [stage, setStage] = useState<Stage>("card");
   const [message, setMessage] = useState<string | null>(null);
   const [blocked, setBlocked] = useState<CameraProblem | null>(null);
@@ -217,7 +235,21 @@ export default function IdFaceSignIn({ onSignedIn, onCancel }: Props) {
       setMessage("Checking…");
 
       try {
-        const face = await readFace(photoFile);
+        /*
+         * A Blob is not drawable, and the SFace engine has to draw the frame to
+         * run its detector — so the photo is turned into an image element first.
+         * The legacy reader accepted a Blob directly; doing the conversion here
+         * keeps both engines on the same input rather than letting one silently
+         * fall back because of its argument type.
+         */
+        const source = photoFile ? await toImage(photoFile) : null;
+        if (!source) {
+          setStage("face");
+          setMessage("That photo could not be read. Try again.");
+          return;
+        }
+
+        const face = await readFaceFor(engine, source);
         if (!face.ok) {
           setStage("face");
           setMessage(face.message || "No face could be read. Try again, in better light.");
@@ -247,7 +279,7 @@ export default function IdFaceSignIn({ onSignedIn, onCancel }: Props) {
         setBusy(false);
       }
     },
-    [onSignedIn]
+    [onSignedIn, engine]
   );
 
   const shoot = useCallback(() => {
@@ -451,3 +483,6 @@ async function normaliseCard(raw: File): Promise<File> {
 }
 
 export { normaliseCard };
+
+
+

@@ -1488,13 +1488,12 @@ create table if not exists user_face_samples (
   captured_at timestamptz not null default now(),
   -- Who took it. Same reasoning as users.face_enrolled_by: it is the first
   -- question asked when an account holds a face that does not work.
-  captured_by uuid references users(id) on delete set null,
-  -- One row per angle. Re-enrolling an angle replaces it rather than appending,
-  -- so "how many angles does this person have" is a count, not a debate about
-  -- which sample is current.
-  unique (user_id, pose)
+  captured_by uuid references users(id) on delete set null
+  -- The uniqueness key is declared below the table, as an index, so that a fresh
+  -- install and a migrated one end up with exactly the same thing. One row per
+  -- angle *per engine*: a migration needs both, so an account re-captured under
+  -- the new engine keeps its old rows working until the cafe switches over.
 );
-
 -- No separate index: the unique constraint above is already an index whose
 -- leading column is user_id, which is how every match reads these rows (all of
 -- one person's samples, in one query).
@@ -1505,6 +1504,13 @@ alter table user_face_samples enable row level security;
 -- engine column is also added explicitly. Installs that predate the two-engine
 -- split get 'legacy', which is what every stored vector in them actually is.
 alter table user_face_samples add column if not exists model text not null default 'legacy';
+
+-- The key widened from (user_id, pose) to (user_id, pose, model), so that a
+-- person can hold samples from both engines while their account is migrated.
+-- Dropping by name if it is there keeps this re-runnable on every boot.
+alter table user_face_samples drop constraint if exists user_face_samples_user_id_pose_key;
+create unique index if not exists idx_user_face_samples_user_pose_model
+  on user_face_samples(user_id, pose, model);
 
 -- No policies created = no access for anon/authenticated roles. The service role
 -- bypasses RLS, which is what the API routes use. Same pattern as every other

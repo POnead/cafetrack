@@ -190,21 +190,47 @@ export async function saveFaceSamples(
 
   const { error } = await db()
     .from("user_face_samples")
-    .upsert(rows, { onConflict: ["user_id", "pose"] });
+    /*
+     * Conflict target matches the unique index exactly: (user_id, pose, model).
+     *
+     * It was (user_id, pose) until the engine joined the key. Postgres refuses an
+     * ON CONFLICT that matches no unique constraint, and the failure was quiet in
+     * the worst way — the route reports a failed side write as a warning while the
+     * straight-on photo is already saved, so an enrolment looked successful and
+     * merely had one angle. The angles suite is what noticed.
+     */
+    .upsert(rows, { onConflict: ["user_id", "pose", "model"] });
 
   if (error) return { error: error.message };
 
-  const kept = new Set(entries.map((e) => e.pose));
-  const stale = FACE_POSES.filter((pose) => !kept.has(pose));
+  /*
+   * Drop the angles this enrolment replaced, *within the engine it wrote*.
+   *
+   * Scoped per engine on purpose: an account being migrated holds rows from both,
+   * and deleting "every pose I did not capture" without that filter would remove
+   * the old engine's rows — which are the ones keeping the person able to work
+   * until the cafe switches over.
+   */
+  const capturedByModel = new Map<FaceEngine, Set<FacePose>>();
+  for (const entry of entries) {
+    const poses = capturedByModel.get(entry.model) ?? new Set<FacePose>();
+    poses.add(entry.pose);
+    capturedByModel.set(entry.model, poses);
+  }
 
-  for (const pose of stale) {
-    const { error: deleteError } = await db()
-      .from("user_face_samples")
-      .delete()
-      .eq("user_id", userId)
-      .eq("pose", pose);
+  for (const [model, kept] of capturedByModel) {
+    for (const pose of FACE_POSES) {
+      if (kept.has(pose)) continue;
 
-    if (deleteError) return { error: deleteError.message };
+      const { error: deleteError } = await db()
+        .from("user_face_samples")
+        .delete()
+        .eq("user_id", userId)
+        .eq("model", model)
+        .eq("pose", pose);
+
+      if (deleteError) return { error: deleteError.message };
+    }
   }
 
   return { error: null };

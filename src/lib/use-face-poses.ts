@@ -22,6 +22,7 @@
  * running the model in the browser.
  */
 import { useCallback, useMemo, useState } from "react";
+
 import {
   FACE_POSES,
   type FacePose,
@@ -30,7 +31,7 @@ import {
   poseFromSignal,
   poseRefusal,
 } from "./face";
-import { readFace } from "./face-client";
+import { readFaceFor, useFaceEngine } from "./face-engine";
 
 /** One frame of a presentation. What goes on the wire as `face_frames`. */
 export type PoseFrame = {
@@ -76,6 +77,12 @@ export type FacePoseSequence = {
 export function useFacePoses(poses: readonly FacePose[] = FACE_POSES): FacePoseSequence & {
   read: (source: HTMLVideoElement | HTMLImageElement) => Promise<ReadResult>;
 } {
+  /*
+   * The café's engine, read once per page. Every screen that checks a face goes
+   * through this hook, so they all run the model the server will compare against.
+   * Using the wrong one is silent: the vectors simply never match.
+   */
+  const engine = useFaceEngine();
   const [frames, setFrames] = useState<PoseFrame[]>([]);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -95,7 +102,7 @@ export function useFacePoses(poses: readonly FacePose[] = FACE_POSES): FacePoseS
     async (source: HTMLVideoElement | HTMLImageElement): Promise<ReadResult> => {
       const expected = poses.find((pose) => !frames.some((f) => f.pose === pose)) ?? activePose;
 
-      const result = await readFace(source);
+      const result = await readFaceFor(engine, source);
       if (!result.ok) {
         setMessage(result.message);
         return { outcome: "retry", frames, message: result.message };
@@ -142,7 +149,7 @@ export function useFacePoses(poses: readonly FacePose[] = FACE_POSES): FacePoseS
         message: null,
       };
     },
-    [frames, poses, activePose]
+    [frames, poses, activePose, engine]
   );
 
   return {
@@ -174,3 +181,5 @@ export function framesBody(frames: readonly PoseFrame[]): { face_frames: PoseFra
     })),
   };
 }
+
+

@@ -506,6 +506,39 @@ export default function SettingsPage() {
           blocks the camera. &ldquo;Take a photo instead&rdquo; still works there
           and needs no camera permission.
         </p>
+
+        {/*
+          The face model.
+
+          Two engines that cannot see each other's vectors, so this is not a
+          preference — switching it means every enrolled person has to be
+          re-photographed before they can pass a check. That is said plainly here
+          rather than discovered by a barista at the start of a shift, and the
+          button is deliberately the quieter style.
+        */}
+        <div className="mt-4 rounded-xl border border-cream-200 bg-cream-50 px-3.5 py-3">
+          <p className="text-sm font-bold text-cocoa-800">Face model</p>
+          <p className="mt-1 text-xs leading-snug text-cocoa-500">
+            {settings.face_engine === "sface"
+              ? "Using the newer model (SFace). It separates people far better than the original, and recognises angled and partly covered faces."
+              : "Using the original model. Enrolments made with it cannot be checked by the newer model, or the other way round."}
+          </p>
+          <p className="mt-1.5 text-xs leading-snug text-terracotta-700">
+            Switching means everyone must have their photo taken again before they
+            can pass a face check. Until then they will be told their face needs
+            re-enrolling, and a manager can let them through with an override.
+          </p>
+          <button
+            type="button"
+            className="btn-ghost mt-2.5 !py-1.5 text-xs"
+            disabled={saving}
+            onClick={() =>
+              saveField("face_engine", settings.face_engine === "sface" ? "legacy" : "sface")
+            }
+          >
+            {settings.face_engine === "sface" ? "Go back to the original model" : "Switch to the newer model"}
+          </button>
+        </div>
       </Card>
 
       {/*

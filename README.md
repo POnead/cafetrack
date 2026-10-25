@@ -218,8 +218,9 @@ in the staff list.
 
 The original recogniser is the limiting factor and its measured band is thin: a
 worst genuine reading of 0.0301 against a closest impostor of 0.0362 leaves about
-ten percent of headroom each way. A replacement is built and measured but **not
-switched on** — nothing imports it yet.
+ten percent of headroom each way. A second engine is built, wired into every
+capture screen, and selectable from Settings. It stays off until it is calibrated
+and staff are re-enrolled.
 
 `src/lib/face-sface.ts` runs **YuNet** (98KB, MIT) for detection and five
 landmarks, and **SFace** (9.4MB, Apache 2.0) for the embedding, on
@@ -260,11 +261,24 @@ test for it stores a byte-identical vector under the other engine and asserts th
 check still refuses.
 
 The consequence is that flipping the setting does not fail silently — an account
-whose samples are all from the other engine reports *needs re-enrolling* instead
-of "not recognised". That is what makes a staged migration possible: people keep
-working on their old enrolment until each is re-captured. There is deliberately no
-Settings control for the switch yet, because the capture screens still compute the
-legacy embedding; the control lands with the re-enrolment flow.
+whose samples are all from the other engine reports *needs re-enrolling* instead of
+"not recognised", and a manager override gets them through a shift.
+
+**Changing engine.** `Settings → Face verification → Face model` switches it, and
+the button says plainly that everyone must be re-photographed first. The order that
+does not lock anyone out:
+
+1. Re-enrol each person under the engine being switched *to*. Their old rows
+   survive — the unique key is (person, angle, engine) — so they keep working under
+   the old setting throughout. `test:angles` asserts exactly this.
+2. Switch the setting once everyone holds both sets of rows.
+3. Anyone missed reports as needing re-enrolment rather than as an unrecognised
+   face, and can be brought in at the next shift.
+
+The capture screens read the engine from `GET /api/face/config` once per page, so
+sign-in, the duty check, step two and card sign-in cannot disagree about which
+model they are running. If the SFace files are missing, the reader falls back to
+the original model rather than leaving the till dead.
 
 ### ID verification
 
@@ -951,4 +965,5 @@ public/
   the approval it exists to get.
 - **A pending item has no barcode.** One is drawn only once the item is approved,
   so a label cannot be printed for stock that is not stock yet.
+
 

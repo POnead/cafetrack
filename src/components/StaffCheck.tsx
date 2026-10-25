@@ -1,5 +1,7 @@
 "use client";
 
+import { readFaceFor, useFaceEngine } from "@/lib/face-engine";
+
 /**
  * Step two of staff sign-in: one button, and whichever of a face or an ID card
  * the person puts in front of it.
@@ -47,7 +49,7 @@ import {
   loadFaceModels,
   openCamera,
   permissionHelp,
-  readFace,
+  
 } from "@/lib/face-client";
 import {
   classifyCameraError,
@@ -68,6 +70,11 @@ type Props = {
 };
 
 export default function StaffCheck({ ticket, fullName, onVerified, onBack }: Props) {
+  /*
+   * The café's engine. Every embedding this screen produces has to be in the
+   * space the server compares against, or a correct face never matches.
+   */
+  const engine = useFaceEngine();
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
@@ -205,7 +212,7 @@ export default function StaffCheck({ ticket, fullName, onVerified, onBack }: Pro
 
       let faceEmbedding: number[] | null = null;
       try {
-        const face = await readFace(canvas);
+        const face = await readFaceFor(engine, canvas);
         // A low-confidence read is not thrown away here. The server is the only
         // thing entitled to decide whether a face counts, and it compares against
         // a known account rather than trusting this number.
@@ -234,7 +241,7 @@ export default function StaffCheck({ ticket, fullName, onVerified, onBack }: Pro
             await img.decode().catch(() => {});
             if (img.naturalWidth > 0) {
               const lib = await import("@/lib/face-client");
-              const idFace = await lib.readFace(img);
+              const idFace = await readFaceFor(engine, img);
               if (idFace.ok) idFaceEmbedding = idFace.embedding;
             }
           }
@@ -278,7 +285,7 @@ export default function StaffCheck({ ticket, fullName, onVerified, onBack }: Pro
     } finally {
       setBusy(false);
     }
-  }, [busy, onVerified, stopCamera, ticket]);
+  }, [busy, engine, onVerified, stopCamera, ticket]);
 
   const problem = blocked ? describeCameraProblem(blocked) : null;
 
@@ -357,3 +364,4 @@ export default function StaffCheck({ ticket, fullName, onVerified, onBack }: Pro
     </div>
   );
 }
+

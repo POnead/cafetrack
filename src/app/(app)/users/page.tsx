@@ -462,7 +462,8 @@ export default function UsersPage() {
   function appendFaceShots(form: FormData, shots: readonly FaceShot[]) {
     for (const shot of shots) {
       form.append(`embedding_${shot.pose}`, shot.embedding.join(","));
-      if (shot.poseSignal !== null) form.append(`signal_${shot.pose}`, String(shot.poseSignal));
+      form.append(`model_${shot.pose}`, shot.model);
+    if (shot.poseSignal !== null) form.append(`signal_${shot.pose}`, String(shot.poseSignal));
       form.append(`quality_${shot.pose}`, String(shot.quality));
       form.append(
         `image_${shot.pose}`,
@@ -2179,3 +2180,4 @@ async function toggleItemPermission(user: StaffUser) {
     </div>
   );
 }
+

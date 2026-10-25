@@ -45,6 +45,13 @@ const PUBLIC_PATHS = [
   // It returns nothing but a boolean and the version, which is the whole reason
   // it is safe to leave open.
   "/api/health",
+  // Which face engine the capture screens should run.
+  //
+  // Public because the sign-in screen needs it before anyone has identified
+  // themselves, and the answer is a property of the cafe's configuration, not of
+  // any account: "legacy" or "sface". It returns nothing else — no threshold, no
+  // counts, no names — so there is nothing here to probe with.
+  "/api/face/config",
 ];
 
 // Next 16 renamed the `middleware` file convention to `proxy`; the export is

@@ -411,6 +411,62 @@ check(
   `${crossProbe.status}`
 );
 
+section("migration — an account can hold both engines at once");
+
+/*
+ * The whole point of putting the engine in the unique key. A person is
+ * re-photographed under the new engine while the cafe still verifies with the
+ * old one, and both sets of rows survive: they keep working under the old
+ * setting, and are ready for the switch. If the second enrolment replaced the
+ * first, this is where a cafe would discover it had locked its floor out.
+ */
+const bothUser = await makeStaff("angleb");
+await upload(
+  `/api/users/${bothUser}/face`,
+  faceForm({ front: [PERSON, 0], left: [PERSON, 0.32], right: [PERSON, -0.32] }),
+  cookie
+);
+const secondEnrol = await upload(
+  `/api/users/${bothUser}/face`,
+  faceForm({
+    front: [PERSON, 0, "sface"],
+    left: [PERSON, 0.32, "sface"],
+    right: [PERSON, -0.32, "sface"],
+  }),
+  cookie
+);
+check("re-enrolling the same angles under the new engine is accepted", secondEnrol.status === 200, `${secondEnrol.status}`);
+check(
+  "and both engines' angles are still on the account",
+  JSON.stringify(secondEnrol.data?.angles) === JSON.stringify(["front", "left", "right"]),
+  JSON.stringify(secondEnrol.data?.angles)
+);
+
+const stillLegacy = await call(
+  "POST",
+  "/api/auth/face-login",
+  {
+    identifier: `angleb${uniq}`,
+    face_frames: [frame("front", PERSON), frame("left", PERSON), frame("right", PERSON)],
+  },
+  undefined
+);
+check("the old engine keeps working while the cafe is still on it", stillLegacy.status === 200, `${stillLegacy.status}`);
+
+await call("PATCH", "/api/settings", { face_engine: "sface" }, cookie);
+const afterSwitch = await call(
+  "POST",
+  "/api/auth/face-login",
+  {
+    identifier: `angleb${uniq}`,
+    face_frames: [frame("front", PERSON), frame("left", PERSON), frame("right", PERSON)],
+  },
+  undefined
+);
+await call("PATCH", "/api/settings", { face_engine: "legacy" }, cookie);
+
+check("and the new engine works once the cafe switches", afterSwitch.status === 200, `${afterSwitch.status}`);
+
 section("revoking removes every angle");
 
 const revoked = await call("DELETE", `/api/users/${triUser}/face`, undefined, cookie);

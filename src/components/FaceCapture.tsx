@@ -48,13 +48,14 @@ import {
   modelsPresent,
   openCamera,
   permissionHelp,
-  readFace,
   toJpegDataUrl,
 } from "@/lib/face-client";
+import { readFaceFor, useFaceEngine, type EngineRead } from "@/lib/face-engine";
 import {
   FACE_POSES,
   PRIMARY_POSE,
   POSE_COPY,
+  type FaceEngine,
   type FacePose,
   fileFrame,
   poseAlreadyHeld,
@@ -75,6 +76,13 @@ export type FaceShot = {
   photo: string;
   /** 128 floats, sent alongside the photo and stored as text. */
   embedding: number[];
+  /**
+   * Which engine produced the embedding.
+   *
+   * Sent with the photo so the server records the truth about the vector rather
+   * than guessing from a setting that may have changed since the page loaded.
+   */
+  model: FaceEngine;
   /** How far the head was turned when it was read. See headTurnSignal. */
   poseSignal: number | null;
   /** Detector confidence, 0..1. */
@@ -108,6 +116,17 @@ type Phase =
 /** What the person is asked to do for each angle. One source for every screen. */
 
 export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props) {
+  /*
+   * Enrolment uses the same engine the cafe verifies with, always.
+   *
+   * It is tempting to capture new enrolments in the newer engine while the cafe
+   * still verifies with the old one, but that produces an account nothing can
+   * verify — the vectors are in a space the matcher is not reading. An account
+   * only ever holds vectors from the engine in use, which means a migration is a
+   * deliberate switch followed by re-enrolment, not something that happens
+   * quietly at the side.
+   */
+  const enrolmentEngine = useFaceEngine();
   const [phase, setPhase] = useState<Phase>("idle");
   const [message, setMessage] = useState<string | null>(null);
   const [progress, setProgress] = useState({ loaded: 0, total: 0 });
@@ -258,7 +277,7 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
   const accept = useCallback(
     (
       expected: FacePose,
-      read: Extract<Awaited<ReturnType<typeof readFace>>, { ok: true }>,
+      read: Extract<EngineRead, { ok: true }>,
       photo: string
     ): { accepted: boolean; nextPose: FacePose | null } => {
       const seen = poseFromSignal(read.poseSignal);
@@ -284,6 +303,7 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
           pose: filing.pose,
           photo,
           embedding: read.embedding,
+          model: enrolmentEngine,
           poseSignal: read.poseSignal,
           quality: read.score,
         },
@@ -302,7 +322,7 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
       setActivePose(nextMissing[0]);
       return { accepted: true, nextPose: nextMissing[0] };
     },
-    [shots, publish, stopCamera]
+    [shots, publish, stopCamera, enrolmentEngine]
   );
 
   /** Take one frame and turn it into a photo plus an embedding. */
@@ -312,7 +332,7 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
       setMessage(null);
       try {
         const photo = toJpegDataUrl(source, w, h);
-        const read = await readFace(source);
+        const read = await readFaceFor(enrolmentEngine, source);
         if (!read.ok) {
           setPhase("camera");
           setMessage(read.message);
@@ -329,7 +349,7 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
         setMessage("That photo could not be read. Try again in better light.");
       }
     },
-    [accept, activePose]
+    [accept, activePose, enrolmentEngine]
   );
 
   const onFile = useCallback(
@@ -366,7 +386,7 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
         img.onload = async () => {
           try {
             const photo = await dataUrlToJpeg(raw);
-            const read = await readFace(img);
+            const read = await readFaceFor(enrolmentEngine, img);
             if (!read.ok) {
               setPhase("idle");
               setMessage(read.message);
@@ -384,7 +404,7 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
       };
       reader.readAsDataURL(file);
     },
-    [warmUp, accept, activePose, missing]
+    [warmUp, accept, activePose, missing, enrolmentEngine]
   );
 
   const retake = useCallback(
@@ -664,3 +684,7 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
     </div>
   );
 }
+
+
+
+
