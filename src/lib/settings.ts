@@ -162,6 +162,25 @@ export async function getFaceMatchThreshold(): Promise<number> {
 }
 
 /**
+ * Must a check present the turned-head angles too
+ * (settings.face_require_profile_angles)?
+ *
+ * Only applies to an account that actually holds side samples — see
+ * posesRequired in lib/face.ts. An account enrolled with a frontal photo alone is
+ * checked on that photo whether this is on or off, because asking it to present
+ * an angle it does not have would lock the person out of their own shift.
+ *
+ * On by default. It is the whole point of capturing the side angles: a still
+ * photograph cannot produce a turned-head descriptor, so the turned frames are
+ * the one part of this that resists a printed portrait held up at the till. This
+ * is the switch to turn off if real staff are refused at the side angles — the
+ * side descriptors are the least reliable thing the model produces.
+ */
+export async function getFaceRequireProfileAngles(): Promise<boolean> {
+  return readToggle("face_require_profile_angles");
+}
+
+/**
  * The https address a staff phone can reach, or null when there isn't one
  * (settings.face_verify_public_url).
  *

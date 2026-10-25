@@ -1,5 +1,11 @@
 "use client";
 
+/*
+ * The pose proxy comes from lib/face.ts, which is deliberately model-free, so
+ * the capture side and the matching side agree on one definition of "turned".
+ */
+import { headTurnSignal } from "./face";
+
 /**
  * The face model, in the browser.
  *
@@ -229,7 +235,23 @@ const DETECT_OPTIONS = {
 } as const;
 
 export type FaceRead =
-  | { ok: true; embedding: number[]; box: { x: number; y: number; width: number; height: number }; score: number }
+  | {
+      ok: true;
+      embedding: number[];
+      /**
+       * How far the head was turned, as the signed proxy from lib/face.ts, or
+       * null when the landmarks were not the shape it needs. Computed here
+       * because this is the only place the 68 points exist; the server never
+       * sees landmarks, only this one number.
+       *
+       * It is a proxy, and a client controls it, so it orders a capture and
+       * refuses an obviously wrong frame — it is not a security control. The
+       * match is. See headTurnSignal.
+       */
+      poseSignal: number | null;
+      box: { x: number; y: number; width: number; height: number };
+      score: number;
+    }
   | { ok: false; reason: "no-face" | "low-confidence"; message: string };
 
 /**
@@ -313,9 +335,22 @@ export async function readFace(source: any): Promise<FaceRead> {
     };
   }
 
+  /*
+   * The head turn, from the same 68 points the descriptor was aligned with.
+   *
+   * `landmarks.positions` is the raw iBUG array headTurnSignal expects. It is
+   * read defensively: face-api has shipped this both as a property and as the
+   * instance's own indexed points, and a pose that cannot be established reads
+   * as null rather than as a guess — a guessed pose files a sample under the
+   * wrong angle, which is worse than no sample.
+   */
+  const points = (landmarks as any)?.positions ?? (landmarks as any)?._positions;
+  const poseSignal = headTurnSignal(points);
+
   return {
     ok: true,
     embedding: Array.from(descriptor),
+    poseSignal,
     box: detection.box,
     score: detection.score,
   };

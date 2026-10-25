@@ -17,18 +17,29 @@ import {
   DEFAULT_DUTY_HOURS,
   DEFAULT_MATCH_THRESHOLD,
   EMBEDDING_LENGTH,
+  FACE_POSES,
+  FRONT_MAX_SIGNAL,
   MAX_DUTY_HOURS,
   MAX_MATCH_THRESHOLD,
   MEASURED_CLOSEST_DIFFERENT_PEOPLE,
   MEASURED_SAME_PERSON_WORST,
   MIN_DUTY_HOURS,
   MIN_MATCH_THRESHOLD,
+  PRIMARY_POSE,
+  SIDE_MIN_SIGNAL,
   distance,
   formatEmbedding,
+  headTurnSignal,
   isMatch,
+  matchGallery,
+  matchPresentation,
   nextVerificationAt,
   parseEmbedding,
+  parsePose,
   parseStoredEmbedding,
+  poseFromSignal,
+  poseSatisfies,
+  posesRequired,
   verificationRequired,
 } from "../src/lib/face.ts";
 
@@ -399,6 +410,263 @@ check(
   "the editable floor does not forbid a safe threshold",
   MIN_MATCH_THRESHOLD < MEASURED_CLOSEST_DIFFERENT_PEOPLE,
   `floor ${MIN_MATCH_THRESHOLD} blocks any value that would work`
+);
+
+/* ---------------------------------------------------- the three angles -- */
+
+/**
+ * A 68-point face whose nose sits `noseX` across a 70..130 eye span.
+ *
+ * Only three of the points matter to headTurnSignal — the nose tip and the two
+ * outer eye corners — so the rest are zeros at the origin. That is deliberately
+ * not a realistic face: the point of these tests is the arithmetic that turns
+ * three points into a sign and a magnitude, and a realistic point cloud would
+ * make it harder to see which input moved the answer.
+ *
+ * The eye corners are `right` at x=70 and `left` at x=130 in *image* order,
+ * which is the person's right eye on the left of the frame — a mirror, as a
+ * camera preview is.
+ */
+function landmarks({ noseX = 100, scale = 1, shiftX = 0 } = {}) {
+  const points = Array.from({ length: 68 }, () => ({ x: 0, y: 0 }));
+  points[30] = { x: noseX, y: 120 }; // nose tip
+  points[36] = { x: 70, y: 90 }; // the person's right eye, outer corner
+  points[45] = { x: 130, y: 90 }; // the person's left eye, outer corner
+  return points.map((p) => ({ x: p.x * scale + shiftX, y: p.y * scale }));
+}
+
+function sampleOf(pose, embedding) {
+  return { pose, embedding };
+}
+
+section("headTurnSignal — turns three points into a signed proxy");
+
+check("no points at all is not a pose", headTurnSignal(null) === null);
+check("undefined is not a pose", headTurnSignal(undefined) === null);
+check(
+  "fewer than 48 points is refused rather than guessed at",
+  headTurnSignal(Array.from({ length: 47 }, () => ({ x: 0, y: 0 }))) === null
+);
+
+const symmetric = headTurnSignal(landmarks());
+check("a symmetric face reads as no turn", symmetric !== null && Math.abs(symmetric) < 1e-12, String(symmetric));
+
+const turnedLeft = headTurnSignal(landmarks({ noseX: 115 }));
+check(
+  "turning towards the person's left gives a positive signal",
+  turnedLeft !== null && turnedLeft > SIDE_MIN_SIGNAL,
+  String(turnedLeft)
+);
+
+const turnedRight = headTurnSignal(landmarks({ noseX: 85 }));
+check(
+  "turning towards their right gives the same magnitude, negative",
+  turnedRight !== null && Math.abs(turnedRight + turnedLeft) < 1e-12,
+  String(turnedRight)
+);
+
+check(
+  "standing off-centre in the frame does not read as a turn",
+  Math.abs(headTurnSignal(landmarks({ shiftX: 40 }))) < 1e-12
+);
+
+check(
+  "a closer face does not read as a turn",
+  Math.abs(headTurnSignal(landmarks({ scale: 2 }))) < 1e-12
+);
+
+const brokenEye = landmarks();
+brokenEye[45] = { x: Number.NaN, y: 90 };
+check("one unusable eye corner is refused", headTurnSignal(brokenEye) === null);
+
+const collapsed = landmarks();
+collapsed[30] = { x: 70, y: 90 };
+collapsed[45] = { x: 70, y: 90 };
+check(
+  "three points in one place is not a pose",
+  headTurnSignal(collapsed) === null
+);
+
+section("poseFromSignal — the bands, and the dead zone between them");
+
+check("null is not front", poseFromSignal(null) === null);
+check("undefined is not front", poseFromSignal(undefined) === null);
+check("NaN is not front", poseFromSignal(Number.NaN) === null);
+check("Infinity is not a pose", poseFromSignal(Infinity) === null);
+
+check("zero is front", poseFromSignal(0) === "front");
+check("the edge of the band is still front", poseFromSignal(FRONT_MAX_SIGNAL) === "front");
+check("and mirrored", poseFromSignal(-FRONT_MAX_SIGNAL) === "front");
+check(
+  "just past the band is not yet a side",
+  poseFromSignal(FRONT_MAX_SIGNAL + 1e-6) === null
+);
+check(
+  "just short of the side is still not a side",
+  poseFromSignal(SIDE_MIN_SIGNAL - 1e-6) === null
+);
+check("the side threshold is a side", poseFromSignal(SIDE_MIN_SIGNAL) === "left");
+check("and mirrored", poseFromSignal(-SIDE_MIN_SIGNAL) === "right");
+check("a hard turn is still a side", poseFromSignal(0.9) === "left");
+
+const deadZone = headTurnSignal(landmarks({ noseX: 108 }));
+check(
+  "a half-turned real frame lands in the dead zone rather than a side",
+  deadZone !== null && poseFromSignal(deadZone) === null,
+  String(deadZone)
+);
+
+check(
+  "the bands do not overlap",
+  FRONT_MAX_SIGNAL < SIDE_MIN_SIGNAL,
+  `${FRONT_MAX_SIGNAL} must be below ${SIDE_MIN_SIGNAL}`
+);
+check(
+  "the primary pose is the first thing captured",
+  FACE_POSES[0] === PRIMARY_POSE,
+  FACE_POSES.join(", ")
+);
+
+section("poseSatisfies and parsePose");
+
+check("a matching pose satisfies", poseSatisfies("left", "left"));
+check("a different pose does not", !poseSatisfies("left", "right"));
+check("no pose does not satisfy anything", !poseSatisfies("front", null));
+
+check("a pose label is read", parsePose("left") === "left");
+check("surrounding space is ignored", parsePose("  RIGHT ") === "right");
+check("case is ignored", parsePose("Front") === "front");
+check("an unknown label is refused", parsePose("up") === null);
+check("an empty label is refused", parsePose("") === null);
+check("a non-string is refused", parsePose(3) === null);
+check("null is refused", parsePose(null) === null);
+
+section("posesRequired — what this account has to present");
+
+const frontOnly = [sampleOf("front", makeEmbedding(1))];
+const allThree = [
+  sampleOf("front", makeEmbedding(1)),
+  sampleOf("left", makeEmbedding(2)),
+  sampleOf("right", makeEmbedding(3)),
+];
+
+check(
+  "an account with no face needs the frontal frame",
+  JSON.stringify(posesRequired([], true)) === JSON.stringify(["front"])
+);
+check(
+  "an account with only a frontal sample is asked for one frame",
+  JSON.stringify(posesRequired(frontOnly, true)) === JSON.stringify(["front"]),
+  posesRequired(frontOnly, true).join(", ")
+);
+check(
+  "turned-head checks switched off means one frame even with all three",
+  JSON.stringify(posesRequired(allThree, false)) === JSON.stringify(["front"])
+);
+check(
+  "all three enrolled and switched on means all three, front first",
+  JSON.stringify(posesRequired(allThree, true)) === JSON.stringify(["front", "left", "right"]),
+  posesRequired(allThree, true).join(", ")
+);
+
+const missingRight = allThree.filter((s) => s.pose !== "right");
+check(
+  "a missing side is not required — an account is never asked for what it cannot present",
+  JSON.stringify(posesRequired(missingRight, true)) === JSON.stringify(["front", "left"]),
+  posesRequired(missingRight, true).join(", ")
+);
+
+section("matchGallery — one frame, every angle on the account");
+
+const person = makeEmbedding(11);
+const stranger = makeEmbedding(12);
+const gallery = [
+  sampleOf("front", person),
+  sampleOf("left", stranger),
+  sampleOf("right", stranger),
+];
+
+check("no probe never matches", matchGallery(null, gallery, 0.033) === null);
+check("an empty gallery never matches", matchGallery(person, [], 0.033) === null);
+check("the enrolled person matches", matchGallery(person, gallery, 0.033) === "front");
+check(
+  "a probe is matched against the whole gallery, not only its own pose's sample",
+  matchGallery(person, [sampleOf("front", stranger), sampleOf("left", person)], 0.033) === "left"
+);
+check(
+  "someone else matches nothing",
+  matchGallery(stranger, [sampleOf("front", person)], 0.033) === null
+);
+check(
+  "a distance just under the threshold matches",
+  matchGallery(atCosine(person, 0.032), [sampleOf("front", person)], 0.033) === "front"
+);
+check(
+  "a distance just over it does not",
+  matchGallery(atCosine(person, 0.034), [sampleOf("front", person)], 0.033) === null
+);
+
+section("matchPresentation — a full three-frame check");
+
+const threeFrames = [
+  { pose: "front", embedding: person },
+  { pose: "left", embedding: person },
+  { pose: "right", embedding: person },
+];
+const threeSamples = [
+  sampleOf("front", person),
+  sampleOf("left", person),
+  sampleOf("right", person),
+];
+
+const complete = matchPresentation(threeFrames, threeSamples, ["front", "left", "right"], 0.033);
+check("three frames, three samples, all matching", complete.matched);
+check("and no pose is named as failed", complete.failedPose === null);
+check("and it reports which sample carried it", complete.matchedBy === "front");
+
+const absentRight = matchPresentation(
+  threeFrames.filter((f) => f.pose !== "right"),
+  threeSamples,
+  ["front", "left", "right"],
+  0.033
+);
+check("a missing frame fails the check", !absentRight.matched);
+check("and names the frame that was missing", absentRight.failedPose === "right");
+
+const strangerLeft = matchPresentation(
+  [
+    { pose: "front", embedding: person },
+    { pose: "left", embedding: stranger },
+    { pose: "right", embedding: person },
+  ],
+  [sampleOf("front", person)],
+  ["front", "left", "right"],
+  0.033
+);
+check("a frame that does not match fails the check", !strangerLeft.matched);
+check("and names the angle it failed on", strangerLeft.failedPose === "left");
+check("and keeps the match it had already made", strangerLeft.matchedBy === "front");
+
+const sideFrameMatchesFrontSample = matchPresentation(
+  [{ pose: "front", embedding: person }, { pose: "left", embedding: person }],
+  [sampleOf("front", person)],
+  ["front", "left"],
+  0.033
+);
+check(
+  "a turned frame is allowed to match the frontal sample",
+  sideFrameMatchesFrontSample.matched,
+  "the gallery rule, not the pose label, decides what a frame may match"
+);
+
+check(
+  "a check with only the frontal frame required ignores the side frames it was given",
+  matchPresentation(
+    [{ pose: "front", embedding: person }],
+    [sampleOf("front", person)],
+    ["front"],
+    0.033
+  ).matched
 );
 
 console.log(`\n${"-".repeat(46)}`);

@@ -23,8 +23,9 @@ import {
   cameraPermissionState,
   openCamera,
   permissionHelp,
-  readFace,
 } from "@/lib/face-client";
+import { FACE_POSES, POSE_COPY } from "@/lib/face";
+import { framesBody, useFacePoses } from "@/lib/use-face-poses";
 import {
   classifyCameraError,
   describeCameraProblem,
@@ -166,15 +167,16 @@ export default function FaceSignIn({ identifier, onSignedIn, onCancel }: Props) 
     }
   }, [warmUp, attachStream, stopCamera]);
 
-  /** Send the 128 floats up and let the server decide. */
+  /** Send the presentation up and let the server decide. */
   const submit = useCallback(
-    async (embedding: number[]) => {
+    async (frames: Parameters<typeof framesBody>[0]) => {
       setPhase("checking");
       try {
         const res = await fetch("/api/auth/face-login", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ identifier, embedding }),
+          // The whole presentation: one frame per angle. See framesBody.
+          body: JSON.stringify({ identifier, ...framesBody(frames) }),
         });
         const data = await res.json();
 
@@ -194,7 +196,14 @@ export default function FaceSignIn({ identifier, onSignedIn, onCancel }: Props) 
     [identifier, onSignedIn, stopCamera]
   );
 
-  /** Read the current camera frame. */
+  /*
+   * The three-angle sequence. A check asks for straight on, then the person's
+   * left, then their right — see lib/use-face-poses.ts for why the order and the
+   * pose check live in one place.
+   */
+  const poses = useFacePoses();
+
+  /** Read the current camera frame, and submit once every angle is in. */
   const capture = useCallback(async () => {
     const video = videoRef.current;
     if (!video) return;
@@ -202,18 +211,27 @@ export default function FaceSignIn({ identifier, onSignedIn, onCancel }: Props) 
     setPhase("reading");
     setMessage(null);
     try {
-      const read = await readFace(video);
-      if (!read.ok) {
+      const result = await poses.read(video);
+
+      if (result.outcome === "retry") {
         setPhase("camera");
-        setMessage(read.message);
+        setMessage(result.message);
         return;
       }
-      await submit(read.embedding);
+
+      if (result.outcome === "complete") {
+        await submit(result.frames);
+        return;
+      }
+
+      // Accepted, more angles to go — keep the camera open and ask for the next.
+      setPhase("camera");
+      setMessage(null);
     } catch {
       setPhase("camera");
       setMessage("That could not be read. Try again in better light.");
     }
-  }, [submit]);
+  }, [poses, submit]);
 
   /**
    * The insecure-origin path: the OS camera app hands back a file.
@@ -235,7 +253,6 @@ export default function FaceSignIn({ identifier, onSignedIn, onCancel }: Props) 
       if (!(await warmUp())) return;
 
       try {
-        const lib = await import("@/lib/face-client");
         const dataUrl = await new Promise<string>((resolve, reject) => {
           const reader = new FileReader();
           reader.onerror = () => reject(new Error("unreadable"));
@@ -250,19 +267,33 @@ export default function FaceSignIn({ identifier, onSignedIn, onCancel }: Props) 
         shotRef.current = img;
 
         setPhase("reading");
-        const read = await lib.readFace(img);
-        if (!read.ok) {
+        const result = await poses.read(img);
+
+        if (result.outcome === "retry") {
           setPhase("failed");
-          setMessage(read.message);
+          setMessage(result.message);
           return;
         }
-        await submit(read.embedding);
+
+        if (result.outcome === "complete") {
+          await submit(result.frames);
+          return;
+        }
+
+        // One angle read; the file picker has to be used again for the next one.
+        const missing = FACE_POSES.find((pose) => !result.frames.some((f) => f.pose === pose));
+        setPhase("failed");
+        setMessage(
+          missing
+            ? `Got that one. Now choose the ${POSE_COPY[missing].short} photo.`
+            : "Got that one."
+        );
       } catch {
         setPhase("failed");
         setMessage("That file could not be read as an image.");
       }
     },
-    [submit, warmUp]
+    [submit, warmUp, poses]
   );
 
   const working = phase === "reading" || phase === "checking";
@@ -342,9 +373,16 @@ export default function FaceSignIn({ identifier, onSignedIn, onCancel }: Props) 
         untrue, so one line here buys a retake.
       */}
       <p className="text-center text-xs text-cocoa-500">
-        Fill the frame with your face but keep room around it — your whole head,
-        top of hair to chin.
+        {phase === "camera"
+          ? POSE_COPY[poses.activePose].instruction
+          : "Fill the frame with your face but keep room around it — your whole head, top of hair to chin."}
       </p>
+
+      {phase === "camera" && poses.frames.length > 0 && (
+        <p className="text-center text-xs text-cocoa-400">
+          {poses.frames.length} of {FACE_POSES.length} photos taken.
+        </p>
+      )}
 
       {blocked && (
         <div className="rounded-xl bg-amber-50 px-3.5 py-3 text-sm text-cocoa-700">
@@ -414,7 +452,7 @@ export default function FaceSignIn({ identifier, onSignedIn, onCancel }: Props) 
           disabled={working}
           onClick={() => void capture()}
         >
-          Confirm it&rsquo;s you
+          Take the {POSE_COPY[poses.activePose].short} photo
         </button>
       )}
 

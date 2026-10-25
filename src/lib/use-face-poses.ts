@@ -1,0 +1,162 @@
+"use client";
+
+/**
+ * The three-angle capture sequence, for a screen that is *checking* a face.
+ *
+ * Enrolment has its own component (FaceCapture) because it also stores photos
+ * and talks about what is being saved. Every other screen — the duty check, face
+ * sign-in, the step-two panel — is doing the same thing as each other: ask for
+ * the angles in order, refuse a frame whose head is not where the prompt says,
+ * and hand back the set once it is complete. That sequence lives here so the
+ * three cannot drift into asking for different angles in a different order.
+ *
+ * The camera itself stays with the caller. Those screens already own a stream, a
+ * preview element and their own wording for a camera that will not open, and
+ * moving that into a hook would be a rewrite of four working screens to share
+ * something none of them gets wrong. This shares the part they *could* get wrong.
+ *
+ * ## What it will not do
+ *
+ * It does not keep the photos. A check sends 128 floats per angle and the frame
+ * is never stored — the four floats-per-angle comparison is the whole point of
+ * running the model in the browser.
+ */
+import { useCallback, useMemo, useState } from "react";
+import {
+  FACE_POSES,
+  type FacePose,
+  poseFromSignal,
+  poseRefusal,
+} from "./face";
+import { readFace } from "./face-client";
+
+/** One frame of a presentation. What goes on the wire as `face_frames`. */
+export type PoseFrame = {
+  pose: FacePose;
+  embedding: number[];
+  poseSignal: number | null;
+  quality: number;
+};
+
+export type ReadOutcome = "accepted" | "retry" | "complete";
+
+/** What one `read` produced. The frames are returned, not only stored, so a
+ *  caller can submit the completed set from the same click that finished it. */
+export type ReadResult = {
+  outcome: ReadOutcome;
+  frames: PoseFrame[];
+  message: string | null;
+};
+
+export type FacePoseSequence = {
+  /** The angle the screen should be asking for now. */
+  activePose: FacePose;
+  /** Frames accepted so far, in capture order. */
+  frames: PoseFrame[];
+  /** Why the last frame was refused, or null. */
+  message: string | null;
+  /** Every angle has a frame. */
+  complete: boolean;
+  /** How many angles are still to go. */
+  remaining: number;
+  /** Back to the start — the whole presentation is rejected on the server. */
+  reset: () => void;
+};
+
+/**
+ * Run the sequence, reading each frame as it arrives.
+ *
+ * `read` is returned separately from the state so a caller can await one frame
+ * and immediately decide to submit: a click handler that had to wait for a
+ * re-render to learn whether the set was complete would submit on the next
+ * press instead of this one.
+ */
+export function useFacePoses(poses: readonly FacePose[] = FACE_POSES): FacePoseSequence & {
+  read: (source: HTMLVideoElement | HTMLImageElement) => Promise<ReadResult>;
+} {
+  const [frames, setFrames] = useState<PoseFrame[]>([]);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const activePose = useMemo(() => {
+    const missing = poses.find((pose) => !frames.some((f) => f.pose === pose));
+    // Falls back to the last angle rather than throwing when the set is complete,
+    // so a render that races the final frame still has something to show.
+    return missing ?? poses[poses.length - 1];
+  }, [frames, poses]);
+
+  const reset = useCallback(() => {
+    setFrames([]);
+    setMessage(null);
+  }, []);
+
+  const read = useCallback(
+    async (source: HTMLVideoElement | HTMLImageElement): Promise<ReadResult> => {
+      const expected = poses.find((pose) => !frames.some((f) => f.pose === pose)) ?? activePose;
+
+      const result = await readFace(source);
+      if (!result.ok) {
+        setMessage(result.message);
+        return { outcome: "retry", frames, message: result.message };
+      }
+
+      const seen = poseFromSignal(result.poseSignal);
+      if (seen !== expected) {
+        // The head is not where the prompt says it is. Refused here rather than
+        // on the server so the person is told while they are still in front of
+        // the camera, and so a wrong-angle frame never leaves the device.
+        const refusal = poseRefusal(expected, seen);
+        setMessage(refusal);
+        return { outcome: "retry", frames, message: refusal };
+      }
+
+      const next = [
+        ...frames.filter((f) => f.pose !== expected),
+        {
+          pose: expected,
+          embedding: result.embedding,
+          poseSignal: result.poseSignal,
+          quality: result.score,
+        },
+      ];
+
+      setFrames(next);
+      setMessage(null);
+
+      return {
+        outcome: next.length === poses.length ? "complete" : "accepted",
+        frames: next,
+        message: null,
+      };
+    },
+    [frames, poses, activePose]
+  );
+
+  return {
+    activePose,
+    frames,
+    message,
+    complete: poses.every((pose) => frames.some((f) => f.pose === pose)),
+    remaining: poses.filter((pose) => !frames.some((f) => f.pose === pose)).length,
+    reset,
+    read,
+  };
+}
+
+/**
+ * The body a check posts: one entry per angle, plus nothing else.
+ *
+ * Kept as a function so every caller builds the same shape — a route that
+ * receives `{pose, embedding}` per frame is the contract `parseFaceFrames`
+ * enforces, and a caller inventing a different shape would fail only at the
+ * till, which is the worst place to find out.
+ */
+export function framesBody(frames: readonly PoseFrame[]): { face_frames: PoseFrame[] } {
+  return {
+    face_frames: frames.map((f) => ({
+      pose: f.pose,
+      embedding: f.embedding,
+      poseSignal: f.poseSignal,
+      quality: f.quality,
+    })),
+  };
+}

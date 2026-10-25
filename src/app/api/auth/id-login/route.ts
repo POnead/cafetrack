@@ -1,9 +1,10 @@
-﻿import { db } from "@/lib/supabase";
+import { db } from "@/lib/supabase";
 import { handler, ok, fail, clientIp } from "@/lib/api";
 import { signSession, setSessionCookie, deactivatedMessage } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { getSessionMinutes, getFaceMatchThreshold } from "@/lib/settings";
-import { parseEmbedding, parseStoredEmbedding, isMatch } from "@/lib/face";
+import { PRIMARY_POSE, parseEmbedding, parseFaceFrames } from "@/lib/face";
+import { evaluatePresentation } from "@/lib/face-samples";
 import { recordFaceVerification } from "@/lib/face-gate";
 import { getIdGate } from "@/lib/id-gate";
 import { isValidFingerprint } from "@/lib/id-verification/card-hash";
@@ -113,7 +114,33 @@ export const POST = handler(async (req: Request) => {
 
   const rawHash = String(form.get("card_hash") ?? "").trim().toLowerCase();
   const cardHash = isValidFingerprint(rawHash) ? rawHash : null;
-  const submitted = parseEmbedding(form.get("face_embedding"));
+
+  /*
+   * The presentation, from the multipart field.
+   *
+   * This route already carries a file, so the frames travel as one JSON string
+   * in `face_frames` rather than as a nested body. A `face_embedding` part is
+   * still one straight-on frame, which is what a page opened before the angles
+   * shipped will send.
+   */
+  const legacyFace = parseEmbedding(form.get("face_embedding"));
+  const rawFrames = form.get("face_frames");
+  let parsedFrames: ReturnType<typeof parseFaceFrames> = {
+    ok: false,
+    error: "no frames",
+  };
+  if (typeof rawFrames === "string" && rawFrames.trim()) {
+    try {
+      parsedFrames = parseFaceFrames(JSON.parse(rawFrames));
+    } catch {
+      parsedFrames = { ok: false, error: "That face check could not be read." };
+    }
+  }
+  const frames = parsedFrames.ok
+    ? parsedFrames.frames
+    : legacyFace
+      ? [{ pose: PRIMARY_POSE, embedding: legacyFace }]
+      : null;
 
   /*
    * A card with neither signal cannot identify anyone, and a face with no
@@ -123,7 +150,7 @@ export const POST = handler(async (req: Request) => {
   if (!cardHash) {
     return fail(UNRECOGNISED, 401);
   }
-  if (!submitted) {
+  if (!frames) {
     return fail(UNRECOGNISED, 401);
   }
 
@@ -217,10 +244,25 @@ export const POST = handler(async (req: Request) => {
 
   /* ---- 3. the face, against that one account --------------------------- */
 
-  const stored = parseStoredEmbedding(user.face_embedding);
   const threshold = await getFaceMatchThreshold();
 
-  if (!isMatch(submitted, stored, threshold)) {
+  const presentation = await evaluatePresentation({
+    userId: user.id,
+    legacyEmbedding: user.face_embedding ?? null,
+    frames,
+    threshold,
+    /*
+     * Straight-on only on this route — see the same note in staff/confirm.
+     *
+     * The card is the credential here and it is presented in the same camera
+     * frame as the face; a three-angle presentation would make the two compete
+     * for the same shot. The turned-head requirement applies to the screens
+     * where a face is the only thing presented.
+     */
+    requireProfileAngles: false,
+  });
+
+  if (!presentation.matched) {
     await recordLoginAttempt(key, ID_LOGIN_METHOD, false);
     await audit(
       { id: user.id, username: user.username, fullName: user.full_name ?? "", role: "staff" },
@@ -268,7 +310,7 @@ export const POST = handler(async (req: Request) => {
     });
   }
 
-  if (!user.face_enabled || !stored) {
+  if (!user.face_enabled || presentation.samples.length === 0) {
     await recordLoginAttempt(key, ID_LOGIN_METHOD, false);
     return fail(
       "Face sign-in is not available on this account. Ask an administrator, or sign in with your password.",

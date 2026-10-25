@@ -32,6 +32,12 @@ const FaceCapture = dynamic(() => import("@/components/FaceCapture"), {
   ),
 });
 
+/*
+ * Type-only, so it costs nothing at runtime: the component above is still the
+ * only thing that pulls the model in, and only when an admin opens a photo.
+ */
+import type { FaceShot } from "@/components/FaceCapture";
+
 /**
  * The ID upload control, loaded the same way and for the same reason: reading a
  * face off a card pulls in face-api and TensorFlow.
@@ -194,17 +200,11 @@ export default function UsersPage() {
   });
   const [editError, setEditError] = useState<string | null>(null);
 
-  /** The photo and embedding captured for the account being edited, if any. */
-  const [faceShot, setFaceShot] = useState<{
-    photo: string;
-    embedding: number[];
-  } | null>(null);
+  /** The angles captured for the account being edited, if any. */
+  const [faceShot, setFaceShot] = useState<{ shots: FaceShot[] } | null>(null);
 
   /** The same, for the create form. Kept apart so one cannot leak into the other. */
-  const [createShot, setCreateShot] = useState<{
-    photo: string;
-    embedding: number[];
-  } | null>(null);
+  const [createShot, setCreateShot] = useState<{ shots: FaceShot[] } | null>(null);
 
   /** Whether the photo's action menu is open in the details panel. */
   const [photoMenuOpen, setPhotoMenuOpen] = useState(false);
@@ -410,11 +410,7 @@ export default function UsersPage() {
 
     // Face enrolment goes to its own multipart endpoint.
     const fd = new FormData();
-    fd.append("embedding", faceShot.embedding.join(","));
-    fd.append(
-      "image",
-      new File([dataUrlToBlob(faceShot.photo)], "face.jpg", { type: "image/jpeg" })
-    );
+    appendFaceShots(fd, faceShot.shots);
 
     try {
       const res = await fetch(`/api/users/${editing.id}/face`, {
@@ -453,6 +449,26 @@ export default function UsersPage() {
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     return new Blob([bytes], { type: mime });
+  }
+
+  /**
+   * Send the captured angles as one multipart body.
+   *
+   * One field triple per angle — `embedding_left`, `image_left`, `signal_left`,
+   * `quality_left` — because the route has to be able to tell which photograph is
+   * which. The straight-on angle is `front`, and it is the only one the server
+   * requires; the turned ones are what make the check stronger.
+   */
+  function appendFaceShots(form: FormData, shots: readonly FaceShot[]) {
+    for (const shot of shots) {
+      form.append(`embedding_${shot.pose}`, shot.embedding.join(","));
+      if (shot.poseSignal !== null) form.append(`signal_${shot.pose}`, String(shot.poseSignal));
+      form.append(`quality_${shot.pose}`, String(shot.quality));
+      form.append(
+        `image_${shot.pose}`,
+        new File([dataUrlToBlob(shot.photo)], `face-${shot.pose}.jpg`, { type: "image/jpeg" })
+      );
+    }
   }
 
   /** Remove a reference photo, so someone can be re-enrolled from scratch. */
@@ -506,11 +522,7 @@ export default function UsersPage() {
        */
       if (createShot) {
         const fd = new FormData();
-        fd.append("embedding", createShot.embedding.join(","));
-        fd.append(
-          "image",
-          new File([dataUrlToBlob(createShot.photo)], "face.jpg", { type: "image/jpeg" })
-        );
+        appendFaceShots(fd, createShot.shots);
 
         const faceRes = await fetch(`/api/users/${created.id}/face`, { method: "POST", body: fd });
         const faceData = await faceRes.json();
@@ -2009,7 +2021,10 @@ async function toggleItemPermission(user: StaffUser) {
               <p className="label">Reference photo</p>
               <FaceCapture
                 disabled={saving}
-                currentPhoto={faceShot?.photo ?? null}
+                currentPhoto={
+                  faceShot?.shots.find((s) => s.pose === "front")?.photo ??
+                  (editing.face_enabled ? `/api/users/${editing.id}/face` : null)
+                }
                 onCapture={(result) => setFaceShot(result)}
               />
               {editing.face_enabled && !faceShot && (

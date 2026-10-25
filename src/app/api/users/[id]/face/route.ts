@@ -2,7 +2,25 @@ import { db } from "@/lib/supabase";
 import { handler, ok, fail, badId, clientIp, readBody } from "@/lib/api";
 import { requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
-import { parseEmbedding, formatEmbedding, distance, REPLACEMENT_MISMATCH_DISTANCE } from "@/lib/face";
+import {
+  FACE_POSES,
+  POSE_COPY,
+  PRIMARY_POSE,
+  type FacePose,
+  distance,
+  formatEmbedding,
+  parseEmbedding,
+  parsePose,
+  poseFromSignal,
+  poseSatisfies,
+  REPLACEMENT_MISMATCH_DISTANCE,
+} from "@/lib/face";
+import {
+  deleteFaceSamples,
+  loadFaceSamples,
+  saveFaceSamples,
+  type FaceSampleInput,
+} from "@/lib/face-samples";
 import { readFaceImage } from "@/lib/face-image";
 import { getFaceDutyHours } from "@/lib/settings";
 
@@ -40,6 +58,44 @@ const USER_COLUMNS =
   "id, username, full_name, role, qr_token, can_manage_items, approval_code, " +
   "is_active, deactivation_reason, deactivated_at, created_at, " +
   "face_enabled, face_enrolled_at, face_enrolled_by, last_face_verified_at";
+
+/** How each angle is described in an error, in words an admin can act on. */
+const POSE_LABEL: Record<FacePose, string> = {
+  front: "straight-on",
+  left: "left-turn",
+  right: "right-turn",
+};
+
+/**
+ * One field of the upload, per angle.
+ *
+ * `embedding_front`, `image_front`, `signal_front`, `quality_front` and the same
+ * for the two side angles. A bare `embedding`/`image` is still accepted and means
+ * the straight-on angle, so the create form and the suite that drives it keep
+ * working without knowing about angles at all.
+ */
+function fieldFor(
+  form: FormData,
+  base: "embedding" | "image" | "signal" | "quality",
+  pose: FacePose
+): FormDataEntryValue | null {
+  const suffixed = form.get(`${base}_${pose}`);
+  if (suffixed !== null) return suffixed;
+  if (pose === PRIMARY_POSE) return form.get(base);
+  return null;
+}
+
+/** A numeric form field, or null when it is absent or not a number. */
+function numberField(value: FormDataEntryValue | null): number | null {
+  if (value === null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Sentence-case an angle label, for the start of a message. */
+function capitalise(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
 
 /* ---------------------------------------------------------------- POST ---- */
 
@@ -85,25 +141,107 @@ export const POST = handler(
       return fail("Only staff accounts can have a face enrolled", 400);
     }
 
-    // Embedding first: it is the part the server actually trusts, and a bad one
-    // makes the whole enrolment worthless, so it should not cost a photo upload
-    // to find out.
-    const embedding = parseEmbedding(form.get("embedding"));
-    if (!embedding) {
-      return fail(
-        "The face data was missing or malformed. Take the photo again — " +
-          "the face could not be read from it."
-      );
+    /*
+     * Read every angle that was sent, in capture order.
+     *
+     * The straight-on angle is required; the two turned ones are not. That
+     * asymmetry is deliberate. A photograph of a turned head is the hardest
+     * thing this model is asked to read — a real capture can simply fail, and
+     * the admin is standing next to a person who needs an account today.
+     * Refusing the whole enrolment because one side angle would not read would
+     * trade a usable account for a theoretical completeness, so a missing side
+     * angle is reported back and the account is enrolled without it.
+     *
+     * The reverse — a side angle the admin *thinks* they took but which is
+     * really straight on — is refused, because that is a sample that would be
+     * compared against the wrong expectation later. The client sends the head
+     * signal it measured; if that signal says the frame is not the angle it was
+     * filed under, the frame is rejected by name.
+     */
+    const captured: FaceSampleInput[] = [];
+    let frontImage: string | null = null;
+    let frontEmbedding: Float32Array | null = null;
+    let frontBytes = 0;
+    let frontType = "";
+
+    for (const pose of FACE_POSES) {
+      const rawEmbedding = fieldFor(form, "embedding", pose);
+      const rawImage = fieldFor(form, "image", pose);
+
+      // Nothing sent for this angle.
+      if (rawEmbedding === null && rawImage === null) {
+        if (pose === PRIMARY_POSE) {
+          return fail(
+            "A straight-on photo is required. Take the photo again — " +
+              "the face could not be read from it."
+          );
+        }
+        continue;
+      }
+
+      // Half an angle is a client bug, not a usable sample.
+      if (rawEmbedding === null) {
+        return fail(`The ${POSE_LABEL[pose]} photo arrived without its face data — take it again`);
+      }
+      if (rawImage === null) {
+        return fail(`The ${POSE_LABEL[pose]} photo is missing — take it again`);
+      }
+
+      // Embedding first: it is the part the server actually trusts, and a bad one
+      // makes the whole enrolment worthless, so it should not cost a photo upload
+      // to find out.
+      const embedding = parseEmbedding(rawEmbedding);
+      if (!embedding) {
+        return fail(
+          `The ${POSE_LABEL[pose]} face data was missing or malformed. ` +
+            "Take the photo again — the face could not be read from it."
+        );
+      }
+
+      const image = await readFaceImage(rawImage);
+      if (!image.ok) return fail(`${capitalise(POSE_LABEL[pose])}: ${image.message}`);
+
+      const yawSignal = numberField(fieldFor(form, "signal", pose));
+      if (yawSignal !== null) {
+        const seen = poseFromSignal(yawSignal);
+        if (!poseSatisfies(pose, seen)) {
+          return fail(
+            seen === null
+              ? `The ${POSE_LABEL[pose]} photo is not turned enough to use. ` +
+                "Take it again with the head clearly turned."
+              : `That photo reads as “${POSE_COPY[seen].label}”, but the screen is ` +
+                `asking for “${POSE_COPY[pose].label}”. Take it again.`
+          );
+        }
+      }
+
+      captured.push({
+        pose,
+        embedding,
+        image: image.dataUrl,
+        yawSignal,
+        quality: numberField(fieldFor(form, "quality", pose)),
+      });
+
+      if (pose === PRIMARY_POSE) {
+        frontImage = image.dataUrl;
+        frontEmbedding = embedding;
+        frontBytes = image.bytes;
+        frontType = image.type;
+      }
     }
 
-    const image = await readFaceImage(form.get("image"));
-    if (!image.ok) return fail(image.message);
+    // The loop above guarantees these for a valid upload, but the compiler
+    // cannot see that through the loop's `continue`.
+    if (!frontEmbedding || !frontImage) {
+      return fail("A straight-on photo is required");
+    }
 
     const { data, error } = await db()
       .from("users")
       .update({
-        face_image: image.dataUrl,
-        face_embedding: formatEmbedding(embedding),
+        face_image: frontImage,
+        face_embedding: formatEmbedding(frontEmbedding),
         face_enabled: true,
         face_enrolled_at: new Date().toISOString(),
         face_enrolled_by: admin.id,
@@ -119,6 +257,31 @@ export const POST = handler(
     if (!data) return fail("User not found", 404);
 
     /*
+     * The per-angle rows, after the users row rather than before it.
+     *
+     * `users.face_enabled = false` is what makes a face unusable; a row in
+     * user_face_samples is only ever read for an account that is enabled. So if
+     * these two writes are going to disagree, the safe order is the one where
+     * the account is enabled and the side angles are missing — that degrades to
+     * exactly the pre-angles behaviour. The other order would leave side samples
+     * for a person whose face is not enrolled at all.
+     */
+    const stored = await saveFaceSamples(id, captured, admin.id);
+
+    /*
+     * A failed side write is reported, not thrown.
+     *
+     * The straight-on photo is already stored and the account works. Answering
+     * with an error would tell the admin nothing was saved when the one thing
+     * that matters most was — and the obvious next step, taking all the photos
+     * again, is worse than the state they are actually in.
+     */
+    const angleWarning = stored.error
+      ? "The straight-on photo was saved, but the turned-head angles could not be stored. " +
+        "You can add them later with Replace photo."
+      : null;
+
+    /*
      * Warn when a replacement looks like a different person.
      *
      * The realistic mistake is an admin photographing the wrong staff member, and
@@ -132,12 +295,14 @@ export const POST = handler(
 
     const previousEmbedding = parseEmbedding(before.face_embedding);
     if (previousEmbedding) {
-      previousDistance = distance(previousEmbedding, embedding);
+      previousDistance = distance(previousEmbedding, frontEmbedding);
       // A loose bar on purpose: the same person's captures vary more than this
       // under ordinary conditions — lighting, glasses, a long shift — while a
       // different person sits well outside it, so only a real mismatch trips it.
       possiblyDifferentPerson = previousDistance > REPLACEMENT_MISMATCH_DISTANCE;
     }
+
+    const angles = captured.map((c) => c.pose);
 
     await audit(
       admin,
@@ -148,8 +313,16 @@ export const POST = handler(
         username: data.username,
         full_name: data.full_name,
         replaced: Boolean(previousEmbedding),
-        image_bytes: image.bytes,
-        image_type: image.type,
+        // Which angles this enrolment actually holds, and how far each head was
+        // turned when it was captured. This is the record that makes the pose
+        // bands in lib/face.ts calibratable later: it is the only place the
+        // signals from real captures are written down.
+        angles,
+        yaw_signals: Object.fromEntries(
+          captured.map((c) => [c.pose, c.yawSignal === null ? null : Number(c.yawSignal.toFixed(4))])
+        ),
+        image_bytes: frontBytes,
+        image_type: frontType,
         possibly_different_person: possiblyDifferentPerson,
         previous_distance:
           previousDistance === null ? null : Number(previousDistance.toFixed(4)),
@@ -159,10 +332,11 @@ export const POST = handler(
 
     return ok({
       user: data,
+      angles,
       // Null on a first enrolment, where there is nothing to compare against.
       warning: possiblyDifferentPerson
         ? "This photo looks like a different person than the one already enrolled."
-        : null,
+        : angleWarning,
     });
   }
 );
@@ -179,7 +353,7 @@ export const DELETE = handler(
 
     const { data: before } = await db()
       .from("users")
-      .select("id, username, full_name, role, face_enabled")
+      .select("id, username, full_name, role, face_enabled, face_embedding")
       .eq("id", id)
       .maybeSingle();
 
@@ -190,6 +364,23 @@ export const DELETE = handler(
     if (!before.face_enabled) {
       return fail("That account has no face enrolled", 400);
     }
+
+    /*
+     * Which angles were on the account, before they go.
+     *
+     * Read first so the audit entry can say what was removed rather than only
+     * that a removal happened. "Three angles removed" and "one angle removed" are
+     * different events when the question later is whether a face was ever fully
+     * enrolled.
+     */
+    const removed = await loadFaceSamples(id, before.face_embedding);
+    const removedAngles = removed.map((s) => s.pose);
+
+    // The per-angle rows first. `face_enabled = false` is what makes a face
+    // unusable, so if the two writes disagree the account must end up disabled
+    // with rows still behind it, never the other way round — biometric data must
+    // not stay readable after "remove" was pressed.
+    const wiped = await deleteFaceSamples(id);
 
     // The photo and the embedding go together, and the last pass goes with them.
     // Keeping the vector after an explicit removal would mean "remove" did not
@@ -217,11 +408,23 @@ export const DELETE = handler(
       "USER_FACE_REVOKE",
       "user",
       data.id,
-      { username: data.username, full_name: data.full_name },
+      {
+        username: data.username,
+        full_name: data.full_name,
+        angles_removed: removedAngles,
+        samples_cleared: wiped.error === null,
+      },
       { ip: clientIp(req) }
     );
 
-    return ok({ user: data });
+    return ok({
+      user: data,
+      angles_removed: removedAngles,
+      warning: wiped.error
+        ? "The account no longer accepts a face, but the stored angles could not be removed. " +
+          "Try removing the face again."
+        : null,
+    });
   }
 );
 
@@ -337,17 +540,55 @@ export const GET = handler(
     const malformed = badId(id, "user");
     if (malformed) return malformed;
 
-    const { data, error } = await db()
+    /*
+     * Which angle to serve, defaulting to the straight-on one.
+     *
+     * `?pose=left` and `?pose=right` are the two turned-head reference photos.
+     * An unknown value is a 400 rather than a 404: it is a caller using an angle
+     * that does not exist, which is a different mistake from asking for one that
+     * was never captured.
+     */
+    const requested = new URL(req.url).searchParams.get("pose");
+    const pose = requested === null ? PRIMARY_POSE : parsePose(requested);
+    if (!pose) return fail(`Unknown angle. Use one of: ${FACE_POSES.join(", ")}`, 400);
+
+    const { data: user, error } = await db()
       .from("users")
       .select("face_image")
       .eq("id", id)
       .maybeSingle();
 
     if (error) return fail(error.message, 500);
-    if (!data) return fail("User not found", 404);
+    if (!user) return fail("User not found", 404);
 
-    const stored = String(data.face_image ?? "");
-    if (!stored.startsWith("data:")) return fail("No face enrolled", 404);
+    /*
+     * The straight-on photo comes from `users.face_image`, which is where it has
+     * always been and is what every account enrolled before the angle table
+     * exists in. The turned-head photos only exist in the sample table, so a
+     * front request only falls through to that table when the column is empty —
+     * a legacy account cannot have one, and an account enrolled through the
+     * angles has both.
+     */
+    let stored = pose === PRIMARY_POSE ? String(user.face_image ?? "") : "";
+
+    if (!stored.startsWith("data:")) {
+      const { data: rows } = await db()
+        .from("user_face_samples")
+        .select("pose, image")
+        .eq("user_id", id);
+
+      const sample = ((rows ?? []) as { pose: string; image: string | null }[]).find(
+        (row) => row.pose === pose && typeof row.image === "string" && row.image.startsWith("data:")
+      );
+      stored = sample?.image ?? "";
+    }
+
+    if (!stored.startsWith("data:")) {
+      return fail(
+        pose === PRIMARY_POSE ? "No face enrolled" : `No ${POSE_LABEL[pose]} photo enrolled`,
+        404
+      );
+    }
 
     const match = /^data:([^;,]+);base64,(.*)$/.exec(stored);
     if (!match) return fail("No face enrolled", 404);

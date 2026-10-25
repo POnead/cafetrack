@@ -311,6 +311,368 @@ export function isMatch(
   return d <= threshold;
 }
 
+/* ------------------------------------------------------ the three angles -- */
+
+/**
+ * The angles a face is enrolled from.
+ *
+ * Straight on, then turned to the person's own left and to their own right —
+ * "their own" every time it is written down, because the camera preview is a
+ * mirror and "left" on screen is the person's right. The instruction says "turn
+ * your head to your left" and the person does; nothing here depends on which
+ * side of the screen that looks like.
+ */
+export type FacePose = "front" | "left" | "right";
+
+/** In the order they are captured and presented, which is also the order they are checked. */
+export const FACE_POSES: readonly FacePose[] = ["front", "left", "right"];
+
+/** The one angle an account without side samples is checked on. */
+export const PRIMARY_POSE: FacePose = "front";
+
+/**
+ * Where `headTurnSignal` sits for a straight-on face.
+ *
+ * Not zero, and not close to zero: the 68-point outline is not perfectly
+ * symmetric on a real face, and someone facing a camera exactly still lands a
+ * little to one side of it depending on which cheek is fuller. The band has to
+ * be wide enough to call those frames frontal and narrow enough that "straight
+ * on" still means something.
+ */
+export const FRONT_MAX_SIGNAL = 0.12;
+
+/**
+ * How far the signal has to travel before a frame counts as turned.
+ *
+ * The gap between this and FRONT_MAX_SIGNAL is deliberate: a head turned just
+ * slightly is neither a frontal sample nor a usable side sample, and the honest
+ * answer for it is "turn further" rather than filing it under whichever angle it
+ * happens to be nearer. A sample filed under the wrong angle is worse than no
+ * sample, because it will be compared against the wrong pose expectation later.
+ *
+ * Both numbers are provisional. They are bounds on a *proxy*, not a measured
+ * angle — face-api supplies 2D landmarks and there is no head-pose solver here —
+ * and no real front/left/right captures have been measured against them yet. The
+ * enrolment records the signal it actually saw for every angle, which is what
+ * makes them calibratable: `npm run test:angles:measure` prints the observed
+ * spread, and these two constants are what it would change.
+ */
+export const SIDE_MIN_SIGNAL = 0.2;
+
+/**
+ * How far a head is turned, as a signed proxy in roughly [-1, 1].
+ *
+ * Positive means the nose has moved towards the person's own left eye, which is
+ * what turning your head to your left does. Computed from the nose tip and the
+ * outer corners of both eyes, because that is the pair of distances that
+ * separates yaw from roll and from the face simply being off-centre: roll moves
+ * both distances together, and being off-centre moves the *pair* without
+ * changing which is nearer.
+ *
+ * Takes plain points so it is testable with no model, no browser and no camera —
+ * the same reason `cosineDistance` takes vectors. Landmark indices are the iBUG
+ * 68 convention face-api uses: 30 is the nose tip, 36-41 the person's right eye,
+ * 42-47 their left.
+ *
+ * Returns null when the points it needs are not there or are degenerate. A pose
+ * that cannot be established must not be guessed at: a guessed pose is a sample
+ * filed under the wrong angle.
+ */
+export function headTurnSignal(
+  points: readonly { x: number; y: number }[] | null | undefined
+): number | null {
+  if (!points || points.length < 48) return null;
+
+  const nose = points[30];
+  // Outer corners: the 36th and 45th landmark in iBUG order. The outer corner
+  // rather than the centre of the eye, because the eye centre moves with the
+  // gaze as well as with the head, and this measures the head.
+  const rightEyeOuter = points[36];
+  const leftEyeOuter = points[45];
+
+  for (const p of [nose, rightEyeOuter, leftEyeOuter]) {
+    if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return null;
+  }
+
+  const dRight = Math.hypot(nose.x - rightEyeOuter.x, nose.y - rightEyeOuter.y);
+  const dLeft = Math.hypot(nose.x - leftEyeOuter.x, nose.y - leftEyeOuter.y);
+
+  const total = dRight + dLeft;
+  // Both distances at zero means the three points coincide, which is not a face.
+  if (!Number.isFinite(total) || total <= 0) return null;
+
+  return (dRight - dLeft) / total;
+}
+
+/**
+ * Which angle a frame shows, or null when it is between two of them.
+ *
+ * Null is a real answer, not a failure: it is what the capture screens ask
+ * someone to turn a little further on, and what stops a half-turned frame being
+ * stored as a side sample.
+ */
+export function poseFromSignal(signal: number | null | undefined): FacePose | null {
+  if (signal === null || signal === undefined || !Number.isFinite(signal)) return null;
+
+  if (Math.abs(signal) <= FRONT_MAX_SIGNAL) return "front";
+  if (signal >= SIDE_MIN_SIGNAL) return "left";
+  if (signal <= -SIDE_MIN_SIGNAL) return "right";
+
+  // The dead zone between a frontal frame and a decided turn.
+  return null;
+}
+
+/** Does a frame showing `actual` satisfy a request for `expected`? */
+export function poseSatisfies(expected: FacePose, actual: FacePose | null): boolean {
+  return actual !== null && actual === expected;
+}
+
+/**
+ * What the person is asked to do for each angle.
+ *
+ * One copy, used by the enrolment wizard and by every screen that checks a face,
+ * because the same instruction appearing two ways is how someone ends up turning
+ * the wrong way on one screen and not the other. `label` is the short name on a
+ * button or a thumbnail, `short` fits mid-sentence, `instruction` is the sentence
+ * printed under the camera.
+ */
+export const POSE_COPY: Record<
+  FacePose,
+  { label: string; short: string; instruction: string }
+> = {
+  front: {
+    label: "Straight on",
+    short: "straight-on",
+    instruction: "Face the camera straight on, in even light.",
+  },
+  left: {
+    label: "Turn left",
+    short: "left-turn",
+    instruction: "Turn your head to your left, about a third of the way round.",
+  },
+  right: {
+    label: "Turn right",
+    short: "right-turn",
+    instruction: "Now turn your head to your right, the same amount.",
+  },
+};
+
+/**
+ * Why a frame was refused, in words the person in front of the camera can act on.
+ *
+ * There is no distance and no score here: this is about where the head is, not
+ * how well it matched. The other-side case gets its own sentence because it is
+ * the mistake a mirrored preview makes easy — the person's left appears on the
+ * right of the screen, so "turn left" can be read either way.
+ */
+export function poseRefusal(expected: FacePose, seen: FacePose | null): string {
+  if (seen === null) {
+    return expected === PRIMARY_POSE
+      ? "That frame is halfway between straight on and turned. Face the camera directly."
+      : `That is not turned far enough for the ${POSE_COPY[expected].short}. Turn your head a little more.`;
+  }
+
+  if (expected === PRIMARY_POSE) {
+    return "That photo is turned to one side. Face the camera straight on for this one.";
+  }
+
+  if (seen === PRIMARY_POSE) {
+    return `That is still straight on. Turn your head to your ${expected} — about a third of the way round.`;
+  }
+
+  return `That is the ${seen} turn. We need your ${expected} — turn your head the other way.`;
+}
+
+/** Read a pose label off a request body or a database row, or null if it is not one. */
+export function parsePose(raw: unknown): FacePose | null {
+  if (typeof raw !== "string") return null;
+  const value = raw.trim().toLowerCase();
+  return (FACE_POSES as readonly string[]).includes(value) ? (value as FacePose) : null;
+}
+
+/** One stored angle: what the database keeps per row of user_face_samples. */
+export type StoredFaceSample = {
+  pose: FacePose;
+  embedding: Float32Array;
+};
+
+/** One frame a client presented for a check. */
+export type FaceFrameInput = {
+  pose: FacePose;
+  embedding: Float32Array;
+};
+
+/**
+ * Read the frames out of a request body, or explain why they are not usable.
+ *
+ * A check sends `[{ pose, embedding }, ...]` — one entry per angle the person
+ * presented. The rules are strict on purpose:
+ *
+ *   - at least one frame, because a check with no face is not a check;
+ *   - no more frames than there are angles, so a caller cannot ask to be
+ *     compared indefinitely until something matches;
+ *   - no duplicate angle, because two "left" frames means the caller is choosing
+ *     which one counts;
+ *   - every embedding parsed, because one unreadable frame in a three-frame
+ *     presentation is a malformed request rather than a near miss.
+ *
+ * The error text names the pose but never a distance, and never says which
+ * stored sample was close — the same rule the rest of this module follows.
+ */
+export function parseFaceFrames(
+  raw: unknown
+): { ok: true; frames: FaceFrameInput[] } | { ok: false; error: string } {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return {
+      ok: false,
+      error: "A face check needs at least the straight-on photograph.",
+    };
+  }
+
+  if (raw.length > FACE_POSES.length) {
+    return { ok: false, error: "Too many photographs for one check." };
+  }
+
+  const frames: FaceFrameInput[] = [];
+  const seen = new Set<FacePose>();
+
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") {
+      return { ok: false, error: "A photograph in that check was not readable." };
+    }
+
+    const record = entry as Record<string, unknown>;
+    const pose = parsePose(record.pose);
+    if (!pose) {
+      return { ok: false, error: "That check named an angle this system does not use." };
+    }
+
+    if (seen.has(pose)) {
+      return { ok: false, error: `The ${pose} photograph was sent twice.` };
+    }
+
+    const embedding = parseEmbedding(record.embedding);
+    if (!embedding) {
+      return {
+        ok: false,
+        error: `The ${pose} photograph could not be read. Take it again.`,
+      };
+    }
+
+    seen.add(pose);
+    frames.push({ pose, embedding });
+  }
+
+  // The straight-on frame is the one angle every account has. A presentation
+  // without it is either a client mistake or an attempt to be checked only on
+  // the angle where a bad sample happens to match.
+  if (!seen.has(PRIMARY_POSE)) {
+    return { ok: false, error: "A face check has to include the straight-on photograph." };
+  }
+
+  return { ok: true, frames };
+}
+
+/**
+ * The angles a check of this account has to present.
+ *
+ * Straight on always. A side angle only when three things are true at once: the
+ * account holds a sample for it, an admin has asked for turned-head checks, and
+ * that sample parsed. Any of those missing means the angle is simply not
+ * required —
+ *
+ *   - an account enrolled before this feature existed has no side samples, and
+ *     asking it to present one would leave a real barista unable to start work;
+ *   - a cafe that has turned the checks off keeps the samples as reference
+ *     images without being asked for them at the till;
+ *   - a side row whose embedding is corrupt is not a requirement it is possible
+ *     to satisfy.
+ *
+ * The same function is used by the capture screen (to decide what to ask for)
+ * and by the route (to decide what to accept), so the two cannot disagree about
+ * how many photographs a check is.
+ */
+export function posesRequired(
+  samples: readonly StoredFaceSample[],
+  requireProfileAngles: boolean
+): FacePose[] {
+  const held = new Set(samples.map((s) => s.pose));
+
+  return FACE_POSES.filter((pose) => {
+    if (pose === PRIMARY_POSE) return true;
+    return requireProfileAngles && held.has(pose);
+  });
+}
+
+/**
+ * Does this probe match any angle on the account?
+ *
+ * Compared against the whole gallery rather than only the sample of the same
+ * pose, and that is on purpose. The pose tells the capture screen what to ask
+ * for and tells the route that the challenge was met; it does not narrow which
+ * vector a frame may be compared with. Two reasons:
+ *
+ *   - a person turned towards their left is still the person in their frontal
+ *     sample, and the measured band shows a moderately turned head inside the
+ *     same-person range (0.0301 worst case included an angled head). Refusing to
+ *     use it would turn a usable comparison into a failed check;
+ *   - the side samples are the least reliable vectors on the account. Making a
+ *     check depend on the *stored* side vector would mean one bad enrolment locks
+ *     somebody out; comparing the live frame against everything enrolled means a
+ *     poor side sample can only fail to help, never actively obstruct.
+ *
+ * Returns the pose that matched, or null. Never the distance: a caller that
+ * learns how close a failure was can tune against it, which is why `isMatch`
+ * exists in the first place.
+ */
+export function matchGallery(
+  probe: Float32Array | null,
+  samples: readonly StoredFaceSample[],
+  threshold: number = DEFAULT_MATCH_THRESHOLD
+): FacePose | null {
+  if (!probe) return null;
+
+  for (const pose of FACE_POSES) {
+    const sample = samples.find((s) => s.pose === pose);
+    if (!sample) continue;
+    if (isMatch(probe, sample.embedding, threshold)) return pose;
+  }
+
+  return null;
+}
+
+/**
+ * Check a full presentation — one frame per required angle — against the gallery.
+ *
+ * Every required angle has to match, and the failure names the angle that did
+ * not, so a screen can say "that one was the left turn" instead of "try again".
+ * The name is the requested pose, not which stored sample it matched: telling
+ * someone which of their own samples they failed against is a clue about the
+ * template, and there is no version of that sentence that helps a real employee.
+ *
+ * Each frame is matched independently against the whole gallery. A probe is not
+ * required to match the sample with its own pose label — see matchGallery.
+ */
+export function matchPresentation(
+  frames: readonly { pose: FacePose; embedding: Float32Array | null }[],
+  samples: readonly StoredFaceSample[],
+  requiredPoses: readonly FacePose[],
+  threshold: number = DEFAULT_MATCH_THRESHOLD
+): { matched: boolean; failedPose: FacePose | null; matchedBy: FacePose | null } {
+  let firstMatch: FacePose | null = null;
+
+  for (const expected of requiredPoses) {
+    const frame = frames.find((f) => f.pose === expected);
+    if (!frame) return { matched: false, failedPose: expected, matchedBy: firstMatch };
+
+    const matchedBy = matchGallery(frame.embedding, samples, threshold);
+    if (!matchedBy) return { matched: false, failedPose: expected, matchedBy: firstMatch };
+    if (firstMatch === null) firstMatch = matchedBy;
+  }
+
+  return { matched: true, failedPose: null, matchedBy: firstMatch };
+}
+
 /* ------------------------------------------------------- the duty window -- */
 
 /**

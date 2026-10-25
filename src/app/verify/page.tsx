@@ -28,6 +28,8 @@ import {
   classifyCameraError,
   describeCameraProblem,
 } from "@/lib/face-diagnostics";
+import { FACE_POSES, POSE_COPY } from "@/lib/face";
+import { framesBody, useFacePoses } from "@/lib/use-face-poses";
 
 type Phase =
   | "loading"
@@ -230,43 +232,61 @@ export default function VerifyPage() {
     }
   }, []);
 
-  /** Read the current frame, send the embedding, and act on the answer. */
-  const verify = useCallback(async (source: HTMLVideoElement | HTMLImageElement) => {
-    setPhase("verifying");
-    setMessage(null);
-    try {
-      const lib = await faceLib();
-      const read = await lib.readFace(source);
-      if (!read.ok) {
+  /*
+   * The three-angle sequence: straight on, then the person's left, then their
+   * right. The prompt on screen and the button label both come from the same
+   * active angle, so they cannot disagree about what is being asked for.
+   */
+  const poses = useFacePoses();
+
+  /** Read the current frame, and send the whole presentation once it is complete. */
+  const verify = useCallback(
+    async (source: HTMLVideoElement | HTMLImageElement) => {
+      setPhase("verifying");
+      setMessage(null);
+      try {
+        const result = await poses.read(source);
+
+        if (result.outcome === "retry") {
+          setPhase("capture");
+          setMessage(result.message);
+          return;
+        }
+
+        if (result.outcome !== "complete") {
+          // Accepted, and there are more angles to ask for.
+          setPhase("capture");
+          return;
+        }
+
+        const res = await fetch("/api/auth/verify-face", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          // Every angle, in one body. A check that sent only the straight-on
+          // frame would fail on any account holding side samples.
+          body: JSON.stringify(framesBody(result.frames)),
+        });
+        const data = await res.json();
+
+        if (res.ok && data.ok) {
+          setPhase("passed");
+          // Long enough to read the confirmation, then in.
+          setTimeout(() => router.replace("/dashboard"), 1200);
+          return;
+        }
+
+        setPhase("failed");
+        setMessage(
+          data.error ||
+            "That face was not recognised. Try again, or ask your manager for an override."
+        );
+      } catch {
         setPhase("capture");
-        setMessage(read.message);
-        return;
+        setMessage("That could not be checked. Try again.");
       }
-
-      const res = await fetch("/api/auth/verify-face", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ embedding: read.embedding }),
-      });
-      const data = await res.json();
-
-      if (res.ok && data.ok) {
-        setPhase("passed");
-        // Long enough to read the confirmation, then in.
-        setTimeout(() => router.replace("/dashboard"), 1200);
-        return;
-      }
-
-      setPhase("failed");
-      setMessage(
-        data.error ||
-          "That face was not recognised. Try again, or ask your manager for an override."
-      );
-    } catch {
-      setPhase("capture");
-      setMessage("That could not be checked. Try again.");
-    }
-  }, [router]);
+    },
+    [router, poses]
+  );
 
   /** The insecure-origin path: the OS camera app hands back a file. */
   const onFile = useCallback(
@@ -393,7 +413,7 @@ export default function VerifyPage() {
               void verify(v);
             }}
           >
-            Take the photo
+            Take the {POSE_COPY[poses.activePose].short} photo
           </button>
         </div>
       ) : (
@@ -439,13 +459,21 @@ export default function VerifyPage() {
         cut-off that a reasonable photo of the right person gets refused — and the
         message that comes back ("that is not you") is worse than useless, because
         it is untrue. One line here costs a retake instead.
+
+        With the camera open the line becomes the prompt for the angle being
+        asked for, so the person is never guessing which of the three is next.
       */}
       <p className="mb-4 text-center text-xs text-cocoa-500">
-        Fill the frame with your face, but keep room around it — your whole head,
-        from the top of your hair down to your chin, with a little to spare. If it
-        does not match, try again with a little more light or with the camera a
-        little further away.
+        {cameraOn
+          ? POSE_COPY[poses.activePose].instruction
+          : "Fill the frame with your face, but keep room around it — your whole head, from the top of your hair down to your chin, with a little to spare. If it does not match, try again with a little more light or with the camera a little further away."}
       </p>
+
+      {cameraOn && poses.frames.length > 0 && (
+        <p className="mb-4 text-center text-xs text-cocoa-400">
+          {poses.frames.length} of {FACE_POSES.length} photos taken.
+        </p>
+      )}
 
       {/*
         Always available. On an address that cannot use getUserMedia this is the

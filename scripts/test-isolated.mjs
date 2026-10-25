@@ -35,6 +35,7 @@ const SUITES = [
   ["test:smoke", "smoke-test.mjs"],
   ["test:edge", "_edge-tests.mjs"],
   ["test:id", "_id-verification-tests.mjs"],
+  ["test:angles", "_face-angles-tests.mjs"],
   ["test:pages", "_pages.mjs"],
   ["test:email", "_email-tests.mjs"],
   ["test:journeys", "_journeys.mjs"],

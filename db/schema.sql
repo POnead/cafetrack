@@ -67,6 +67,22 @@ insert into settings (key, value) values
   -- src/lib/id-verification/ocr/templates.ts for why no open library exists for
   -- PhilSys or LTO — so this is the switch to reach for if it reads a card wrong.
   ('local_ocr_enabled', '1'),
+  -- Whether a check asks for the turned-head angles as well as a straight-on
+  -- face, once those angles have been enrolled.
+  --
+  -- '1' means the person presents front, then their left, then their right, and
+  -- all three have to match. That is a slower check and a stronger one: a still
+  -- photograph cannot produce a turned-head descriptor, so it is the one part of
+  -- this feature that resists a printed photo being held up at a till.
+  --
+  -- '0' keeps the turned-head photos on the account as reference images for an
+  -- admin but verifies on the straight-on shot alone. This is the switch to
+  -- reach for if real staff are refused at the side angles — the descriptors for
+  -- a turned head are the least reliable thing this model produces, and no set of
+  -- captured side samples has been measured here yet. Accounts enrolled before
+  -- the side angles existed are unaffected either way: they simply have no side
+  -- samples, so a check for them is one shot.
+  ('face_require_profile_angles', '1'),
   -- How close the portrait printed on the card and the photo of the person must
   -- be to count as the same person. Cosine distance, like every other threshold
   -- in this app, so lower is stricter — but see lib/id-verification/local.ts,
@@ -1387,3 +1403,74 @@ alter table item_change_requests add column if not exists unit_price numeric(12,
 -- should refuse outright. See db/migrate.sql for the full reasoning.
 create index if not exists idx_users_id_doc_number on users(id_doc_number)
   where id_doc_number is not null;
+
+-- ============================================================
+-- THREE-ANGLE FACE ENROLMENT (appended 2026-10-25)
+-- ============================================================
+-- One row per angle a staff member's face was enrolled from: straight on, and
+-- turned to their left and to their right.
+--
+-- Why a table rather than three more `text` columns on `users`
+-- ------------------------------------------------------------
+-- The embedding is the easy part to store either way. The hard part is that a
+-- turned-head sample is only *usable* if the capture recorded how far the head
+-- actually was from straight on, and that number has nowhere honest to live
+-- beside a single `face_embedding` column. Two details made this concrete: an
+-- angle stored without its measured turn cannot be told apart from a sample the
+-- admin thought was a side view and was not, which is exactly the question that
+-- makes "why does this person never verify" unanswerable months later.
+--
+-- A second reason is the delete. `users.face_embedding` is one column, so
+-- revoking a face is one update; with three more columns it becomes four, and
+-- adding a fourth angle later becomes a migration on the widest table in the
+-- app. Here, revoking is `delete from user_face_samples where user_id = $1` and
+-- a new angle is a one-line change to the check constraint below.
+--
+-- `users.face_embedding` and `users.face_image` are NOT removed. They keep being
+-- written with the straight-on sample, because every account enrolled before
+-- this table existed has exactly that and nothing else, and every check has to
+-- keep working for it.
+create table if not exists user_face_samples (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null references users(id) on delete cascade,
+  -- Which way the head was turned. A check constraint rather than an enum so a
+  -- fourth angle is a one-line change to this line in both schemas.
+  pose        text not null check (pose in ('front', 'left', 'right')),
+  -- 128 floats in the same comma-joined text form as users.face_embedding,
+  -- written by formatEmbedding so the round trip through the database is exact.
+  -- `text` for the same reason it is there: PGlite and supabase-js serialise a
+  -- bytea column differently, and both of them return text identically.
+  embedding   text not null,
+  -- The frame this vector came from, ~30KB at 256x256 q0.85. Stored per angle
+  -- rather than as one composite so an admin can see *which* angle was bad; a
+  -- single image cannot answer that, which is the whole reason for the review.
+  image       text,
+  -- How far the head was turned, as the normalised signal lib/face.ts derives
+  -- from the 68 landmarks (roughly -1 to 1, positive when the subject turned to
+  -- their own left). A *proxy*, not a measured angle in degrees: face-api gives
+  -- 2D landmarks and there is no head-pose solver here, so the honest thing to
+  -- record is what the classification actually uses. See poseFromSignal.
+  yaw_signal  real,
+  -- Detector confidence for the frame, 0..1. Kept so the review screen can say
+  -- "this sample was weak" rather than leaving a poor enrolment to be discovered
+  -- as a person who cannot get in.
+  quality     real,
+  captured_at timestamptz not null default now(),
+  -- Who took it. Same reasoning as users.face_enrolled_by: it is the first
+  -- question asked when an account holds a face that does not work.
+  captured_by uuid references users(id) on delete set null,
+  -- One row per angle. Re-enrolling an angle replaces it rather than appending,
+  -- so "how many angles does this person have" is a count, not a debate about
+  -- which sample is current.
+  unique (user_id, pose)
+);
+
+-- No separate index: the unique constraint above is already an index whose
+-- leading column is user_id, which is how every match reads these rows (all of
+-- one person's samples, in one query).
+
+alter table user_face_samples enable row level security;
+
+-- No policies created = no access for anon/authenticated roles. The service role
+-- bypasses RLS, which is what the API routes use. Same pattern as every other
+-- table here.

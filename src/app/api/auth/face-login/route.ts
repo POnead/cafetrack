@@ -6,8 +6,9 @@ import {
   deactivatedMessage,
 } from "@/lib/auth";
 import { audit } from "@/lib/audit";
-import { getSessionMinutes, getFaceLoginEnabled, getFaceMatchThreshold } from "@/lib/settings";
-import { parseEmbedding, parseStoredEmbedding, isMatch } from "@/lib/face";
+import { getSessionMinutes, getFaceLoginEnabled, getFaceMatchThreshold, getFaceRequireProfileAngles } from "@/lib/settings";
+import { PRIMARY_POSE, parseEmbedding, parseFaceFrames } from "@/lib/face";
+import { evaluatePresentation } from "@/lib/face-samples";
 import { recordFaceVerification } from "@/lib/face-gate";
 import { getIdGate } from "@/lib/id-gate";
 import {
@@ -93,7 +94,6 @@ export const POST = handler(async (req: Request) => {
   const body = await readBody(req);
 
   const identifier = String(body.identifier ?? "").trim();
-  const rawEmbedding = body.embedding;
 
   if (!identifier) {
     return fail("Scan your staff barcode or enter your username first");
@@ -156,9 +156,20 @@ export const POST = handler(async (req: Request) => {
    * reasonable to say so — but "that face could not be read" beside "that face
    * was not recognised" is a free signal that the submitted vector was well
    * formed, which is exactly the oracle rule 2 above exists to prevent.
+   *
+   * `face_frames` carries the whole presentation — one frame per angle. A bare
+   * `embedding` is still one straight-on frame, so a page that was already open
+   * when the angles shipped keeps working.
    */
-  const submitted = parseEmbedding(rawEmbedding);
-  if (!submitted) {
+  const legacy = parseEmbedding(body.embedding);
+  const parsedFrames = parseFaceFrames(body.face_frames);
+  const frames = parsedFrames.ok
+    ? parsedFrames.frames
+    : legacy
+      ? [{ pose: PRIMARY_POSE, embedding: legacy }]
+      : null;
+
+  if (!frames) {
     await recordLoginAttempt(key, FACE_LOGIN_METHOD, false);
     await audit(
       null,
@@ -205,10 +216,22 @@ export const POST = handler(async (req: Request) => {
    * exist. Matching first means this branch is only reachable by someone who has
    * already proved they are that person.
    */
-  const stored = parseStoredEmbedding(user.face_embedding);
   const threshold = await getFaceMatchThreshold();
 
-  if (!isMatch(submitted, stored, threshold)) {
+  /*
+   * Matched against every angle on the account, after the lookup and before
+   * anything about the account's state is revealed — see the note above about
+   * the oracle.
+   */
+  const presentation = await evaluatePresentation({
+    userId: user.id,
+    legacyEmbedding: user.face_embedding ?? null,
+    frames,
+    threshold,
+    requireProfileAngles: await getFaceRequireProfileAngles(),
+  });
+
+  if (!presentation.matched) {
     await recordLoginAttempt(key, FACE_LOGIN_METHOD, false);
     await audit(
       { id: user.id, username: user.username, fullName: user.full_name, role: "staff" },
@@ -271,7 +294,7 @@ export const POST = handler(async (req: Request) => {
    * account's own holder something they need to know, and an admin, rather than
    * silently signing someone in against a face the cafe has since withdrawn.
    */
-  if (!user.face_enabled || !stored) {
+  if (!user.face_enabled || presentation.samples.length === 0) {
     await recordLoginAttempt(key, FACE_LOGIN_METHOD, false);
     return fail(
       "Face sign-in is not available on this account. Ask an administrator, or sign in with your password.",

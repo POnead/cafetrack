@@ -4,7 +4,8 @@ import { signSession, setSessionCookie, deactivatedMessage } from "@/lib/auth";
 import { readStep2Ticket, STEP2_TTL_SECONDS } from "@/lib/auth/step2-ticket";
 import { audit } from "@/lib/audit";
 import { getSessionMinutes, getFaceMatchThreshold, getIdFaceMatchThreshold } from "@/lib/settings";
-import { parseEmbedding, parseStoredEmbedding, isMatch } from "@/lib/face";
+import { PRIMARY_POSE, isMatch, parseEmbedding, parseFaceFrames, posesRequired, matchPresentation } from "@/lib/face";
+import { loadFaceSamples, toGallery } from "@/lib/face-samples";
 import { recordFaceVerification } from "@/lib/face-gate";
 import { getIdGate } from "@/lib/id-gate";
 import { isSameCard, isValidFingerprint } from "@/lib/id-verification/card-hash";
@@ -135,8 +136,17 @@ export const POST = handler(async (req: Request) => {
 
   /* ---- what the account can actually be checked against ------------------- */
 
-  const stored = parseStoredEmbedding(user.face_embedding);
-  const faceUsable = Boolean(user.face_enabled && stored);
+  /*
+   * Every angle on the account, loaded once.
+   *
+   * Read before the second-factor check because whether there is anything to
+   * compare against is a fact about the row. It also means the legacy vector —
+   * accounts enrolled before the angle table existed — counts as a usable face,
+   * exactly as it did before.
+   */
+  const samples = await loadFaceSamples(user.id, user.face_embedding ?? null);
+  const gallery = toGallery(samples);
+  const faceUsable = Boolean(user.face_enabled && samples.length > 0);
   const cardUsable = isValidFingerprint(user.id_card_hash);
 
   /*
@@ -172,7 +182,13 @@ export const POST = handler(async (req: Request) => {
 
   /* ---- the readings ------------------------------------------------------- */
 
-  const submitted = parseEmbedding(body.face_embedding);
+  const parsedFrames = parseFaceFrames(body.face_frames);
+  const legacyFace = parseEmbedding(body.face_embedding);
+  const frames = parsedFrames.ok
+    ? parsedFrames.frames
+    : legacyFace
+      ? [{ pose: PRIMARY_POSE, embedding: legacyFace }]
+      : null;
   const rawHash = String(body.card_hash ?? "").trim().toLowerCase();
   const cardHash = isValidFingerprint(rawHash) ? rawHash : null;
   const idFace = parseEmbedding(body.id_face_embedding);
@@ -185,7 +201,7 @@ export const POST = handler(async (req: Request) => {
    * separately so the audit can tell "aimed at nothing" from "aimed at the
    * wrong person".
    */
-  if (!submitted && !cardHash && !idFace) {
+  if (!frames && !cardHash && !idFace) {
     return refuse("nothing_recognised", false);
   }
 
@@ -193,9 +209,31 @@ export const POST = handler(async (req: Request) => {
 
   let matchedBy: "face" | "id_card" | null = null;
 
-  if (submitted && faceUsable) {
+  // The straight-on frame is the one thing every account has a sample for, and
+  // the only frame that is meaningful to compare against a printed portrait.
+  const frontFrame = frames?.find((f) => f.pose === PRIMARY_POSE)?.embedding ?? null;
+
+  if (frames && faceUsable) {
     const threshold = await getFaceMatchThreshold();
-    if (isMatch(submitted, stored, threshold)) {
+
+    /*
+     * Straight-on only, on this screen, and that is a policy rather than an
+     * oversight.
+     *
+     * Step two presents *either* a face or the ID card, from one camera button.
+     * A card cannot turn its head, so asking for a three-angle presentation here
+     * would mean the person who chooses to present their card could never satisfy
+     * the face path — and the card is the stronger of the two factors anyway. The
+     * turned-head requirement belongs to the screens where the face is the only
+     * thing being presented: face sign-in and the duty check.
+     *
+     * `false` is passed explicitly rather than read from the setting, because the
+     * setting means "is this cafe asking for turned-head checks at all" — not
+     * "should this card-or-face screen ask for them".
+     */
+    const required = posesRequired(gallery, false);
+
+    if (matchPresentation(frames, gallery, required, threshold).matched) {
       matchedBy = "face";
     }
   }
@@ -211,9 +249,9 @@ export const POST = handler(async (req: Request) => {
    * The ID card embedding is computed in the browser from the stored image and
    * sent here — the server never runs the face model itself.
    */
-  if (!matchedBy && submitted && idFace) {
+  if (!matchedBy && frontFrame && idFace) {
     const threshold = await getIdFaceMatchThreshold();
-    if (isMatch(submitted, idFace, threshold)) {
+    if (isMatch(frontFrame, idFace, threshold)) {
       matchedBy = "face";
     }
   }

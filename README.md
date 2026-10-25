@@ -163,6 +163,47 @@ one, from `Downloads\cafetrack`.
   browser and on this machine. See [ID verification](#id-verification) for what
   they can and cannot do, and how to add a provider.
 
+### Face enrolment and the three angles
+
+A staff member's face is enrolled from three photographs: straight on, then turned
+to their own left, then to their right. The straight-on one is the only one that is
+required — it is what recognises a person looking at the camera, which is the case
+that has to work at a till. The two turned ones exist for the *check*: a still
+photograph cannot produce a turned-head descriptor, so asking for them is what
+makes a printed portrait held up to the camera fail.
+
+The capture screen refuses a frame whose head is not where the prompt says. The
+turn is measured from the 68 landmarks (`headTurnSignal`, a proxy rather than an
+angle in degrees — the model gives 2D points and there is no head-pose solver
+here), so a "left" slot cannot be filled with another straight-on photo. That
+mistake is easy to make while holding a queue, and a sample filed under the wrong
+angle would be compared against the wrong expectation for as long as the account
+lasts.
+
+**What a check asks for.** The duty check and face sign-in ask for whatever angles
+the account actually holds — all three when all three were enrolled, one when the
+account predates the angles. Nothing is ever requested that the account cannot
+present, so an existing enrolment never becomes an account someone cannot use.
+`Settings → Face → Turned-head checks` switches the side angles off entirely, which
+keeps them on file as reference photos; that is the switch to reach for if real
+staff are refused on the sides. The two screens where an ID card is presented
+(step two and card sign-in) stay single-frame on purpose: the card is the stronger
+factor there and the face is compared in the same camera frame.
+
+**The bands are provisional.** `FRONT_MAX_SIGNAL` and `SIDE_MIN_SIGNAL` in
+`src/lib/face.ts` bound a proxy, and no real front/left/right captures have been
+measured against them yet. Every enrolment writes the signal it actually saw into
+the audit log (`USER_FACE_ENROLL`, `yaw_signals`), and every failed check records
+which angle failed — so the numbers improve from real use rather than guesswork.
+If the sides prove unreliable, turn the setting off; nothing else needs to change.
+
+**Where the photos live.** One row per angle in `user_face_samples`, each a ~30KB
+JPEG and a 128-float vector, so about 90KB per person rather than the 30KB a
+single photo cost. `users.face_image` and `users.face_embedding` still hold the
+straight-on sample, which is what every account enrolled before this feature has.
+Served per angle, admin-only, `Cache-Control: private, max-age=300`; never included
+in the staff list.
+
 ### ID verification
 
 The café's own machine can compare two faces and look at an image's dimensions.
@@ -484,7 +525,15 @@ working data.**
 `test:smoke` currently reports **71 passed, 0 failed**. `test:edge` reports
 **150 passed, 0 failed**, `test:pages` **22 passed, 0 failed**,
 `test:email` **72 passed, 0 failed**, `test:journeys` **118 passed, 0 failed**,
-`test:ui` **46 passed, 0 failed**, and `test:tour` **151 passed, 0 failed**.
+`test:ui` **46 passed, 0 failed**, `test:angles` **22 passed, 0 failed**, and
+`test:tour` **151 passed, 0 failed**.
+
+`test:angles` is the one that covers the three-angle enrolment end to end: that
+the three photographs are stored and served per angle, that a frame filed under
+the wrong angle is refused by name, that an account holding three angles cannot be
+let in on the straight-on frame alone, and that an account enrolled the old way —
+one photo, one vector — still signs in with one frame. It needs `dev:test`, because
+it changes `face_login_enabled` for its own duration and puts it back.
 
 What `test:edge` grew to cover, and why each matters:
 
@@ -526,7 +575,7 @@ So give the suites a database of their own:
 
 ```bash
 npm run dev:test        # terminal 1 — a second server on :3101
-npm run test:isolated   # terminal 2 — all seven suites against it
+npm run test:isolated   # terminal 2 — every server suite against it
 ```
 
 `dev:test` points `CAFETRACK_DB_DIR` at `.pglite-test/` and gives itself its
@@ -742,6 +791,15 @@ public/
 
 ## Known limitations
 
+- **The turned-head bands have not been measured against real faces.** The
+  matching threshold (0.033) is measured and the numbers behind it are in
+  `lib/face.ts`; the *pose* bounds (`FRONT_MAX_SIGNAL`, `SIDE_MIN_SIGNAL`) are not.
+  They bound a proxy derived from 2D landmarks, chosen so that a straight-on frame
+  and a clearly turned one cannot be confused — but no set of real front/left/right
+  captures has been run through them yet. Every enrolment records the signals it
+  saw, so they are calibratable from real use; until then the setting
+  `Settings → Face → Turned-head checks` demotes the side angles to reference
+  photos and leaves verification on the straight-on frame alone.
 - **A failed audit write is reported, not hidden.** `audit()` throws by default,
   so a change that could not be recorded answers `500` rather than a misleading
   success. The message says the change may have been applied but went

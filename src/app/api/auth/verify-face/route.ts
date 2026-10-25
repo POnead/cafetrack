@@ -2,8 +2,9 @@ import { db } from "@/lib/supabase";
 import { handler, ok, fail, readBody, clientIp } from "@/lib/api";
 import { getSession } from "@/lib/auth";
 import { audit } from "@/lib/audit";
-import { parseEmbedding, parseStoredEmbedding, isMatch } from "@/lib/face";
-import { getFaceMatchThreshold } from "@/lib/settings";
+import { PRIMARY_POSE, parseEmbedding, parseFaceFrames } from "@/lib/face";
+import { evaluatePresentation } from "@/lib/face-samples";
+import { getFaceMatchThreshold, getFaceRequireProfileAngles } from "@/lib/settings";
 import { getFaceStatus, recordFaceVerification } from "@/lib/face-gate";
 import {
   checkLoginThrottle,
@@ -100,9 +101,24 @@ export const POST = handler(async (req: Request) => {
   }
 
   const body = await readBody(req);
-  const submitted = parseEmbedding(body.embedding);
 
-  if (!submitted) {
+  /*
+   * The frames, new format first.
+   *
+   * `face_frames` is one entry per angle the person presented. A body with a
+   * single `embedding` is still accepted and means one straight-on frame: pages
+   * already open on a phone when the angles shipped must keep working, and a
+   * stale tab is not a reason to refuse someone their shift.
+   */
+  const legacy = parseEmbedding(body.embedding);
+  const parsedFrames = parseFaceFrames(body.face_frames);
+  const frames = parsedFrames.ok
+    ? parsedFrames.frames
+    : legacy
+      ? [{ pose: PRIMARY_POSE, embedding: legacy }]
+      : null;
+
+  if (!frames) {
     // A malformed vector is a bad request rather than a failed identity check,
     // but it is still recorded as a denial: a client posting garbage here
     // repeatedly is the signature of someone probing the endpoint.
@@ -126,13 +142,26 @@ export const POST = handler(async (req: Request) => {
     .eq("id", session.id)
     .maybeSingle();
 
-  const stored = parseStoredEmbedding(row?.face_embedding);
   const threshold = await getFaceMatchThreshold();
+  const requireProfileAngles = await getFaceRequireProfileAngles();
 
-  // A missing reference is a refusal, not a crash and not a match. The gate
-  // above already refuses an unenrolled account, so this is only reachable if the
-  // face was removed between the two reads.
-  if (!isMatch(submitted, stored, threshold)) {
+  /*
+   * Every angle this account owes, against the samples it holds.
+   *
+   * A missing or corrupt reference is a refusal, not a crash and not a match:
+   * evaluatePresentation finds nothing to compare against, so nothing matches.
+   * The gate above already refuses an unenrolled account, so this is only
+   * reachable if the face was removed between the two reads.
+   */
+  const presentation = await evaluatePresentation({
+    userId: session.id,
+    legacyEmbedding: row?.face_embedding ?? null,
+    frames,
+    threshold,
+    requireProfileAngles,
+  });
+
+  if (!presentation.matched) {
     await recordFaceAttempt(key, false);
     await audit(
       session,
@@ -140,11 +169,19 @@ export const POST = handler(async (req: Request) => {
       "user",
       session.id,
       // No distance. See rule 1 at the top of this file.
-      { method: "camera", result: "no_match" },
+      {
+        method: "camera",
+        result: "no_match",
+        angles_required: presentation.required,
+        failed_angle: presentation.failedPose,
+      },
       { ip: clientIp(req), outcome: "denied", critical: false }
     );
     return fail(
-      "That face was not recognised. Try again, or ask your manager for an override."
+      presentation.failedPose && presentation.failedPose !== PRIMARY_POSE
+        ? `That was not recognised on the ${presentation.failedPose} turn. Try again, ` +
+            "taking each photograph as the screen asks for it — or ask your manager for an override."
+        : "That face was not recognised. Try again, or ask your manager for an override."
     );
   }
 
@@ -160,7 +197,12 @@ export const POST = handler(async (req: Request) => {
     "FACE_VERIFY",
     "user",
     session.id,
-    { method: "camera", result: "matched", duty_hours: dutyHours },
+    {
+      method: "camera",
+      result: "matched",
+      duty_hours: dutyHours,
+      angles_presented: frames.map((f) => f.pose),
+    },
     { ip: clientIp(req), critical: false }
   );
 
@@ -169,6 +211,7 @@ export const POST = handler(async (req: Request) => {
     required: true,
     verifiedAt,
     dutyHours,
+    anglesChecked: presentation.required,
     nextDueAt: new Date(Date.now() + dutyHours * 3_600_000).toISOString(),
   });
 });
