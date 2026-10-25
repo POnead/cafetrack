@@ -24,11 +24,16 @@ ui-screenshots/
 *.traineddata.gz
 .cache/
 
-# Face model weights (~6.7MB), copied out of @vladmandic/face-api by
+# Face model weights (~12MB), copied out of @vladmandic/face-api by
 # `npm run setup:face`. A build product, not source: committing them would put
 # megabytes into every clone forever, for files the package already ships.
 # See scripts/setup-face-models.mjs.
 public/models/
+
+# The SFace engine: two ONNX models (~9.5MB) plus the onnxruntime wasm build
+# (~13.6MB), fetched by `npm run setup:face:sface`. Same reasoning — and these are
+# not even on npm, so a clone without the setup step simply has no SFace engine.
+public/onnx/
 
 # A whole PGlite data directory copied by hand beside the app. The app's own
 # snapshots live in backups/, which is ignored above; these hand-made copies

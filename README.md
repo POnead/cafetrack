@@ -214,6 +214,43 @@ straight-on sample, which is what every account enrolled before this feature has
 Served per angle, admin-only, `Cache-Control: private, max-age=300`; never included
 in the staff list.
 
+### The second engine (SFace)
+
+The original recogniser is the limiting factor and its measured band is thin: a
+worst genuine reading of 0.0301 against a closest impostor of 0.0362 leaves about
+ten percent of headroom each way. A replacement is built and measured but **not
+switched on** — nothing imports it yet.
+
+`src/lib/face-sface.ts` runs **YuNet** (98KB, MIT) for detection and five
+landmarks, and **SFace** (9.4MB, Apache 2.0) for the embedding, on
+onnxruntime-web. Both come from OpenCV Zoo and both are commercially usable —
+InsightFace has a higher ceiling but its model packages need a separate commercial
+licence, and a café gating staff on this is commercial use.
+
+```bash
+npm run setup:face:sface   # ~9.5MB of models + the 13.6MB wasm runtime
+npm run test:sface         # the arithmetic, no model and no browser
+```
+
+What has been verified, and how:
+
+- The YuNet decoder reproduces OpenCV's own demo output exactly — the seven
+  detection scores it produces match the ones drawn on the reference image.
+- The five landmarks are already in ArcFace order, despite what the docs imply.
+  Fitting both possible orders to seven real faces gives 3.0° mean rotation for
+  the identity mapping and 134.8° for the swapped one.
+- The similarity-transform estimator had its rotation sign inverted, which a test
+  image of upright faces did not catch (correcting 3° by −3° still looks like a
+  face) and a unit test did. See `test:sface`.
+
+What has *not* been established: a threshold. On the one photograph available, a
+genuine pair sat at 0.37 while several different people sat between 0.14 and 0.35
+— but those faces are 40 pixels wide, and at that size the descriptor tracks pose
+and light more than identity. `SFACE_MATCH_THRESHOLD` is therefore set from
+OpenCV's own guidance (cosine similarity 0.363, i.e. distance 0.637) and must be
+re-measured from till-quality captures before this engine gates a shift. Switching
+engines also invalidates every stored vector, so it needs a staged re-enrolment.
+
 ### ID verification
 
 The café's own machine can compare two faces and look at an image's dimensions.
@@ -493,6 +530,7 @@ overwrites your change:
 | `npm run lint`      | ESLint                                                |
 | `npm run seed`      | Seed **Supabase** (local mode seeds itself)            |
 | `npm run setup:face`| Copy the face-model weights into `public/models/`      |
+| `npm run setup:face:sface`| Fetch the SFace engine (models + wasm) into `public/` |
 | `npm run db:schema` | Regenerate `db/schema.local.sql` from `db/schema.sql`  |
 | `npm run db:migrate`| Write `db/migrate.sql` — paste-ready, data-safe updates for a hosted project |
 | `npm run db:reset`  | Delete the local database                              |
@@ -898,3 +936,4 @@ public/
   the approval it exists to get.
 - **A pending item has no barcode.** One is drawn only once the item is approved,
   so a label cannot be printed for stock that is not stock yet.
+

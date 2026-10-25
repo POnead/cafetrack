@@ -112,7 +112,13 @@ export const config = {
   // produces a JSON parse error inside face-api rather than anything a person
   // could read. The feature would appear to do nothing, with no error on screen
   // to say why.
+  //
+  // `onnx/` is the onnxruntime wasm build, and it fails in a way that is harder
+  // to diagnose than either: onnxruntime fetches it from inside a worker-like
+  // loader, so an HTML body arrives as "no available backend found" and the
+  // browser console says nothing about a sign-in page. Same class of mistake,
+  // so it is excluded here rather than discovered later.
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|icon.svg|brand/|models/).*)",
+    "/((?!_next/static|_next/image|favicon.ico|icon.svg|brand/|models/|onnx/).*)",
   ],
 };
