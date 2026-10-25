@@ -92,6 +92,21 @@ insert into settings (key, value) values
   -- the side angles existed are unaffected either way: they simply have no side
   -- samples, so a check for them is one shot.
   ('face_require_profile_angles', '1'),
+  -- Which face engine the cafe is using: 'legacy' (the 128-float model this app
+  -- shipped with) or 'sface' (YuNet + SFace, see src/lib/face-sface.ts).
+  --
+  -- The two produce embeddings in different spaces and cannot be compared. Every
+  -- stored sample records which engine made it, and a check only ever compares
+  -- against samples from the engine in use — so flipping this does not silently
+  -- compare a new embedding against an old one and call a real person a stranger.
+  -- What it does instead is report that the account needs re-enrolling, which is
+  -- the honest state: switching engines invalidates every stored vector.
+  --
+  -- Deliberately not exposed as a switch on the Settings page yet. The capture
+  -- screens still compute the legacy embedding, so flipping it would lock every
+  -- staff member out until their face was re-enrolled. It is stored and enforced
+  -- at matching time; the control arrives with the re-enrolment flow.
+  ('face_engine', 'legacy'),
   -- How close the portrait printed on the card and the photo of the person must
   -- be to count as the same person. Cosine distance, like every other threshold
   -- in this app, so lower is stricter — but see lib/id-verification/local.ts,
@@ -1462,6 +1477,14 @@ create table if not exists user_face_samples (
   -- "this sample was weak" rather than leaving a poor enrolment to be discovered
   -- as a person who cannot get in.
   quality     real,
+  -- Which engine produced `embedding`: 'legacy' or 'sface'.
+  --
+  -- Load-bearing rather than bookkeeping. The two engines use different vector
+  -- spaces, so comparing one against the other is meaningless — a genuine person
+  -- would look like a stranger and the failure would be indistinguishable from a
+  -- bad camera. Matching filters on this column, which also makes a staged
+  -- migration possible: old samples keep working until each person is re-enrolled.
+  model       text not null default 'legacy',
   captured_at timestamptz not null default now(),
   -- Who took it. Same reasoning as users.face_enrolled_by: it is the first
   -- question asked when an account holds a face that does not work.
@@ -1477,6 +1500,11 @@ create table if not exists user_face_samples (
 -- one person's samples, in one query).
 
 alter table user_face_samples enable row level security;
+
+-- `create table if not exists` above does nothing on an existing database, so the
+-- engine column is also added explicitly. Installs that predate the two-engine
+-- split get 'legacy', which is what every stored vector in them actually is.
+alter table user_face_samples add column if not exists model text not null default 'legacy';
 
 -- No policies created = no access for anon/authenticated roles. The service role
 -- bypasses RLS, which is what the API routes use. Same pattern as every other

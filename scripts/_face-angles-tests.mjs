@@ -126,12 +126,13 @@ async function staffLogin(username, password) {
   return (r.headers.getSetCookie?.() ?? []).map((x) => x.split(";")[0]).join("; ");
 }
 
-/** Enrol one or more angles. `angles` is `{ pose: [embedding, signal] }`. */
+/** Enrol one or more angles. `angles` is `{ pose: [embedding, signal, model?] }`. */
 function faceForm(angles) {
   const form = new FormData();
-  for (const [pose, [vector, signal]] of Object.entries(angles)) {
+  for (const [pose, [vector, signal, model]] of Object.entries(angles)) {
     form.append(`embedding_${pose}`, vector.join(","));
     if (signal !== null && signal !== undefined) form.append(`signal_${pose}`, String(signal));
+    if (model) form.append(`model_${pose}`, model);
     form.append(`quality_${pose}`, "0.9");
     form.append(`image_${pose}`, file(TINY_JPEG, `${pose}.jpg`, "image/jpeg"));
   }
@@ -381,6 +382,33 @@ check(
   "and an old-style single frame still signs that account in",
   legacyLogin.status === 200,
   `${legacyLogin.status} ${legacyLogin.data?.error ?? ""}`
+);
+
+section("engines — a vector from another engine is never comparable");
+
+/*
+ * The strongest form of the check: the stored vector is *byte-identical* to the
+ * probe. If it matched, the engine filter is missing; if it does not, the filter
+ * works. A near-miss would have been ambiguous, because "close but not close
+ * enough" is also what a bad camera looks like.
+ */
+const crossUser = await makeStaff("anglee");
+await upload(
+  `/api/users/${crossUser}/face`,
+  faceForm({ front: [PERSON, 0, "sface"] }),
+  cookie
+);
+
+const crossProbe = await call(
+  "POST",
+  "/api/auth/face-login",
+  { identifier: `anglee${uniq}`, embedding: PERSON },
+  undefined
+);
+check(
+  "an sface vector does not match a legacy check, even with identical numbers",
+  crossProbe.status === 401,
+  `${crossProbe.status}`
 );
 
 section("revoking removes every angle");

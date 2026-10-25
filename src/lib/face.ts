@@ -327,6 +327,35 @@ export type FacePose = "front" | "left" | "right";
 /** In the order they are captured and presented, which is also the order they are checked. */
 export const FACE_POSES: readonly FacePose[] = ["front", "left", "right"];
 
+/* ------------------------------------------------------------- engines ---- */
+
+/**
+ * Which model produced a set of embeddings.
+ *
+ * `legacy` is the face-api 128-float descriptor this app shipped with; `sface`
+ * is YuNet + SFace (see lib/face-sface.ts). They are different vector spaces, so
+ * an embedding from one is *meaningless* against the other — not merely noisy.
+ * Comparing across them would present a genuine person as a stranger, and the
+ * failure would look exactly like a bad camera.
+ *
+ * That is why every stored sample carries its engine and every comparison filters
+ * on it. The type exists so the compiler helps: a function that compares two
+ * embeddings takes the engine, or takes a gallery that has already been filtered.
+ */
+export type FaceEngine = "legacy" | "sface";
+
+export const FACE_ENGINES: readonly FaceEngine[] = ["legacy", "sface"];
+
+/** The engine every install starts on, and the only one the capture screens use. */
+export const DEFAULT_FACE_ENGINE: FaceEngine = "legacy";
+
+/** Read an engine name off a request or a database row, or null if it is not one. */
+export function parseEngine(raw: unknown): FaceEngine | null {
+  if (typeof raw !== "string") return null;
+  const value = raw.trim().toLowerCase();
+  return (FACE_ENGINES as readonly string[]).includes(value) ? (value as FaceEngine) : null;
+}
+
 /** The one angle an account without side samples is checked on. */
 export const PRIMARY_POSE: FacePose = "front";
 

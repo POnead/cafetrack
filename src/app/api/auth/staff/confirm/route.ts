@@ -3,9 +3,9 @@ import { handler, ok, fail, readBody, clientIp } from "@/lib/api";
 import { signSession, setSessionCookie, deactivatedMessage } from "@/lib/auth";
 import { readStep2Ticket, STEP2_TTL_SECONDS } from "@/lib/auth/step2-ticket";
 import { audit } from "@/lib/audit";
-import { getSessionMinutes, getFaceMatchThreshold, getIdFaceMatchThreshold } from "@/lib/settings";
+import { getFaceEngine, getSessionMinutes, getFaceMatchThreshold, getIdFaceMatchThreshold } from "@/lib/settings";
 import { PRIMARY_POSE, isMatch, parseEmbedding, parseFaceFrames, posesRequired, matchPresentation } from "@/lib/face";
-import { loadFaceSamples, toGallery } from "@/lib/face-samples";
+import { galleryFor, loadFaceSamples } from "@/lib/face-samples";
 import { recordFaceVerification } from "@/lib/face-gate";
 import { getIdGate } from "@/lib/id-gate";
 import { isSameCard, isValidFingerprint } from "@/lib/id-verification/card-hash";
@@ -145,7 +145,9 @@ export const POST = handler(async (req: Request) => {
    * exactly as it did before.
    */
   const samples = await loadFaceSamples(user.id, user.face_embedding ?? null);
-  const gallery = toGallery(samples);
+  // Only vectors from the engine in use may be compared; see FaceEngine.
+  const engine = await getFaceEngine();
+  const gallery = galleryFor(samples, engine);
   const faceUsable = Boolean(user.face_enabled && samples.length > 0);
   const cardUsable = isValidFingerprint(user.id_card_hash);
 

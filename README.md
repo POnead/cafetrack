@@ -251,6 +251,21 @@ OpenCV's own guidance (cosine similarity 0.363, i.e. distance 0.637) and must be
 re-measured from till-quality captures before this engine gates a shift. Switching
 engines also invalidates every stored vector, so it needs a staged re-enrolment.
 
+**How the two engines are kept apart.** Every row in `user_face_samples` records
+the engine that produced its vector (`model`), and a check only compares against
+rows from the engine in use (`settings.face_engine`, `legacy` by default). This is
+not bookkeeping: the two vector spaces are unrelated, so a cross-engine comparison
+would show a real person as a stranger and look exactly like a bad camera. The
+test for it stores a byte-identical vector under the other engine and asserts the
+check still refuses.
+
+The consequence is that flipping the setting does not fail silently — an account
+whose samples are all from the other engine reports *needs re-enrolling* instead
+of "not recognised". That is what makes a staged migration possible: people keep
+working on their old enrolment until each is re-captured. There is deliberately no
+Settings control for the switch yet, because the capture screens still compute the
+legacy embedding; the control lands with the re-enrolment flow.
+
 ### ID verification
 
 The café's own machine can compare two faces and look at an image's dimensions.

@@ -68,6 +68,7 @@ alter table items add column if not exists supplier_id uuid references suppliers
 alter table users add column if not exists session_token text;
 alter table items add column if not exists unit_price numeric(12,2);
 alter table item_change_requests add column if not exists unit_price numeric(12,2);
+alter table user_face_samples add column if not exists model text not null default 'legacy';
 
 -- ---------- stored functions ----------
 -- create or replace keeps the existing function id and re-points it at the new

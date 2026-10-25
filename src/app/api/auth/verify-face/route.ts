@@ -4,7 +4,7 @@ import { getSession } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { PRIMARY_POSE, parseEmbedding, parseFaceFrames } from "@/lib/face";
 import { evaluatePresentation } from "@/lib/face-samples";
-import { getFaceMatchThreshold, getFaceRequireProfileAngles } from "@/lib/settings";
+import { getFaceEngine, getFaceMatchThreshold, getFaceRequireProfileAngles } from "@/lib/settings";
 import { getFaceStatus, recordFaceVerification } from "@/lib/face-gate";
 import {
   checkLoginThrottle,
@@ -159,7 +159,22 @@ export const POST = handler(async (req: Request) => {
     frames,
     threshold,
     requireProfileAngles,
+    engine: await getFaceEngine(),
   });
+
+  if (!presentation.matched && presentation.needsEnrolment) {
+    /*
+     * Enrolled, but not in the engine now in use. This is the state a cafe is in
+     * between switching engines and re-enrolling each person, and saying "not
+     * recognised" for it would send someone to the camera again and again for a
+     * problem no camera can fix.
+     */
+    await recordFaceAttempt(key, false);
+    return fail(
+      "Your face on file was recorded with a different face model, so it cannot be " +
+        "compared any more. Ask an administrator to enrol your face again."
+    );
+  }
 
   if (!presentation.matched) {
     await recordFaceAttempt(key, false);
@@ -215,3 +230,4 @@ export const POST = handler(async (req: Request) => {
     nextDueAt: new Date(Date.now() + dutyHours * 3_600_000).toISOString(),
   });
 });
+

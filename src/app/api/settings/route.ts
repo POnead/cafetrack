@@ -169,6 +169,32 @@ const TEXT_SETTINGS: Record<
       return null;
     },
   },
+  /*
+   * Which face engine the cafe runs: "legacy" or "sface".
+   *
+   * A closed list, because unlike `id_provider` there is no safe fallback — an
+   * unrecognised value here would mean "compare against vectors from a model
+   * that does not exist", and the safe reading of that is legacy, which is what
+   * the reader does. Refusing the value at the door means the admin is told
+   * rather than quietly getting the old engine back.
+   *
+   * There is deliberately no control for this on the Settings page yet. The
+   * capture screens still compute the legacy embedding, so switching to sface
+   * today would leave every staff member unable to pass a check until each was
+   * re-enrolled. The switch is stored, and enforced at matching time — which is
+   * what makes the staged migration possible once the capture path lands.
+   */
+  face_engine: {
+    maxLength: 10,
+    label: "Face engine",
+    validate: (value) => {
+      const v = value.trim().toLowerCase();
+      if (!["legacy", "sface"].includes(v)) {
+        return 'Face engine must be "legacy" or "sface"';
+      }
+      return null;
+    },
+  },
 };
 
 /**

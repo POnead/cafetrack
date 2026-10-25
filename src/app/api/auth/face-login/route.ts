@@ -6,7 +6,7 @@ import {
   deactivatedMessage,
 } from "@/lib/auth";
 import { audit } from "@/lib/audit";
-import { getSessionMinutes, getFaceLoginEnabled, getFaceMatchThreshold, getFaceRequireProfileAngles } from "@/lib/settings";
+import { getSessionMinutes, getFaceEngine, getFaceLoginEnabled, getFaceMatchThreshold, getFaceRequireProfileAngles } from "@/lib/settings";
 import { PRIMARY_POSE, parseEmbedding, parseFaceFrames } from "@/lib/face";
 import { evaluatePresentation } from "@/lib/face-samples";
 import { recordFaceVerification } from "@/lib/face-gate";
@@ -229,6 +229,7 @@ export const POST = handler(async (req: Request) => {
     frames,
     threshold,
     requireProfileAngles: await getFaceRequireProfileAngles(),
+    engine: await getFaceEngine(),
   });
 
   if (!presentation.matched) {

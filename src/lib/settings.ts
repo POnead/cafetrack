@@ -12,11 +12,14 @@
 import { db } from "./supabase";
 import {
   DEFAULT_DUTY_HOURS,
+  DEFAULT_FACE_ENGINE,
   DEFAULT_MATCH_THRESHOLD,
   MAX_DUTY_HOURS,
   MAX_MATCH_THRESHOLD,
   MIN_DUTY_HOURS,
   MIN_MATCH_THRESHOLD,
+  type FaceEngine,
+  parseEngine,
 } from "./face";
 import {
   DEFAULT_ID_MATCH_THRESHOLD,
@@ -178,6 +181,19 @@ export async function getFaceMatchThreshold(): Promise<number> {
  */
 export async function getFaceRequireProfileAngles(): Promise<boolean> {
   return readToggle("face_require_profile_angles");
+}
+
+/**
+ * Which face engine this cafe is using (settings.face_engine).
+ *
+ * 'legacy' or 'sface'. An unrecognised value reads as 'legacy' rather than
+ * throwing: a typo in a settings row must not take sign-in down, and legacy is
+ * the engine whose vectors every existing enrolment holds.
+ *
+ * See FaceEngine in lib/face.ts for why the two cannot be mixed.
+ */
+export async function getFaceEngine(): Promise<FaceEngine> {
+  return parseEngine(await getSetting("face_engine")) ?? DEFAULT_FACE_ENGINE;
 }
 
 /**

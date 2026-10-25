@@ -3,6 +3,7 @@ import { handler, ok, fail, badId, clientIp, readBody } from "@/lib/api";
 import { requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import {
+  DEFAULT_FACE_ENGINE,
   FACE_POSES,
   POSE_COPY,
   PRIMARY_POSE,
@@ -10,6 +11,7 @@ import {
   distance,
   formatEmbedding,
   parseEmbedding,
+  parseEngine,
   parsePose,
   poseFromSignal,
   poseSatisfies,
@@ -76,7 +78,7 @@ const POSE_LABEL: Record<FacePose, string> = {
  */
 function fieldFor(
   form: FormData,
-  base: "embedding" | "image" | "signal" | "quality",
+  base: "embedding" | "image" | "signal" | "quality" | "model",
   pose: FacePose
 ): FormDataEntryValue | null {
   const suffixed = form.get(`${base}_${pose}`);
@@ -218,6 +220,16 @@ export const POST = handler(
       captured.push({
         pose,
         embedding,
+        /*
+         * Which engine produced this vector, declared by the client that ran it.
+         *
+         * Defaults to legacy because that is what every capture screen computes
+         * today, and the truth about the vector matters more than the setting:
+         * mislabelling a legacy vector as sface would make it silently
+         * incomparable with everything else on the account. A client that uses
+         * the other engine says so with `model_<pose>`.
+         */
+        model: parseEngine(fieldFor(form, "model", pose)) ?? DEFAULT_FACE_ENGINE,
         image: image.dataUrl,
         yawSignal,
         quality: numberField(fieldFor(form, "quality", pose)),

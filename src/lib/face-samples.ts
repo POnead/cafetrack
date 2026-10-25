@@ -21,13 +21,16 @@
  */
 import { db } from "./supabase";
 import {
+  DEFAULT_FACE_ENGINE,
   FACE_POSES,
   PRIMARY_POSE,
+  type FaceEngine,
   type FaceFrameInput,
   type FacePose,
   type StoredFaceSample,
   formatEmbedding,
   matchPresentation,
+  parseEngine,
   parsePose,
   parseStoredEmbedding,
   posesRequired,
@@ -38,6 +41,8 @@ export type FaceSample = {
   pose: FacePose;
   /** Null only for a synthesised legacy sample, which has a photo elsewhere. */
   embedding: Float32Array;
+  /** Which engine produced the vector. Cross-engine comparison is refused. */
+  model: FaceEngine;
   image: string | null;
   yawSignal: number | null;
   quality: number | null;
@@ -50,12 +55,13 @@ export type FaceSample = {
 export type FaceSampleInput = {
   pose: FacePose;
   embedding: Float32Array;
+  model: FaceEngine;
   image: string;
   yawSignal: number | null;
   quality: number | null;
 };
 
-const COLUMNS = "pose, embedding, image, yaw_signal, quality, captured_at";
+const COLUMNS = "pose, embedding, model, image, yaw_signal, quality, captured_at";
 
 function toNumberOrNull(value: unknown): number | null {
   const n = typeof value === "number" ? value : Number(value);
@@ -95,6 +101,9 @@ export async function loadFaceSamples(
     samples.push({
       pose,
       embedding,
+      // A row that predates the column, or holds something unrecognised, is
+      // legacy — that is what every vector written before the split actually is.
+      model: parseEngine(row.model) ?? DEFAULT_FACE_ENGINE,
       image: typeof row.image === "string" && row.image.startsWith("data:") ? row.image : null,
       yawSignal: toNumberOrNull(row.yaw_signal),
       quality: toNumberOrNull(row.quality),
@@ -109,6 +118,7 @@ export async function loadFaceSamples(
       samples.unshift({
         pose: PRIMARY_POSE,
         embedding: legacy,
+        model: DEFAULT_FACE_ENGINE,
         image: null,
         yawSignal: null,
         quality: null,
@@ -129,6 +139,20 @@ export async function loadFaceSamples(
 /** Just the vectors, which is all the matching needs. */
 export function toGallery(samples: readonly FaceSample[]): StoredFaceSample[] {
   return samples.map((s) => ({ pose: s.pose, embedding: s.embedding }));
+}
+
+/**
+ * The samples a check may compare against, given the engine in use.
+ *
+ * Filtering here rather than inside the matcher is the point: a matcher that can
+ * see samples from another engine can compare against them by accident, and the
+ * result is a genuine person reported as a stranger.
+ */
+export function galleryFor(
+  samples: readonly FaceSample[],
+  engine: FaceEngine
+): StoredFaceSample[] {
+  return toGallery(samples.filter((s) => s.model === engine));
 }
 
 /**
@@ -156,6 +180,7 @@ export async function saveFaceSamples(
     user_id: userId,
     pose: e.pose,
     embedding: formatEmbedding(e.embedding),
+    model: e.model,
     image: e.image,
     yaw_signal: e.yawSignal,
     quality: e.quality,
@@ -198,6 +223,13 @@ export type PresentationResult = {
   /** The angle that failed, when it did. Never a distance. */
   failedPose: FacePose | null;
   samples: FaceSample[];
+  /**
+   * True when the account has a face enrolled, but none of it in the engine now
+   * in use. That is the state a cafe is in the moment it switches engines and
+   * before each person is re-enrolled, and it deserves its own sentence rather
+   * than "not recognised".
+   */
+  needsEnrolment: boolean;
 };
 
 /**
@@ -214,9 +246,11 @@ export async function evaluatePresentation(args: {
   frames: readonly FaceFrameInput[];
   threshold: number;
   requireProfileAngles: boolean;
+  /** Only samples from this engine may be compared against. */
+  engine: FaceEngine;
 }): Promise<PresentationResult> {
   const samples = await loadFaceSamples(args.userId, args.legacyEmbedding);
-  const gallery = toGallery(samples);
+  const gallery = galleryFor(samples, args.engine);
   const required = posesRequired(gallery, args.requireProfileAngles);
 
   const result = matchPresentation(args.frames, gallery, required, args.threshold);
@@ -226,5 +260,8 @@ export async function evaluatePresentation(args: {
     matched: result.matched,
     failedPose: result.failedPose,
     samples,
+    // Has a face, but not in the engine in use: a different problem from "no
+    // face enrolled", and the one a half-finished engine migration produces.
+    needsEnrolment: gallery.length === 0 && samples.length > 0,
   };
 }

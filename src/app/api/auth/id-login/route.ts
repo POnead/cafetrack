@@ -2,7 +2,7 @@ import { db } from "@/lib/supabase";
 import { handler, ok, fail, clientIp } from "@/lib/api";
 import { signSession, setSessionCookie, deactivatedMessage } from "@/lib/auth";
 import { audit } from "@/lib/audit";
-import { getSessionMinutes, getFaceMatchThreshold } from "@/lib/settings";
+import { getFaceEngine, getSessionMinutes, getFaceMatchThreshold } from "@/lib/settings";
 import { PRIMARY_POSE, parseEmbedding, parseFaceFrames } from "@/lib/face";
 import { evaluatePresentation } from "@/lib/face-samples";
 import { recordFaceVerification } from "@/lib/face-gate";
@@ -260,6 +260,7 @@ export const POST = handler(async (req: Request) => {
      * where a face is the only thing presented.
      */
     requireProfileAngles: false,
+    engine: await getFaceEngine(),
   });
 
   if (!presentation.matched) {
@@ -441,3 +442,4 @@ const UNRECOGNISED = "Unrecognised ID, or that ID is not on file for any account
 const NO_MODEL =
   "This server cannot read ID cards yet — its text model has not been downloaded. " +
   "Sign in with your badge and password instead, or ask an administrator to finish setup.";
+
