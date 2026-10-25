@@ -6,18 +6,26 @@
  *
  * Why a script rather than committing the weights
  * ----------------------------------------------
- * The three models are ~7MB of binary. They arrive inside the @vladmandic/face-api
+ * The four models are ~12MB of binary. They arrive inside the @vladmandic/face-api
  * package, which is already a dependency, so copying them out is free — whereas
- * checking 7MB of binaries into git is permanent and slows every clone forever.
+ * checking 12MB of binaries into git is permanent and slows every clone forever.
  *
  * The trade is that a fresh clone needs this one command before the feature runs.
  * That is stated in the README and in the setup check below, and the failure it
  * causes is not silent: the pages that need the models report "model files are
  * missing" rather than showing a camera that does nothing.
  *
- * Only these three are copied. The package ships several more (face_landmark_68_tiny,
+ * Only these four are copied. The package ships several more (face_landmark_68_tiny,
  * face_expression, age_gender, and a dozen descriptors); none of them are used, and
  * copying them would roughly double what the browser can be asked to download.
+ *
+ * Why two detectors
+ * -----------------
+ * `tiny_face_detector_model` is 0.18MB and misses angled, partly covered and small
+ * faces — which is most of a bad capture at a till. `ssd_mobilenetv1_model` is
+ * 5.36MB and finds them. The app runs the accurate one first and keeps the tiny one
+ * as the fallback, including when these weights are absent, so the download is worth
+ * paying for once and the feature degrades rather than breaks if it is skipped.
  *
  * Detection -> landmarks -> recognition. The first two align the face so the third
  * produces a comparable vector; dropping any of them makes matching unreliable
@@ -34,6 +42,11 @@ const DEST = join(here, "..", "public", "models");
 /** Base names, each of which ships as a manifest .json plus a .bin of weights. */
 const WANTED = [
   "tiny_face_detector_model",
+  // The accurate detector. It is what actually runs, and it is the one thing
+  // that makes "it cannot see my face" stop happening — the tiny detector misses
+  // angled, partly covered and small faces. If this is missing the app still
+  // works, on the tiny detector alone; see FACE_MODELS in lib/face-client.ts.
+  "ssd_mobilenetv1_model",
   "face_landmark_68_model",
   "face_recognition_model",
 ];

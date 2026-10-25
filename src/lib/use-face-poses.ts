@@ -25,6 +25,8 @@ import { useCallback, useMemo, useState } from "react";
 import {
   FACE_POSES,
   type FacePose,
+  fileFrame,
+  poseAlreadyHeld,
   poseFromSignal,
   poseRefusal,
 } from "./face";
@@ -100,19 +102,31 @@ export function useFacePoses(poses: readonly FacePose[] = FACE_POSES): FacePoseS
       }
 
       const seen = poseFromSignal(result.poseSignal);
-      if (seen !== expected) {
-        // The head is not where the prompt says it is. Refused here rather than
-        // on the server so the person is told while they are still in front of
-        // the camera, and so a wrong-angle frame never leaves the device.
-        const refusal = poseRefusal(expected, seen);
+      const held = frames.map((f) => f.pose);
+      const filing = fileFrame({ expected, seen, held });
+
+      if (filing.kind === "turn-more") {
+        // Halfway between straight on and turned. The one case that genuinely
+        // needs another frame, refused here rather than on the server so the
+        // person is told while they are still in front of the camera.
+        const refusal = poseRefusal(expected, null);
         setMessage(refusal);
         return { outcome: "retry", frames, message: refusal };
       }
 
+      if (filing.kind === "already-have") {
+        const missing = poses.find((pose) => !held.includes(pose)) ?? null;
+        const note = poseAlreadyHeld(filing.pose, missing);
+        setMessage(note);
+        return { outcome: "retry", frames, message: note };
+      }
+
+      // Filed under the angle the frame actually shows — which is usually the
+      // one asked for, and sometimes the one next to it. See fileFrame.
       const next = [
-        ...frames.filter((f) => f.pose !== expected),
+        ...frames.filter((f) => f.pose !== filing.pose),
         {
-          pose: expected,
+          pose: filing.pose,
           embedding: result.embedding,
           poseSignal: result.poseSignal,
           quality: result.score,

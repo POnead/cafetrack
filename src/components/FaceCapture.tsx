@@ -56,6 +56,8 @@ import {
   PRIMARY_POSE,
   POSE_COPY,
   type FacePose,
+  fileFrame,
+  poseAlreadyHeld,
   poseFromSignal,
   poseRefusal,
 } from "@/lib/face";
@@ -260,20 +262,26 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
       photo: string
     ): { accepted: boolean; nextPose: FacePose | null } => {
       const seen = poseFromSignal(read.poseSignal);
+      const held = FACE_POSES.filter((pose) => shots[pose]);
+      const filing = fileFrame({ expected, seen, held });
 
-      if (seen !== expected) {
-        // The head is not where the prompt says it is. This is the mistake the
-        // pose check exists for: an admin filling the "left" slot with a photo
-        // that is not turned, which would compare against the wrong expectation
-        // at every check afterwards.
-        setMessage(poseRefusal(expected, seen));
+      if (filing.kind === "turn-more") {
+        setMessage(poseRefusal(expected, null));
         return { accepted: false, nextPose: null };
       }
 
+      if (filing.kind === "already-have") {
+        const missing = FACE_POSES.find((pose) => !held.includes(pose)) ?? null;
+        setMessage(poseAlreadyHeld(filing.pose, missing));
+        return { accepted: false, nextPose: null };
+      }
+
+      // Filed under the angle the frame actually shows — normally the one asked
+      // for, and sometimes the one next to it. See fileFrame.
       const next = {
         ...shots,
-        [expected]: {
-          pose: expected,
+        [filing.pose]: {
+          pose: filing.pose,
           photo,
           embedding: read.embedding,
           poseSignal: read.poseSignal,

@@ -28,6 +28,7 @@ import {
   PRIMARY_POSE,
   SIDE_MIN_SIGNAL,
   distance,
+  fileFrame,
   formatEmbedding,
   headTurnSignal,
   isMatch,
@@ -37,6 +38,7 @@ import {
   parseEmbedding,
   parsePose,
   parseStoredEmbedding,
+  poseAlreadyHeld,
   poseFromSignal,
   poseSatisfies,
   posesRequired,
@@ -509,7 +511,7 @@ check("the side threshold is a side", poseFromSignal(SIDE_MIN_SIGNAL) === "left"
 check("and mirrored", poseFromSignal(-SIDE_MIN_SIGNAL) === "right");
 check("a hard turn is still a side", poseFromSignal(0.9) === "left");
 
-const deadZone = headTurnSignal(landmarks({ noseX: 108 }));
+const deadZone = headTurnSignal(landmarks({ noseX: 109 }));
 check(
   "a half-turned real frame lands in the dead zone rather than a side",
   deadZone !== null && poseFromSignal(deadZone) === null,
@@ -540,6 +542,65 @@ check("an unknown label is refused", parsePose("up") === null);
 check("an empty label is refused", parsePose("") === null);
 check("a non-string is refused", parsePose(3) === null);
 check("null is refused", parsePose(null) === null);
+
+section("fileFrame — a frame of the wrong angle is still usable");
+
+/*
+ * The rule this replaced was "refuse anything that is not the angle asked for",
+ * which made the capture fussy about a mistake that costs nothing: an admin
+ * holding a queue turns a head the wrong way and is told to do it again, when
+ * the frame in hand is exactly right for a different slot. The invariant that
+ * still holds is the one that matters — a frame is never *filed* under an angle
+ * it does not show.
+ */
+const fileFront = fileFrame({ expected: "left", seen: "front", held: [] });
+check(
+  "a straight-on frame while the left is asked for is filed as straight on",
+  fileFront.kind === "file" && fileFront.pose === "front",
+  JSON.stringify(fileFront)
+);
+
+const fileLeft = fileFrame({ expected: "left", seen: "left", held: ["front"] });
+check(
+  "the angle asked for is filed",
+  fileLeft.kind === "file" && fileLeft.pose === "left",
+  JSON.stringify(fileLeft)
+);
+
+const retake = fileFrame({ expected: "left", seen: "left", held: ["front", "left"] });
+check(
+  "a retake of an angle already held is still filed",
+  retake.kind === "file" && retake.pose === "left",
+  JSON.stringify(retake)
+);
+
+const duplex = fileFrame({ expected: "front", seen: "right", held: ["front"] });
+check(
+  "a needed side angle is taken even when the front was asked for",
+  duplex.kind === "file" && duplex.pose === "right",
+  JSON.stringify(duplex)
+);
+
+const surplus = fileFrame({ expected: "right", seen: "left", held: ["front", "left"] });
+check(
+  "a second photo of an angle already held is refused",
+  surplus.kind === "already-have" && surplus.pose === "left",
+  JSON.stringify(surplus)
+);
+
+const between = fileFrame({ expected: "left", seen: null, held: ["front"] });
+check("a frame in the dead zone asks for another", between.kind === "turn-more");
+
+check(
+  "nothing is ever filed under an angle the frame does not show",
+  [fileFront, fileLeft, retake, duplex].every((f) => f.kind !== "file" || f.pose === fileFrame({ expected: f.pose, seen: f.pose, held: [] }).pose)
+);
+
+check(
+  "the already-have message names what is still missing",
+  /right-turn/.test(poseAlreadyHeld("left", "right")),
+  poseAlreadyHeld("left", "right")
+);
 
 section("posesRequired — what this account has to present");
 

@@ -18,7 +18,7 @@ Needs Node.js 18.17 or newer (this project is developed on 24.15) and npm.
 ```bash
 npm install
 cp .env.example .env.local     # optional — the app runs without it
-npm run setup:face             # optional — copies the ~6.7MB face-model weights
+npm run setup:face             # optional — copies the ~12MB face-model weights
 npm run dev
 ```
 
@@ -40,8 +40,8 @@ items, the reference lists (categories, locations) and three accounts. Staff
 sign in with the barcode printed on their ID plus their password; admins use a
 username and password.
 
-`npm run setup:face` is the one optional step. The three face models are ~6.7MB
-of binary that already ship inside `@vladmandic/face-api`, so they are copied
+`npm run setup:face` is the one optional step. The face models are ~12MB of
+binary that already ship inside `@vladmandic/face-api`, so they are copied
 out rather than committed — see [the script](scripts/setup-face-models.mjs) for
 why. Skip it and everything still runs except face enrolment, face sign-in and
 the ID portrait check; those pages say the model files are missing rather than
@@ -172,13 +172,23 @@ that has to work at a till. The two turned ones exist for the *check*: a still
 photograph cannot produce a turned-head descriptor, so asking for them is what
 makes a printed portrait held up to the camera fail.
 
-The capture screen refuses a frame whose head is not where the prompt says. The
-turn is measured from the 68 landmarks (`headTurnSignal`, a proxy rather than an
-angle in degrees — the model gives 2D points and there is no head-pose solver
-here), so a "left" slot cannot be filled with another straight-on photo. That
-mistake is easy to make while holding a queue, and a sample filed under the wrong
-angle would be compared against the wrong expectation for as long as the account
-lasts.
+**Reading the face.** Two detectors ship and both are used. The accurate one
+(SSD MobileNet, 5.4MB) runs first, because "it cannot see my face" is a detection
+failure far more often than a recognition one — it finds faces that are angled,
+partly covered or small in frame, which the tiny detector (0.18MB) misses. If it
+finds nothing, the tiny detector runs at its normal size and again at a larger
+input, since a face occupying a small part of the frame is invisible to the first
+pass and obvious to the third. On a device with no WebGL the order flips: the
+cheap pass first, because the accurate one costs whole seconds per frame on CPU.
+A frame too dark to read is refused before the model runs at all, and says so —
+"the light is wrong" is advice someone can act on, "no face found" is not.
+
+**The angles are filed by what the frame shows, not by what was asked for.** Turn
+a head slightly the wrong way and the frame is still used, under the angle it
+actually shows, rather than being thrown away — the invariant that matters is
+that a sample is never stored under an angle it does not show. Only a frame
+squarely between straight on and turned is refused, because there is no honest
+slot for it.
 
 **What a check asks for.** The duty check and face sign-in ask for whatever angles
 the account actually holds — all three when all three were enrolled, one when the

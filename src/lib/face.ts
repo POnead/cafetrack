@@ -339,7 +339,7 @@ export const PRIMARY_POSE: FacePose = "front";
  * be wide enough to call those frames frontal and narrow enough that "straight
  * on" still means something.
  */
-export const FRONT_MAX_SIGNAL = 0.12;
+export const FRONT_MAX_SIGNAL = 0.14;
 
 /**
  * How far the signal has to travel before a frame counts as turned.
@@ -357,7 +357,7 @@ export const FRONT_MAX_SIGNAL = 0.12;
  * makes them calibratable: `npm run test:angles:measure` prints the observed
  * spread, and these two constants are what it would change.
  */
-export const SIDE_MIN_SIGNAL = 0.2;
+export const SIDE_MIN_SIGNAL = 0.18;
 
 /**
  * How far a head is turned, as a signed proxy in roughly [-1, 1].
@@ -425,6 +425,60 @@ export function poseFromSignal(signal: number | null | undefined): FacePose | nu
 /** Does a frame showing `actual` satisfy a request for `expected`? */
 export function poseSatisfies(expected: FacePose, actual: FacePose | null): boolean {
   return actual !== null && actual === expected;
+}
+
+/**
+ * What to do with a frame whose angle is not the one the screen asked for.
+ *
+ * The obvious answer is "refuse it", and that was the behaviour: an admin
+ * holding a queue turns a head slightly the wrong way and is told to do it
+ * again, when the frame in hand is perfectly good for a *different* slot. That
+ * reads as the feature being fussy, and it is the cheapest kind of failure to
+ * avoid.
+ *
+ * So a frame that clearly shows a needed angle is filed under that angle, even
+ * when it is not the one asked for. What is never allowed is filing a frame
+ * under an angle it does not show — that is what makes "why does this person
+ * never verify" unanswerable, and it is what the pose check exists to prevent.
+ * The three cases below are the whole decision.
+ */
+export type PoseFiling =
+  | { kind: "file"; pose: FacePose }
+  | { kind: "turn-more" }
+  | { kind: "already-have"; pose: FacePose };
+
+export function fileFrame(args: {
+  /** The angle the screen is asking for. */
+  expected: FacePose;
+  /** The angle the frame actually shows, or null if it is between two. */
+  seen: FacePose | null;
+  /** Angles already captured in this presentation. */
+  held: readonly FacePose[];
+}): PoseFiling {
+  const { expected, seen, held } = args;
+
+  // Neither straight on nor turned: the only case that genuinely needs another
+  // frame, because the head is in no usable position.
+  if (seen === null) return { kind: "turn-more" };
+
+  // The frame asked for. A retake also lands here: the caller chose to replace
+  // this angle, so `held` containing it is not a reason to refuse.
+  if (seen === expected) return { kind: "file", pose: seen };
+
+  // A different angle this presentation still needs — take it rather than make
+  // the person turn again.
+  if (!held.includes(seen)) return { kind: "file", pose: seen };
+
+  // A different angle it already has: genuinely has nothing to contribute.
+  return { kind: "already-have", pose: seen };
+}
+
+/** Why a frame was not used because that angle is already captured. */
+export function poseAlreadyHeld(seen: FacePose, missing: FacePose | null): string {
+  const rest = missing
+    ? `Now take the ${POSE_COPY[missing].short} photo.`
+    : "All three are done.";
+  return `That is another ${POSE_COPY[seen].short} photo, and you already have one. ${rest}`;
 }
 
 /**

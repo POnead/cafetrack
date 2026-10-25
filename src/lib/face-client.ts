@@ -29,6 +29,18 @@ const MODEL_URL = "/models";
 /** The three models, in the order they are needed. */
 export const FACE_MODELS = {
   detector: "tiny_face_detector_model",
+  /**
+   * The accurate detector, and the one that is actually used.
+   *
+   * face-api ships two: the tiny one (0.18MB) which is fast and misses faces
+   * that are angled, partly covered or in uneven light, and SSD MobileNet v1
+   * (5.36MB) which costs more per frame and finds those. "It cannot see my
+   * face" is almost always the tiny detector's failure, not the recogniser's,
+   * so the accurate one runs first and the tiny one is the fallback — including
+   * when these weights are not installed, which is why the app still works
+   * without re-running `npm run setup:face`.
+   */
+  detectorAccurate: "ssd_mobilenetv1_model",
   landmarks: "face_landmark_68_model",
   recognition: "face_recognition_model",
 } as const;
@@ -46,6 +58,8 @@ export const CAPTURE_EDGE = 256;
 export type FaceModels = {
   faceapi: any;
   tinyFaceDetector: any;
+  /** Present only when the SSD weights are installed; see FACE_MODELS. */
+  ssdMobilenetv1: any;
   faceLandmark68Net: any;
   faceRecognitionNet: any;
   /** Which tfjs backend was actually registered: "webgl" or "cpu". */
@@ -195,9 +209,26 @@ export function loadFaceModels(onProgress?: LoadProgress): Promise<FaceModels> {
       faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
     ]);
 
+    /*
+     * The accurate detector is loaded separately, and its failure is not fatal.
+     *
+     * Every install that predates it has the tiny weights and not these, and a
+     * browser that 404s on ssd_mobilenetv1_model would otherwise leave the whole
+     * feature unusable until someone re-ran `npm run setup:face`. Missing, it
+     * simply does not improve detection — the tiny detector still runs.
+     */
+    let ssdMobilenetv1: any = null;
+    try {
+      await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
+      ssdMobilenetv1 = faceapi.nets.ssdMobilenetv1;
+    } catch {
+      ssdMobilenetv1 = null;
+    }
+
     loaded = {
       faceapi,
       tinyFaceDetector: faceapi.nets.tinyFaceDetector,
+      ssdMobilenetv1,
       faceLandmark68Net: faceapi.nets.faceLandmark68Net,
       faceRecognitionNet: faceapi.nets.faceRecognitionNet,
       backend: chosen,
@@ -234,6 +265,56 @@ const DETECT_OPTIONS = {
   maxResults: 1,
 } as const;
 
+/**
+ * The second pass, at a larger input, when nothing was found the first time.
+ *
+ * The tiny detector resizes its input to `inputSize` square, so a face that
+ * occupies a small part of a 640x480 frame arrives at the network a handful of
+ * pixels across and is simply not detectable. Asking again at 512 gives that
+ * face four times the area to be seen in. It is 2.5x the work, which is why it
+ * only runs when the first pass found nothing — a normal capture never pays it.
+ */
+const ESCALATION_INPUT_SIZE = 512;
+
+/**
+ * How dark a frame may be before it is refused without running the model.
+ *
+ * Mean luminance on 0-255. Below this the landmarks are noise whatever the
+ * detector says, so the honest answer is "it is too dark", not "no face found" —
+ * and it costs no inference to say so. Most "it cannot recognise me" reports in
+ * a cafe are a backlit or unlit frame, and the message matters: the person can
+ * act on light, but not on "no face".
+ */
+const MIN_BRIGHTNESS = 35;
+
+/**
+ * Mean luminance of a frame, or null when it cannot be read.
+ *
+ * Sampled at 32x32 rather than full size: an average does not need detail, and
+ * this runs on the capture path where every frame costs the person waiting.
+ */
+export function frameBrightness(source: CanvasImageSource): number | null {
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = 32;
+    canvas.height = 32;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.drawImage(source, 0, 0, 32, 32);
+    const { data } = ctx.getImageData(0, 0, 32, 32);
+
+    let sum = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    }
+    return sum / (data.length / 4);
+  } catch {
+    // A source that cannot be drawn to a canvas (a cross-origin image, a frame
+    // that is not ready) is not evidence about the light. Says nothing.
+    return null;
+  }
+}
+
 export type FaceRead =
   | {
       ok: true;
@@ -249,10 +330,18 @@ export type FaceRead =
        * match is. See headTurnSignal.
        */
       poseSignal: number | null;
+      /** Which detector pass found the face, for diagnosing "it cannot see me". */
+      detector: "ssd" | "tiny-320" | "tiny-512";
+      /** Mean luminance of the frame, 0-255, or null if it could not be sampled. */
+      brightness: number | null;
       box: { x: number; y: number; width: number; height: number };
       score: number;
     }
-  | { ok: false; reason: "no-face" | "low-confidence"; message: string };
+  | {
+      ok: false;
+      reason: "no-face" | "low-confidence" | "too-dark";
+      message: string;
+    };
 
 /**
  * Read one face from an image element or video frame.
@@ -283,19 +372,91 @@ export async function readFace(source: any): Promise<FaceRead> {
    * `instanceof` rather than by shape. Built from the class where it is exported;
    * left undefined otherwise, which falls through to the library's own defaults.
    */
-  const detectorOptions =
+  /*
+   * The light first, because it is free and it is the answer most of the time.
+   *
+   * A dark frame produces no landmarks whatever detector runs, and the honest
+   * sentence for it is about the light. Reporting "no face found" sends someone
+   * to check their webcam when the fix is a lamp.
+   */
+  const brightness = frameBrightness(source as CanvasImageSource);
+  if (brightness !== null && brightness < MIN_BRIGHTNESS) {
+    return {
+      ok: false,
+      reason: "too-dark",
+      message:
+        "It is too dark to read a face. Move somewhere with more light on your face — " +
+        "a window or a lamp in front of you, not behind.",
+    };
+  }
+
+  /*
+   * Detection, best first, and escalating rather than giving up.
+   *
+   * The accurate detector is tried first because "it cannot see my face" is a
+   * detection failure far more often than a recognition one. The tiny detector
+   * then runs at its normal size, and again at a larger input — a face that is
+   * small in frame is invisible to the first pass and obvious to the third.
+   *
+   * Each step is only reached when the one before found nothing, so an ordinary
+   * capture still costs one pass.
+   */
+  const callDetect = (input: any, options: any): Promise<any> =>
+    typeof faceapi.detectSingleFace === "function"
+      ? faceapi.detectSingleFace(input, options)
+      : models.tinyFaceDetector.detectSingleFace(input, options);
+
+  const tinyOptions = (inputSize: number) =>
     typeof faceapi.TinyFaceDetectorOptions === "function"
       ? new faceapi.TinyFaceDetectorOptions(
-          DETECT_OPTIONS.inputSize,
+          inputSize,
           DETECT_OPTIONS.scoreThreshold,
           DETECT_OPTIONS.maxResults
         )
       : undefined;
 
-  const callDetect = (input: any): Promise<any> =>
-    typeof faceapi.detectSingleFace === "function"
-      ? faceapi.detectSingleFace(input, detectorOptions)
-      : models.tinyFaceDetector.detectSingleFace(input, detectorOptions);
+  const ssdOptions =
+    models.ssdMobilenetv1 && typeof faceapi.SsdMobilenetv1Options === "function"
+      ? new faceapi.SsdMobilenetv1Options({ minConfidence: 0.4, maxResults: 1 })
+      : null;
+
+  /*
+   * Which order to try, by what the device can actually compute with.
+   *
+   * On WebGL the accurate detector costs a fraction of a second and is worth it
+   * first. On the CPU backend it costs whole seconds per frame — and a café
+   * phone falling back to CPU is exactly the device that cannot afford it — so
+   * the cheap pass runs first there and the accurate one is the last resort
+   * rather than the opening bid.
+   */
+  const attempts: { detector: "ssd" | "tiny-320" | "tiny-512"; options: any }[] = [];
+
+  const accurateAvailable = models.ssdMobilenetv1 && ssdOptions;
+  const onGpu = models.backend === "webgl";
+
+  if (accurateAvailable && onGpu) attempts.push({ detector: "ssd", options: ssdOptions });
+  attempts.push({ detector: "tiny-320", options: tinyOptions(DETECT_OPTIONS.inputSize) });
+  attempts.push({ detector: "tiny-512", options: tinyOptions(ESCALATION_INPUT_SIZE) });
+  if (accurateAvailable && !onGpu) attempts.push({ detector: "ssd", options: ssdOptions });
+
+  let detection: any = null;
+  let usedDetector: "ssd" | "tiny-320" | "tiny-512" = "tiny-320";
+
+  for (const attempt of attempts) {
+    detection = await callDetect(source, attempt.options);
+    if (detection) {
+      usedDetector = attempt.detector;
+      break;
+    }
+  }
+
+  if (!detection) {
+    return {
+      ok: false,
+      reason: "no-face",
+      message: "No face found. Face the camera, in even light, with nothing covering your face.",
+    };
+  }
 
   // Landmarks take FaceLandmark68NetOptions, a different type, so none are passed
   // and the net's own defaults apply. The detector's options were never meant for
@@ -304,15 +465,6 @@ export async function readFace(source: any): Promise<FaceRead> {
     typeof faceapi.detectFaceLandmarks === "function"
       ? faceapi.detectFaceLandmarks(input)
       : models.faceLandmark68Net.detectFaceLandmarks(input);
-
-  const detection = await callDetect(source);
-  if (!detection) {
-    return {
-      ok: false,
-      reason: "no-face",
-      message: "No face found. Face the camera, in even light, with nothing covering your face.",
-    };
-  }
 
   const landmarks = await callLandmarks(source);
   // No landmarks means the detector saw something face-shaped that the landmark
@@ -351,6 +503,8 @@ export async function readFace(source: any): Promise<FaceRead> {
     ok: true,
     embedding: Array.from(descriptor),
     poseSignal,
+    detector: usedDetector,
+    brightness,
     box: detection.box,
     score: detection.score,
   };
