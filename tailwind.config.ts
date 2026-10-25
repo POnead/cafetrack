@@ -1,7 +1,26 @@
 import type { Config } from "tailwindcss";
 
 const config: Config = {
-  content: ["./src/**/*.{ts,tsx}"],
+  /*
+   * Only the two directories that can contain a class name.
+   *
+   * This used to be `./src/**` + `.{ts,tsx}`, which swept in every file under
+   * src/lib — thirty-odd modules that hold no markup and not one class string
+   * between them. Two costs, and the second is the one that bit us:
+   *
+   *   - tailwind parses them on every rebuild, for nothing;
+   *   - each one becomes a watched content path, and the watcher stats that list
+   *     whenever anything changes. Add, rename or delete a file while the dev
+   *     server is running and it can stat a path that has just stopped existing
+   *     and throw ENOENT from resolveChangedContent — which surfaces as
+   *     "Error evaluating Node.js code" against globals.css, killing every page
+   *     with a 500 and naming a file that has nothing to do with styling.
+   *
+   * Keeping the list to where classes actually live makes that window much
+   * smaller. If a class ever needs to be composed in a lib module, put it in
+   * src/components instead — that is where Tailwind is looking.
+   */
+  content: ["./src/app/**/*.{ts,tsx}", "./src/components/**/*.{ts,tsx}"],
   theme: {
     extend: {
       colors: {
