@@ -2,6 +2,9 @@ import { db } from "@/lib/supabase";
 import { handler, ok, fail, readBody } from "@/lib/api";
 import { hashPassword, newStaffToken, requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
+import { currentSampleUserIds } from "@/lib/face-samples";
+import { getFaceEngine } from "@/lib/settings";
+import { FACE_POSES, type FacePose } from "@/lib/face";
 
 export const runtime = "nodejs";
 
@@ -37,7 +40,53 @@ export const GET = handler(async () => {
 
   if (error) return fail(error.message, 500);
 
-  return ok({ users: data ?? [] });
+  /*
+   * Which enrolled faces the current engine can actually compare.
+   *
+   * This is the forced re-enrolment state made visible. A descriptor is only
+   * meaningful to the engine and reader version that produced it, so switching
+   * engine (or fixing the reader, which is what version 2 did) leaves older
+   * enrolments stored but unusable. Without this flag the roster shows "enrolled"
+   * for somebody who will be refused at the till, and the first anyone hears of it
+   * is that person being turned away mid-shift.
+   *
+   * One extra query for the whole list, not one per person.
+   */
+  const users = (data ?? []) as Record<string, unknown>[];
+  const engine = await getFaceEngine();
+  const current = await currentSampleUserIds(
+    users.map((u) => String(u.id)),
+    engine
+  );
+  const userIds = users.map((u) => String(u.id));
+  const { data: samples, error: samplesError } = users.length
+    ? await db()
+        .from("user_face_samples")
+        .select("user_id, pose")
+        .in("user_id", userIds)
+    : { data: [], error: null };
+
+  if (samplesError) return fail(samplesError.message, 500);
+
+  const posesByUser = new Map<string, Set<FacePose>>();
+  for (const sample of (samples ?? []) as { user_id: string; pose: string }[]) {
+    if (!FACE_POSES.includes(sample.pose as FacePose)) continue;
+    const poses = posesByUser.get(sample.user_id) ?? new Set<FacePose>();
+    poses.add(sample.pose as FacePose);
+    posesByUser.set(sample.user_id, poses);
+  }
+
+  return ok({
+    users: users.map((u) => ({
+      ...u,
+      face_needs_enrolment: Boolean(u.face_enabled) && !current.has(String(u.id)),
+      face_poses: u.face_enabled
+        ? FACE_POSES.filter(
+            (pose) => pose === "front" || posesByUser.get(String(u.id))?.has(pose)
+          )
+        : [],
+    })),
+  });
 });
 
 /* ---------------- create ---------------- */

@@ -142,7 +142,11 @@ export const POST = handler(async (req: Request) => {
     .eq("id", session.id)
     .maybeSingle();
 
-  const threshold = await getFaceMatchThreshold();
+  // The engine is read once and used for both the threshold and the comparison:
+  // the two are calibrated per engine, so mixing them would apply one model's
+  // tolerance to another model's vectors.
+  const engine = await getFaceEngine();
+  const threshold = await getFaceMatchThreshold(engine);
   const requireProfileAngles = await getFaceRequireProfileAngles();
 
   /*
@@ -159,7 +163,7 @@ export const POST = handler(async (req: Request) => {
     frames,
     threshold,
     requireProfileAngles,
-    engine: await getFaceEngine(),
+    engine,
   });
 
   if (!presentation.matched && presentation.needsEnrolment) {

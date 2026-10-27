@@ -216,7 +216,10 @@ export const POST = handler(async (req: Request) => {
    * exist. Matching first means this branch is only reachable by someone who has
    * already proved they are that person.
    */
-  const threshold = await getFaceMatchThreshold();
+  // Read the engine once: the threshold is calibrated per engine, so it has to be
+  // the same engine the gallery is filtered to below.
+  const engine = await getFaceEngine();
+  const threshold = await getFaceMatchThreshold(engine);
 
   /*
    * Matched against every angle on the account, after the lookup and before
@@ -229,7 +232,7 @@ export const POST = handler(async (req: Request) => {
     frames,
     threshold,
     requireProfileAngles: await getFaceRequireProfileAngles(),
-    engine: await getFaceEngine(),
+    engine,
   });
 
   if (!presentation.matched) {

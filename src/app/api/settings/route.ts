@@ -4,6 +4,7 @@ import { requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { clearSettingsCache } from "@/lib/settings";
 import { emailStatus } from "@/lib/email";
+import { matchThresholdBand } from "@/lib/face";
 
 export const runtime = "nodejs";
 
@@ -50,13 +51,19 @@ export const GET = handler(async () => {
  * Kept here so the API rejects an out-of-range value at the door rather than
  * silently storing it and relying on every reader to re-clamp.
  *
- * `decimals` exists because the rest of this map counts things — days, minutes,
+ * `decimals` exists because most of this map counts things — days, minutes,
  * hours, attempts — and a count rounded to a whole number is the right answer.
- * The face match threshold is not a count: 0.60 rounded is 1, which is both a
- * different value and outside the 0.30-0.80 range it lives in, so it would be
- * rejected as out of range rather than stored. Unset means whole numbers, which
- * is every existing setting and so changes nothing for any of them.
+ * The face match thresholds are not counts, so they carry three decimals and
+ * their own bounds; see the entries below.
+ *
+ * Both engines' thresholds take their bounds from matchThresholdBand rather than
+ * restating them here: the reader, this validator and the Settings form have to
+ * agree, and a mismatch is invisible — a value accepted by the form and then
+ * clamped by a different bound on read is a setting the cafe never chose.
  */
+const LEGACY_THRESHOLD_BAND = matchThresholdBand("legacy");
+const SFACE_THRESHOLD_BAND = matchThresholdBand("sface");
+
 const EDITABLE: Record<
   string,
   { min: number; max: number; label: string; decimals?: number }
@@ -70,23 +77,29 @@ const EDITABLE: Record<
   // Duty verification. A whole number of hours, so no `decimals` here.
   face_duty_hours: { min: 1, max: 24, label: "Duty length" },
   /*
-   * Cosine distance, so a fraction between 0 and 2 rather than a count. Lower
-   * is stricter.
+   * Cosine distance, so a fraction rather than a count. Lower is stricter.
    *
-   * Measured over the real recognition model: the same person re-captured ten
-   * ways lands at 0.0000-0.0301, five known-different faces at 0.0362-0.0684.
-   * The default of 0.033 sits in that gap. The numbers live beside
-   * DEFAULT_MATCH_THRESHOLD in lib/face.ts.
+   * One key per engine, because the two engines do not share a scale: the legacy
+   * reader's useful band is a hundredth wide (0.01-0.5), while SFace's is nearer
+   * 0.1-1.2. Storing one value for both would mean switching engines silently
+   * applies a tolerance calibrated for a different model — the exact failure this
+   * split exists to prevent. The bounds come from matchThresholdBand in
+   * lib/face.ts, which also carries the reasoning.
    *
-   * Three decimals, because the whole useful range is a hundredth wide. At two
-   * decimals a value like 0.033 cannot even be stored — it would round to 0.03,
-   * which is a different, stricter setting the cafe never chose.
+   * Three decimals, because the legacy band is narrow enough that 0.033 rounded
+   * to two places is a different, stricter setting the cafe never chose.
    */
   face_match_threshold: {
-    min: 0.01,
-    max: 0.5,
+    min: LEGACY_THRESHOLD_BAND.min,
+    max: LEGACY_THRESHOLD_BAND.max,
     decimals: 3,
-    label: "Face match threshold",
+    label: "Face match threshold (legacy)",
+  },
+  face_match_threshold_sface: {
+    min: SFACE_THRESHOLD_BAND.min,
+    max: SFACE_THRESHOLD_BAND.max,
+    decimals: 3,
+    label: "Face match threshold (SFace)",
   },
   /*
    * The ID-card portrait threshold, which is a different number from the one
@@ -174,15 +187,14 @@ const TEXT_SETTINGS: Record<
    *
    * A closed list, because unlike `id_provider` there is no safe fallback — an
    * unrecognised value here would mean "compare against vectors from a model
-   * that does not exist", and the safe reading of that is legacy, which is what
-   * the reader does. Refusing the value at the door means the admin is told
-   * rather than quietly getting the old engine back.
+   * that does not exist", and the safe reading of that is the default engine,
+   * which is what the reader does. Refusing the value at the door means the
+   * admin is told rather than quietly getting a different engine back.
    *
-   * There is deliberately no control for this on the Settings page yet. The
-   * capture screens still compute the legacy embedding, so switching to sface
-   * today would leave every staff member unable to pass a check until each was
-   * re-enrolled. The switch is stored, and enforced at matching time — which is
-   * what makes the staged migration possible once the capture path lands.
+   * There is deliberately no control for this on the Settings page yet. A cafe
+   * with existing legacy enrolments would leave its staff unable to pass a check
+   * until each was re-enrolled, and that is a migration to run deliberately, not
+   * a switch to flip. The value is stored and enforced at matching time.
    */
   face_engine: {
     maxLength: 10,

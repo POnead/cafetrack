@@ -13,6 +13,13 @@
  * makes the feature either useless or unusable.
  */
 
+/*
+ * Type-only: the pose bands live in head-pose, which imports `FacePose` from
+ * here. Both directions are erased at build time, so this is not a runtime cycle
+ * — it is one vocabulary shared by two modules that describe the same head.
+ */
+import type { PoseState } from "./head-pose";
+
 /** Floats in a face embedding. Fixed by the recognition model, not by us. */
 export const EMBEDDING_LENGTH = 128;
 
@@ -27,22 +34,25 @@ export const EMBEDDING_LENGTH = 128;
  *   same person, realistic re-capture   0.0000 - 0.0301
  *   different people                    0.0362 - 0.0684
  *
- * 0.033 is the midpoint of that gap.
+ * The midpoint of that gap is 0.033, and that is what this used to be. It was
+ * too strict in practice: a till camera is not the camera the enrolment was
+ * taken on, and a real re-capture at a different angle, distance or light can
+ * land above the measured worst case. Staff were being refused while the model
+ * was working correctly.
  *
- * This value has been wrong twice, and both times in a way that made the feature
- * do the opposite of what it says:
+ * 0.05 deliberately trades some stranger rejection for admitting the real
+ * person. It sits above the closest measured pair of different people (0.0362),
+ * so that one pair would be accepted — the cost of the looser setting — but it
+ * stays below the middle of the different-person band, so most strangers are
+ * still refused. It is also well above the same-person worst case, which is the
+ * failure that actually stops a shift.
  *
- *   0.6  was above *every* distance between different people, so every face
- *        matched every other face. The threshold was effectively "yes".
- *   0.25 was chosen against a same-person band measured by resizing and
- *        re-lighting one photograph, which is far too easy. Real variation put
- *        the worst same-person reading at 0.317, above that threshold, so the
- *        real person was refused.
- *
- * A threshold is only meaningful against a properly measured band, which is why
- * the numbers above are kept next to it rather than left in a comment.
+ * This is a default, not a law: Settings > Face match threshold exposes the same
+ * value, and a cafe that wants the stricter 0.033 can set it back. A value at or
+ * above 0.0684 accepts every measured stranger, which is the failure the old 0.6
+ * default had.
  */
-export const DEFAULT_MATCH_THRESHOLD = 0.033;
+export const DEFAULT_MATCH_THRESHOLD = 0.05;
 
 /*
  * The editable range, mirroring the one the settings API enforces.
@@ -59,16 +69,69 @@ export const DEFAULT_MATCH_THRESHOLD = 0.033;
 export const MIN_MATCH_THRESHOLD = 0.01;
 export const MAX_MATCH_THRESHOLD = 0.5;
 
+/*
+ * SFace's threshold, and its own range.
+ *
+ * A different number because it is a different vector space. SFace embeddings
+ * are L2-normalised 128-float ArcFace-family vectors, and the same person
+ * re-captured lands around 0.15-0.40 by cosine distance — three to ten times the
+ * legacy engine's band. Carrying 0.05 across would refuse every real person, and
+ * carrying SFace's number back to legacy would admit everyone.
+ *
+ * 0.637 is OpenCV's own guidance (cosine similarity 0.363). It is still
+ * provisional: `npm run probe:face` is what turns it into a measured number, and
+ * the range below is wide enough to hold whatever that measurement says.
+ */
+export const SFACE_MATCH_THRESHOLD = 0.637;
+export const MIN_SFACE_MATCH_THRESHOLD = 0.1;
+export const MAX_SFACE_MATCH_THRESHOLD = 1.2;
+
+/**
+ * Which settings key, range and fallback apply to which engine.
+ *
+ * One lookup rather than the same `engine === "sface" ? ... : ...` in the reader,
+ * the settings API and the Settings page. The three have to agree, and a mismatch
+ * is invisible: the value is accepted, stored, and then clamped by a different
+ * bound than the one the form showed.
+ */
+export type MatchThresholdBand = {
+  /** The settings row this engine's threshold lives in. */
+  setting: string;
+  min: number;
+  max: number;
+  /** Used when the row is absent or unparseable. */
+  fallback: number;
+};
+
+export function matchThresholdBand(engine: FaceEngine): MatchThresholdBand {
+  return engine === "sface"
+    ? {
+        setting: "face_match_threshold_sface",
+        min: MIN_SFACE_MATCH_THRESHOLD,
+        max: MAX_SFACE_MATCH_THRESHOLD,
+        fallback: SFACE_MATCH_THRESHOLD,
+      }
+    : {
+        setting: "face_match_threshold",
+        min: MIN_MATCH_THRESHOLD,
+        max: MAX_MATCH_THRESHOLD,
+        fallback: DEFAULT_MATCH_THRESHOLD,
+      };
+}
+
 /**
  * Measured separations, kept here so the default can be checked against reality.
  *
  * Produced by running the real recognition model in a browser over five
  * known-different faces, and over one face re-captured ten ways. Anything at or
- * above CLOSEST_DIFFERENT_PEOPLE accepts strangers, whatever the comment beside
- * the default says.
+ * above CLOSEST_DIFFERENT_PEOPLE accepts at least one measured stranger pair;
+ * anything at or above FARTHEST_DIFFERENT_PEOPLE accepts all of them. The
+ * default is allowed to sit above the closest pair on purpose — see the comment
+ * on DEFAULT_MATCH_THRESHOLD — but never at or above the far end.
  */
 export const MEASURED_SAME_PERSON_WORST = 0.0301;
 export const MEASURED_CLOSEST_DIFFERENT_PEOPLE = 0.0362;
+export const MEASURED_FARTHEST_DIFFERENT_PEOPLE = 0.0684;
 
 /**
  * When a replacement photo is far enough from the one it replaces to be worth
@@ -85,6 +148,26 @@ export const MEASURED_CLOSEST_DIFFERENT_PEOPLE = 0.0362;
  * all, and would have silently stopped firing.
  */
 export const REPLACEMENT_MISMATCH_DISTANCE = 0.04;
+
+/**
+ * The same warning, for SFace.
+ *
+ * Not 0.04: SFace works in a different vector space, where even the same person
+ * re-captured sits around 0.15-0.40 and the match threshold itself is 0.637.
+ * Carrying the legacy number across would flag every replacement as a different
+ * person, and the admin would learn to ignore the warning.
+ *
+ * Set above the match threshold on purpose — this is a "that looks like somebody
+ * else" hint, not an admission rule — and provisional for the same reason
+ * SFACE_MATCH_THRESHOLD is: `npm run probe:face` is what replaces it with a
+ * measured number.
+ */
+export const SFACE_REPLACEMENT_MISMATCH_DISTANCE = 0.85;
+
+/** The replacement-warning distance for the engine that produced the vectors. */
+export function replacementMismatchDistance(engine: FaceEngine): number {
+  return engine === "sface" ? SFACE_REPLACEMENT_MISMATCH_DISTANCE : REPLACEMENT_MISMATCH_DISTANCE;
+}
 
 /**
  * Significant digits used when an embedding is written to the database.
@@ -105,9 +188,10 @@ const EMBEDDING_PRECISION = 9;
 /**
  * The band an embedding's L2 norm must fall inside.
  *
- * This model's descriptors are *not* unit length — measured across a set of real
- * faces they land at 1.29–1.35 — so the band is centred on what is actually
- * produced rather than on a textbook 1.0.
+ * The legacy model's descriptors are *not* unit length — measured across a set
+ * of real faces they land at 1.29–1.35 — so the band is centred on what is
+ * actually produced rather than on a textbook 1.0. SFace vectors are normalized
+ * by its reader before they reach this shared parser.
  *
  * Matching is by cosine, which divides out length, so a shrunken vector is no
  * longer automatically close to another shrunken one the way it was under
@@ -346,14 +430,62 @@ export type FaceEngine = "legacy" | "sface";
 
 export const FACE_ENGINES: readonly FaceEngine[] = ["legacy", "sface"];
 
-/** The engine every install starts on, and the only one the capture screens use. */
-export const DEFAULT_FACE_ENGINE: FaceEngine = "legacy";
+/**
+ * The engine every install starts on, and the only one the capture screens use.
+ *
+ * SFace since the reader rework. The legacy engine is still installed and still
+ * readable — `face_engine` is a setting, so a cafe that has not re-enrolled yet
+ * can stay on it — but a fresh install and the local seed both start here.
+ */
+export const DEFAULT_FACE_ENGINE: FaceEngine = "sface";
 
 /** Read an engine name off a request or a database row, or null if it is not one. */
 export function parseEngine(raw: unknown): FaceEngine | null {
   if (typeof raw !== "string") return null;
   const value = raw.trim().toLowerCase();
   return (FACE_ENGINES as readonly string[]).includes(value) ? (value as FaceEngine) : null;
+}
+
+/**
+ * The engine that a vector written before the engine column existed belongs to.
+ *
+ * Not `DEFAULT_FACE_ENGINE`. The default is where a *new* install starts; this is
+ * what an *old* row is, and they are different questions. Conflating them is how
+ * a legacy vector ends up labelled SFace and quietly compared against a space it
+ * does not live in.
+ */
+export const LEGACY_ENGINE: FaceEngine = "legacy";
+
+/* --------------------------------------------------- descriptor versions ---- */
+
+/**
+ * Which revision of the reader produced an embedding.
+ *
+ * The engine column answers "which model"; this answers "which version of the
+ * code that fed it". They are separate because a reader can be wrong without the
+ * model changing — which is exactly what happened here: the legacy reader was
+ * embedding the whole webcam frame rather than the face, so every legacy vector
+ * in every database describes a room, not a person.
+ *
+ * A comparison filters on engine *and* version. That means a future reader fix is
+ * a version bump and a re-enrolment list, rather than a silent wave of people who
+ * "suddenly stopped being recognised".
+ *
+ *   1  the original reader. For `legacy`, a descriptor of the full frame.
+ *   2  the reworked reader: crop to the detected face, align, then embed.
+ *
+ * `descriptor_version` on `user_face_samples` defaults to 1, so every row written
+ * before this column existed is correctly marked as version 1 without a backfill.
+ */
+export const DESCRIPTOR_VERSION = 2;
+
+/** The version every row written before `descriptor_version` existed holds. */
+export const LEGACY_DESCRIPTOR_VERSION = 1;
+
+/** Read a version off a database row, defaulting to the legacy one. */
+export function parseDescriptorVersion(raw: unknown): number {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : LEGACY_DESCRIPTOR_VERSION;
 }
 
 /** The one angle an account without side samples is checked on. */
@@ -544,26 +676,56 @@ export const POSE_COPY: Record<
  * Why a frame was refused, in words the person in front of the camera can act on.
  *
  * There is no distance and no score here: this is about where the head is, not
- * how well it matched. The other-side case gets its own sentence because it is
- * the mistake a mirrored preview makes easy — the person's left appears on the
- * right of the screen, so "turn left" can be read either way.
+ * how well it matched. Each way of failing gets its own sentence, because they
+ * need opposite corrections — and the one that used to be missing is "too far".
+ *
+ * That gap was the whole problem. A head turned well past the band is not a pose
+ * and has no pose, exactly like a head that is barely turned, so both arrived here
+ * as "no angle" and both were told "turn a little more". Someone already at 70°
+ * turned further, reached 80°, and was told the same thing again.
  */
-export function poseRefusal(expected: FacePose, seen: FacePose | null): string {
-  if (seen === null) {
-    return expected === PRIMARY_POSE
-      ? "That frame is halfway between straight on and turned. Face the camera directly."
-      : `That is not turned far enough for the ${POSE_COPY[expected].short}. Turn your head a little more.`;
+export function poseRefusal(expected: FacePose, state: PoseState | null): string {
+  // No reading at all: no face, too dark, or a landmark fit that failed.
+  if (!state) {
+    return "We could not read a face in that frame. Face the camera, in even light, and try again.";
   }
 
+  const { block, pose, pitch } = state;
+
+  if (block === "too-far") {
+    return "That is too far round — come back a little, towards the camera.";
+  }
+
+  if (block === "tilted") {
+    return expected === PRIMARY_POSE
+      ? "Keep your head level and look straight ahead."
+      : "Keep your head level as you turn — it is tilted.";
+  }
+
+  if (block === "pitched") {
+    // Positive pitch is the chin coming down, so the correction is to lift it.
+    return Number.isFinite(pitch) && pitch > 0
+      ? "Lift your chin a little — you are looking down."
+      : "Lower your chin a little — you are looking up.";
+  }
+
+  // Between straight on and turned: the head is in no usable position.
+  if (pose === null) {
+    return expected === PRIMARY_POSE
+      ? "That frame is turned a little. Face the camera straight on."
+      : `Turn your head a little further to your ${expected}.`;
+  }
+
+  // A decided pose, but not the one asked for.
   if (expected === PRIMARY_POSE) {
     return "That photo is turned to one side. Face the camera straight on for this one.";
   }
 
-  if (seen === PRIMARY_POSE) {
+  if (pose === PRIMARY_POSE) {
     return `That is still straight on. Turn your head to your ${expected} — about a third of the way round.`;
   }
 
-  return `That is the ${seen} turn. We need your ${expected} — turn your head the other way.`;
+  return `That is the ${pose} turn. We need your ${expected} — turn your head the other way.`;
 }
 
 /** Read a pose label off a request body or a database row, or null if it is not one. */

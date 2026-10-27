@@ -295,6 +295,14 @@ the app never claims to. What it produces is evidence, and a human decides.
   server.
 - Report the pixel dimensions and aspect ratio of each upload, and flag anything
   whose shape is not consistent with an ID card.
+- Guide a live camera capture of the card. The enrollment flow prefers the
+  rear-facing camera, but also checks front-facing and unidentified laptop
+  webcams for a card-shaped outline locally, and straightens a detected card
+  before its text is read by the existing local Tesseract OCR. Automatic capture
+  requires a card-shaped outline and a steady frame; every camera photo must be
+  reviewed and explicitly accepted. Manual capture and file-picker fallbacks
+  remain available. The scanner does not upload images to a new OCR service or
+  establish that an ID is genuine.
 - Say so when a check *could not run* — no face readable from the card, no photo
   attached, no name extracted. That is reported as "not checked", never as a pass.
 
@@ -584,6 +592,7 @@ npm run test:pages    # every page renders, for an admin and a staff session
 npm run test:email    # the notification path, against a throwaway SMTP server
 npm run test:journeys # six end-to-end user stories, asserted on their outcomes
 npm run test:ui       # drives part of the real UI in Chrome; writes ui-screenshots/
+npm run capture:ui    # refreshes representative desktop/mobile UI screenshots
 npm run test:tour     # drives the whole site in Chrome, as a café actually works
 npm run perf          # measures the spec's performance targets
 npm run test:all      # every suite in order, stopping at the first failure
@@ -708,6 +717,25 @@ movements at the till, receive a delivery, spoil something, chase the alerts
 that fall out of it, read the report, onboard a hire, close the day — and
 records every console error, uncaught exception and 5xx response on every page
 it visits.
+
+`capture:ui` is a read-only visual inventory of every user-facing page, with
+desktop and phone captures and admin/staff variants where applicable. It also
+captures the login modes, the no-reference-photo verification state, and the
+item, staff-details, and email-recipient forms. Facial-recognition coverage
+includes staff photo enrollment, the password sign-in face-or-ID step, and the
+enrolled duty check. ID-verification coverage includes the guided enrollment
+capture, ID-card sign-in, and admin review. Camera previews use a generated
+browser canvas stream, not a physical camera; no biometric sample is used. The
+script opens forms but does not submit them. Run it against the isolated test server:
+
+```bash
+npm run dev:test
+npm run capture:ui
+```
+
+The capture script defaults to `http://localhost:3101`, refuses a server that
+reports a live database, and writes the fresh set under `ui-screenshots/`.
+`UI_CAPTURE_DIR` can point it to a different output directory.
 
 ### `test:email` — the notification path, end to end
 
@@ -869,7 +897,7 @@ public/
 ## Known limitations
 
 - **The turned-head bands have not been measured against real faces.** The
-  matching threshold (0.033) is measured and the numbers behind it are in
+  matching threshold (0.05) is measured and the numbers behind it are in
   `lib/face.ts`; the *pose* bounds (`FRONT_MAX_SIGNAL`, `SIDE_MIN_SIGNAL`) are not.
   They bound a proxy derived from 2D landmarks, chosen so that a straight-on frame
   and a clearly turned one cannot be confused — but no set of real front/left/right

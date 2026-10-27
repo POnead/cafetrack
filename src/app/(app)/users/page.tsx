@@ -37,6 +37,9 @@ const FaceCapture = dynamic(() => import("@/components/FaceCapture"), {
  * only thing that pulls the model in, and only when an admin opens a photo.
  */
 import type { FaceShot } from "@/components/FaceCapture";
+import type { FacePose } from "@/lib/face";
+
+const REQUIRED_FACE_POSES: readonly FacePose[] = ["front", "left", "right"];
 
 /**
  * The ID upload control, loaded the same way and for the same reason: reading a
@@ -86,6 +89,16 @@ type StaffUser = {
   face_enabled: boolean;
   face_enrolled_at: string | null;
   last_face_verified_at: string | null;
+  /** Angles with stored reference photos, from the staff-list endpoint. */
+  face_poses?: FacePose[];
+  /**
+   * The enrolment exists but the current engine/reader cannot use it.
+   *
+   * Only the list endpoint sets this, and only for an account that has a face at
+   * all. Optional so the user objects returned by the create and update routes —
+   * which do not need to answer this question — stay the same shape.
+   */
+  face_needs_enrolment?: boolean;
   /**
    * ID verification. The three scalars only — the document images and the check
    * signals are hundreds of kilobytes and live behind /api/users/:id/id/status,
@@ -112,6 +125,19 @@ function lastNameOf(u: StaffUser): string {
   if (u.last_name) return u.last_name;
   const parts = u.full_name.trim().split(/\s+/);
   return parts.length > 1 ? parts.slice(1).join(" ") : "";
+}
+
+function facePhotoUrls(user: StaffUser): Partial<Record<FacePose, string>> {
+  const photos: Partial<Record<FacePose, string>> = {};
+  const poses: FacePose[] = user.face_poses ?? (user.face_enabled ? ["front"] : []);
+  for (const pose of poses) {
+    photos[pose] = `/api/users/${user.id}/face?pose=${pose}`;
+  }
+  return photos;
+}
+
+function hasCompleteFaceSet(shots: readonly FaceShot[]): boolean {
+  return REQUIRED_FACE_POSES.every((pose) => shots.some((shot) => shot.pose === pose));
 }
 
 /** Initials for the placeholder shown when there is no reference photo. */
@@ -380,6 +406,13 @@ export default function UsersPage() {
   async function saveEdit() {
     if (!editing) return;
 
+    if (faceShot && !hasCompleteFaceSet(faceShot.shots)) {
+      setEditError(
+        "Straight-on, left-turn, and right-turn photos are all required to save face verification."
+      );
+      return;
+    }
+
     if (!editForm.first_name.trim() && !editForm.last_name.trim()) {
       setEditError("A name is required");
       return;
@@ -456,14 +489,15 @@ export default function UsersPage() {
    *
    * One field triple per angle — `embedding_left`, `image_left`, `signal_left`,
    * `quality_left` — because the route has to be able to tell which photograph is
-   * which. The straight-on angle is `front`, and it is the only one the server
-   * requires; the turned ones are what make the check stronger.
+   * which. All three angles are required for a face enrolment.
    */
   function appendFaceShots(form: FormData, shots: readonly FaceShot[]) {
     for (const shot of shots) {
       form.append(`embedding_${shot.pose}`, shot.embedding.join(","));
       form.append(`model_${shot.pose}`, shot.model);
-    if (shot.poseSignal !== null) form.append(`signal_${shot.pose}`, String(shot.poseSignal));
+      if (shot.poseSignal !== null) {
+        form.append(`signal_${shot.pose}`, String(shot.poseSignal));
+      }
       form.append(`quality_${shot.pose}`, String(shot.quality));
       form.append(
         `image_${shot.pose}`,
@@ -494,6 +528,11 @@ export default function UsersPage() {
   }
 
   async function create() {
+    if (createShot && !hasCompleteFaceSet(createShot.shots)) {
+      setFormError("Straight-on, left-turn, and right-turn photos are all required to save face verification.");
+      return;
+    }
+
     setSaving(true);
     setFormError(null);
 
@@ -903,6 +942,18 @@ async function toggleItemPermission(user: StaffUser) {
                         </Badge>
                       );
                     })()}
+                    {/*
+                      A face on file that the current reader cannot compare. On the
+                      roster for the same reason as the ID badge: it is the state
+                      that stops someone signing in, and finding it one click down
+                      per person is how a whole shift gets refused before anyone
+                      notices.
+                    */}
+                    {u.face_needs_enrolment && (
+                      <Badge tone="amber" variant="tag">
+                        Retake face
+                      </Badge>
+                    )}
                   </div>
 
                   <DataField label="Barcode">
@@ -1026,6 +1077,13 @@ async function toggleItemPermission(user: StaffUser) {
                       <Badge tone={accountStatus(u.is_active).tone} variant="tag">
                         {accountStatus(u.is_active).label}
                       </Badge>
+                      {u.face_needs_enrolment && (
+                        <div className="mt-1">
+                          <Badge tone="amber" variant="tag">
+                            Retake face
+                          </Badge>
+                        </div>
+                      )}
                       {!u.is_active && (
                         <div className="mt-1 max-w-[14rem] text-[11px] leading-snug text-cocoa-400">
                           {u.deactivation_reason ? (
@@ -1070,158 +1128,10 @@ async function toggleItemPermission(user: StaffUser) {
           if (!saving) setCreating(false);
         }}
         title="New account"
-        width="max-w-md"
-      >
-        <div className="space-y-3.5">
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="label" htmlFor="u-first">
-                First name
-              </label>
-              <input
-                id="u-first"
-                className="input"
-                value={form.first_name}
-                placeholder="Juan"
-                onChange={(e) => setForm({ ...form, first_name: e.target.value })}
-              />
-            </div>
-            <div>
-              <label className="label" htmlFor="u-last">
-                Surname
-              </label>
-              <input
-                id="u-last"
-                className="input"
-                value={form.last_name}
-                placeholder="Dela Cruz"
-                onChange={(e) => setForm({ ...form, last_name: e.target.value })}
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="label" htmlFor="u-position">
-                Position
-              </label>
-              <input
-                id="u-position"
-                className="input"
-                value={form.position}
-                placeholder="Barista"
-                onChange={(e) => setForm({ ...form, position: e.target.value })}
-              />
-            </div>
-            <div>
-              <label className="label" htmlFor="u-start">
-                Start date
-              </label>
-              <input
-                id="u-start"
-                type="date"
-                className="input"
-                value={form.start_date}
-                onChange={(e) => setForm({ ...form, start_date: e.target.value })}
-              />
-            </div>
-          </div>
-          <p className="-mt-1 text-[11px] text-cocoa-400">
-            Both optional — you can fill either in later from Edit.
-          </p>
-
-          <div>
-            <label className="label" htmlFor="u-username">
-              Username
-            </label>
-            <input
-              id="u-username"
-              className="input font-mono"
-              value={form.username}
-              placeholder="barista3"
-              autoComplete="off"
-              onChange={(e) => setForm({ ...form, username: e.target.value })}
-            />
-          </div>
-
-          <div>
-            <label className="label" htmlFor="u-password">
-              Password
-            </label>
-            <input
-              id="u-password"
-              className="input"
-              type="password"
-              value={form.password}
-              placeholder="At least 6 characters"
-              autoComplete="new-password"
-              onChange={(e) => setForm({ ...form, password: e.target.value })}
-            />
-          </div>
-
-          <div>
-            <label className="label" htmlFor="u-role">
-              Role
-            </label>
-            <select
-              id="u-role"
-              className="input"
-              value={form.role}
-              onChange={(e) =>
-                setForm({ ...form, role: e.target.value as "admin" | "staff" })
-              }
-            >
-              <option value="staff">Staff — signs in with username or barcode</option>
-              <option value="admin">Admin — signs in with username and password</option>
-            </select>
-
-            {/* Only meaningful for staff — an admin can always manage items. */}
-            {form.role === "staff" && (
-              <div className="mt-4 rounded-xl border border-cream-200 bg-cream-50 px-3.5 py-3">
-                <label className="flex items-start gap-2.5 text-sm">
-                  <input
-                    type="checkbox"
-                    className="mt-0.5"
-                    checked={form.can_manage_items}
-                    onChange={(e) =>
-                      setForm({ ...form, can_manage_items: e.target.checked })
-                    }
-                  />
-                  <span>
-                    <span className="font-semibold text-cocoa-800">
-                      Can add, edit and delete items
-                    </span>
-                    <span className="mt-0.5 block text-xs text-cocoa-500">
-                      Without this, new ingredients are submitted and wait on
-                      Approvals before they count as stock. With it, their changes
-                      take effect straight away.
-                    </span>
-                  </span>
-                </label>
-              </div>
-            )}
-          </div>
-
-          {/* The photo only applies to staff — an admin is never held at the duty
-              check, so a reference face for one would be stored and never used. */}
-          {form.role === "staff" && (
-            <div className="border-t border-cream-200 pt-3.5">
-              <p className="label">Reference photo</p>
-              <FaceCapture disabled={saving} onCapture={(result) => setCreateShot(result)} />
-              <p className="mt-2 text-[11px] text-cocoa-400">
-                Optional. Without one, this person is not asked to confirm their
-                face at the start of a duty — you can add it later from Edit.
-              </p>
-            </div>
-          )}
-
-          {formError && (
-            <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
-              {formError}
-            </div>
-          )}
-
-          <div className="flex justify-end gap-2 pt-1">
+        width="max-w-4xl"
+        scrollable
+        footer={
+          <div className="flex justify-end gap-2">
             <button
               className="btn-ghost"
               onClick={() => setCreating(false)}
@@ -1229,11 +1139,168 @@ async function toggleItemPermission(user: StaffUser) {
             >
               Cancel
             </button>
-            <button className="btn-primary" onClick={create} disabled={saving}>
+            <button
+              className="btn-primary"
+              onClick={create}
+              disabled={saving || (!!createShot && !hasCompleteFaceSet(createShot.shots))}
+            >
               {saving ? "Saving..." : "Create account"}
             </button>
           </div>
+        }
+      >
+        <div className="grid gap-5 lg:grid-cols-2 lg:items-start">
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="label" htmlFor="u-first">
+                  First name
+                </label>
+                <input
+                  id="u-first"
+                  className="input"
+                  value={form.first_name}
+                  placeholder="Juan"
+                  onChange={(e) => setForm({ ...form, first_name: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="label" htmlFor="u-last">
+                  Surname
+                </label>
+                <input
+                  id="u-last"
+                  className="input"
+                  value={form.last_name}
+                  placeholder="Dela Cruz"
+                  onChange={(e) => setForm({ ...form, last_name: e.target.value })}
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="label" htmlFor="u-position">
+                  Position
+                </label>
+                <input
+                  id="u-position"
+                  className="input"
+                  value={form.position}
+                  placeholder="Barista"
+                  onChange={(e) => setForm({ ...form, position: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="label" htmlFor="u-start">
+                  Start date
+                </label>
+                <input
+                  id="u-start"
+                  type="date"
+                  className="input"
+                  value={form.start_date}
+                  onChange={(e) => setForm({ ...form, start_date: e.target.value })}
+                />
+              </div>
+            </div>
+            <p className="-mt-1 text-[11px] text-cocoa-400">
+              Both optional — you can fill either in later from Edit.
+            </p>
+
+            <div>
+              <label className="label" htmlFor="u-username">
+                Username
+              </label>
+              <input
+                id="u-username"
+                className="input font-mono"
+                value={form.username}
+                placeholder="barista3"
+                autoComplete="off"
+                onChange={(e) => setForm({ ...form, username: e.target.value })}
+              />
+            </div>
+
+            <div>
+              <label className="label" htmlFor="u-password">
+                Password
+              </label>
+              <input
+                id="u-password"
+                className="input"
+                type="password"
+                value={form.password}
+                placeholder="At least 6 characters"
+                autoComplete="new-password"
+                onChange={(e) => setForm({ ...form, password: e.target.value })}
+              />
+            </div>
+
+            <div>
+              <label className="label" htmlFor="u-role">
+                Role
+              </label>
+              <select
+                id="u-role"
+                className="input"
+                value={form.role}
+                onChange={(e) =>
+                  setForm({ ...form, role: e.target.value as "admin" | "staff" })
+                }
+              >
+                <option value="staff">Staff — signs in with username or barcode</option>
+                <option value="admin">Admin — signs in with username and password</option>
+              </select>
+
+              {/* Only meaningful for staff — an admin can always manage items. */}
+              {form.role === "staff" && (
+                <div className="mt-4 rounded-xl border border-cream-200 bg-cream-50 px-3.5 py-3">
+                  <label className="flex items-start gap-2.5 text-sm">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={form.can_manage_items}
+                      onChange={(e) =>
+                        setForm({ ...form, can_manage_items: e.target.checked })
+                      }
+                    />
+                    <span>
+                      <span className="font-semibold text-cocoa-800">
+                        Can add, edit and delete items
+                      </span>
+                      <span className="mt-0.5 block text-xs text-cocoa-500">
+                        Without this, new ingredients are submitted and wait on
+                        Approvals before they count as stock. With it, their changes
+                        take effect straight away.
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* The photo only applies to staff — an admin is never held at the duty
+              check, so a reference face for one would be stored and never used. */}
+          {form.role === "staff" && (
+            <section className="space-y-3 rounded-2xl border border-cream-200 bg-white p-4 sm:p-5">
+              <div>
+                <h4 className="text-sm font-semibold text-cocoa-800">Face verification</h4>
+                <p className="mt-1 text-xs leading-relaxed text-cocoa-500">
+                  You can enroll later, but face verification requires all three
+                  views: straight on, left turn, and right turn.
+                </p>
+              </div>
+              <FaceCapture disabled={saving} onCapture={(result) => setCreateShot(result)} />
+            </section>
+          )}
         </div>
+        {formError && (
+          <div className="mt-4 rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
+            {formError}
+          </div>
+        )}
       </Modal>
 
       {/* ---------- reset password ---------- */}
@@ -1546,6 +1613,27 @@ async function toggleItemPermission(user: StaffUser) {
                   </p>
                 </div>
               )}
+
+            {/*
+              The enrolment is on file but unusable.
+
+              This is the cost of versioning descriptors, so it has to be said out
+              loud: a photo taken by the old reader, or by the other engine, is
+              stored and still shown here, and every comparison refuses it. The
+              roster is where an admin can see that before the person is refused at
+              the till.
+            */}
+            {detailsUser.face_enabled && detailsUser.face_needs_enrolment && (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs leading-relaxed text-cocoa-800">
+                <span className="font-semibold">Photo needs retaking</span>
+                <p className="mt-0.5">
+                  This reference photo was taken with an older face reader, so it
+                  cannot be compared any more. Use <strong>Replace photo</strong>{" "}
+                  above to enrol {detailsUser.full_name || "them"} again — until
+                  then, a duty check will refuse the face.
+                </p>
+              </div>
+            )}
 
             {/* Duty check state, only once someone has actually been checked. */}
             {detailsUser.face_enabled && (
@@ -1957,112 +2045,123 @@ async function toggleItemPermission(user: StaffUser) {
           if (!saving) setEditing(null);
         }}
         title={editing ? `Edit — ${editing.username}` : ""}
-        width="max-w-md"
+        width="max-w-3xl"
+        scrollable
+        footer={
+          <div className="flex justify-end gap-2">
+            <button
+              className="btn-ghost"
+              onClick={() => setEditing(null)}
+              disabled={saving}
+            >
+              Cancel
+            </button>
+            <button
+              className="btn-primary"
+              onClick={saveEdit}
+              disabled={
+                saving ||
+                (!editForm.first_name.trim() && !editForm.last_name.trim()) ||
+                (!!faceShot && !hasCompleteFaceSet(faceShot.shots))
+              }
+            >
+              {saving ? "Saving..." : "Save changes"}
+            </button>
+          </div>
+        }
       >
         {editing && (
-          <div className="space-y-3.5">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="label" htmlFor="e-first">
-                  First name
-                </label>
-                <input
-                  id="e-first"
-                  className="input"
-                  value={editForm.first_name}
-                  placeholder="Juan"
-                  onChange={(e) => setEditForm({ ...editForm, first_name: e.target.value })}
-                />
+          <div className="space-y-5">
+            <section className="rounded-2xl border border-cream-200 bg-white p-4 sm:p-5">
+              <div className="mb-4">
+                <h4 className="text-sm font-semibold text-cocoa-800">Account details</h4>
+                <p className="mt-1 text-xs leading-relaxed text-cocoa-500">
+                  Update the name shown on the roster, badge, and audit trail. The
+                  username stays the same.
+                </p>
               </div>
-              <div>
-                <label className="label" htmlFor="e-last">
-                  Surname
-                </label>
-                <input
-                  id="e-last"
-                  className="input"
-                  value={editForm.last_name}
-                  placeholder="Dela Cruz"
-                  onChange={(e) => setEditForm({ ...editForm, last_name: e.target.value })}
-                />
+              <div className="grid gap-3 sm:grid-cols-2 sm:gap-4">
+                <div>
+                  <label className="label" htmlFor="e-first">
+                    First name
+                  </label>
+                  <input
+                    id="e-first"
+                    className="input"
+                    value={editForm.first_name}
+                    placeholder="Juan"
+                    onChange={(e) => setEditForm({ ...editForm, first_name: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="label" htmlFor="e-last">
+                    Surname
+                  </label>
+                  <input
+                    id="e-last"
+                    className="input"
+                    value={editForm.last_name}
+                    placeholder="Dela Cruz"
+                    onChange={(e) => setEditForm({ ...editForm, last_name: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="label" htmlFor="e-position">
+                    Position
+                  </label>
+                  <input
+                    id="e-position"
+                    className="input"
+                    value={editForm.position}
+                    placeholder="Barista"
+                    onChange={(e) => setEditForm({ ...editForm, position: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="label" htmlFor="e-start">
+                    Start date
+                  </label>
+                  <input
+                    id="e-start"
+                    type="date"
+                    className="input"
+                    value={editForm.start_date}
+                    onChange={(e) => setEditForm({ ...editForm, start_date: e.target.value })}
+                  />
+                  {editForm.start_date === "" && (
+                    <p className="mt-2 text-xs text-cocoa-400">
+                      No start date recorded. You can leave it blank and add it later.
+                    </p>
+                  )}
+                </div>
               </div>
-            </div>
-            <p className="-mt-1 text-[11px] text-cocoa-400">
-              Together these are the name on the roster, the printed badge and the
-              audit trail. The username is not changed here.
-            </p>
+            </section>
 
-            <div>
-              <label className="label" htmlFor="e-position">
-                Position
-              </label>
-              <input
-                id="e-position"
-                className="input"
-                value={editForm.position}
-                placeholder="Barista"
-                onChange={(e) => setEditForm({ ...editForm, position: e.target.value })}
-              />
-            </div>
-
-            <div>
-              <label className="label" htmlFor="e-start">
-                Start date
-              </label>
-              <input
-                id="e-start"
-                type="date"
-                className="input"
-                value={editForm.start_date}
-                onChange={(e) => setEditForm({ ...editForm, start_date: e.target.value })}
-              />
-            </div>
-
-            <div className="border-t border-cream-200 pt-3.5">
-              <p className="label">Reference photo</p>
+            <section className="space-y-3 rounded-2xl border border-cream-200 bg-white p-4 sm:p-5">
+              <div>
+                <h4 className="text-sm font-semibold text-cocoa-800">Reference photos</h4>
+                <p className="mt-1 text-xs leading-relaxed text-cocoa-500">
+                  Used to confirm identity at sign-in or at the start of a duty.
+                </p>
+              </div>
               <FaceCapture
                 disabled={saving}
-                currentPhoto={
-                  faceShot?.shots.find((s) => s.pose === "front")?.photo ??
-                  (editing.face_enabled ? `/api/users/${editing.id}/face` : null)
-                }
+                currentPhotos={facePhotoUrls(editing)}
                 onCapture={(result) => setFaceShot(result)}
               />
               {editing.face_enabled && !faceShot && (
-                <p className="mt-2 text-[11px] text-cocoa-400">
-                  Leaving this empty keeps the photo already stored. Use “Replace
-                  photo” in the details panel to see it.
+                <p className="rounded-xl bg-cream-50 px-3 py-2.5 text-xs leading-relaxed text-cocoa-500">
+                  Existing photos stay on file unless you replace them. A replacement
+                  requires all three views.
                 </p>
               )}
-              {editForm.start_date === "" && (
-                <p className="mt-2 text-[11px] text-cocoa-400">
-                  No start date recorded. You can leave it blank and add it later.
-                </p>
-              )}
-            </div>
+            </section>
 
             {editError && (
               <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
                 {editError}
               </div>
             )}
-
-            <div className="flex justify-end gap-2 pt-1">
-              <button
-                className="btn-ghost"
-                onClick={() => setEditing(null)}
-                disabled={saving}
-              >
-                Cancel
-              </button>
-              <button
-                className="btn-primary"
-                onClick={saveEdit}
-                disabled={saving || (!editForm.first_name.trim() && !editForm.last_name.trim())}
-              >
-                {saving ? "Saving..." : "Save changes"}
-              </button>
-            </div>
           </div>
         )}
       </Modal>
@@ -2081,13 +2180,14 @@ async function toggleItemPermission(user: StaffUser) {
       >
         {verifying && (
           <div className="space-y-3.5">
-            <div className="rounded-xl bg-cream-50 px-3.5 py-2.5 text-xs leading-snug text-cocoa-600">
-              Take a photo of the applicant&apos;s ID and a photo of them. The checks compare the
-              portrait on the card with their face and look for an obviously doctored image —
-              but whether the card is genuine is yours to decide, from the two pictures below.
+            <div className="rounded-xl border border-cream-200 bg-cream-50 px-3.5 py-3 text-xs leading-relaxed text-cocoa-600">
+              The front of the ID is required. The back and a separate photo are optional. The
+              camera guide looks for visible detail and a steady frame; it cannot tell whether an
+              ID is genuine. After capture, CafeTrack reads the card and compares available
+              portraits. You make the final decision from the images and check results.
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div>
                 <label className="label" htmlFor="id-doctype">
                   Kind of ID
@@ -2145,7 +2245,7 @@ async function toggleItemPermission(user: StaffUser) {
                 onClick={submitVerification}
                 disabled={saving || !idShot}
               >
-                {saving ? "Checking..." : "Attach and check"}
+                {saving ? "Reading ID and checking..." : "Scan ID & open review"}
               </button>
             </div>
           </div>
@@ -2180,4 +2280,3 @@ async function toggleItemPermission(user: StaffUser) {
     </div>
   );
 }
-

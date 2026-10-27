@@ -244,7 +244,10 @@ export const POST = handler(async (req: Request) => {
 
   /* ---- 3. the face, against that one account --------------------------- */
 
-  const threshold = await getFaceMatchThreshold();
+  // Read the engine once: the threshold is calibrated per engine, so it has to be
+  // the same engine the gallery is filtered to below.
+  const engine = await getFaceEngine();
+  const threshold = await getFaceMatchThreshold(engine);
 
   const presentation = await evaluatePresentation({
     userId: user.id,
@@ -260,7 +263,7 @@ export const POST = handler(async (req: Request) => {
      * where a face is the only thing presented.
      */
     requireProfileAngles: false,
-    engine: await getFaceEngine(),
+    engine,
   });
 
   if (!presentation.matched) {

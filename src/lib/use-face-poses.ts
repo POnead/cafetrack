@@ -28,10 +28,9 @@ import {
   type FacePose,
   fileFrame,
   poseAlreadyHeld,
-  poseFromSignal,
   poseRefusal,
 } from "./face";
-import { readFaceFor, useFaceEngine } from "./face-engine";
+import { poseStateOfRead, readFaceFor, useFaceEngine } from "./face-engine";
 
 /** One frame of a presentation. What goes on the wire as `face_frames`. */
 export type PoseFrame = {
@@ -108,15 +107,17 @@ export function useFacePoses(poses: readonly FacePose[] = FACE_POSES): FacePoseS
         return { outcome: "retry", frames, message: result.message };
       }
 
-      const seen = poseFromSignal(result.poseSignal);
+      const state = poseStateOfRead(result);
+      const seen = state.pose;
       const held = frames.map((f) => f.pose);
       const filing = fileFrame({ expected, seen, held });
 
       if (filing.kind === "turn-more") {
-        // Halfway between straight on and turned. The one case that genuinely
-        // needs another frame, refused here rather than on the server so the
+        // Halfway between straight on and turned, too far round, or tilted. The
+        // refusal names which one — see `poseRefusal` — because they need
+        // opposite corrections. Refused here rather than on the server so the
         // person is told while they are still in front of the camera.
-        const refusal = poseRefusal(expected, null);
+        const refusal = poseRefusal(expected, state);
         setMessage(refusal);
         return { outcome: "retry", frames, message: refusal };
       }
@@ -126,6 +127,22 @@ export function useFacePoses(poses: readonly FacePose[] = FACE_POSES): FacePoseS
         const note = poseAlreadyHeld(filing.pose, missing);
         setMessage(note);
         return { outcome: "retry", frames, message: note };
+      }
+
+      /*
+       * A sequence only ever collects the angles it was created for.
+       *
+       * `fileFrame` deliberately takes a frame that shows an angle the set still
+       * needs — during a three-angle presentation, showing the next angle early is
+       * a kindness, not a mistake. But a retake runs a sequence of one pose, and
+       * without this guard a left frame offered while the screen asks for the
+       * frontal retake would be filed as the left one, count as "complete", and
+       * leave the frontal photo missing.
+       */
+      if (!poses.includes(filing.pose)) {
+        const refusal = poseRefusal(expected, state);
+        setMessage(refusal);
+        return { outcome: "retry", frames, message: refusal };
       }
 
       // Filed under the angle the frame actually shows — which is usually the

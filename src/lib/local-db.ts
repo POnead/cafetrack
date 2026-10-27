@@ -380,6 +380,7 @@ async function seedIfEmpty(pg: PGlite) {
 
 type Filter =
   | { kind: "eq"; column: string; value: unknown }
+  | { kind: "in"; column: string; values: unknown[] }
   | { kind: "lt" | "lte" | "gt" | "gte"; column: string; value: unknown }
   | { kind: "or"; clauses: { column: string; op: string; value: string }[] };
 
@@ -476,6 +477,20 @@ class LocalQuery implements PromiseLike<DbResult> {
 
   eq(column: string, value: unknown) {
     this.filters.push({ kind: "eq", column, value });
+    return this;
+  }
+
+  /**
+   * `column in (values)`, as PostgREST spells it.
+   *
+   * Added because a query that needs a set — "which of these accounts hold a
+   * usable face sample" — is a normal thing to ask, and without this the call
+   * would work against Supabase and throw in local mode. An empty set is written
+   * as `false` rather than `in ()`, which is a syntax error; matching no rows is
+   * the correct answer either way.
+   */
+  in(column: string, values: readonly unknown[]) {
+    this.filters.push({ kind: "in", column, values: [...values] });
     return this;
   }
 
@@ -780,6 +795,15 @@ class LocalQuery implements PromiseLike<DbResult> {
         }
         values.push(filter.value);
         return `${alias}.${quoteId(filter.column)} = $${offset + values.length}`;
+      }
+
+      if (filter.kind === "in") {
+        if (filter.values.length === 0) return "false";
+        const placeholders = filter.values.map((value) => {
+          values.push(value);
+          return `$${offset + values.length}`;
+        });
+        return `${alias}.${quoteId(filter.column)} in (${placeholders.join(", ")})`;
       }
 
       // Comparison operator: lt / lte / gt / gte. A null bound is meaningless

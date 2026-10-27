@@ -141,6 +141,14 @@ const nextConfig = {
         "@electric-sql/pglite",
         "tesseract.js",
       ];
+    } else {
+      config.resolve = config.resolve ?? {};
+      config.resolve.fallback = {
+        ...(config.resolve.fallback ?? {}),
+        fs: false,
+        path: false,
+        crypto: false,
+      };
     }
 
     /*
@@ -219,6 +227,9 @@ const nextConfig = {
       "@vladmandic/face-api": {
         browser: "@vladmandic/face-api/dist/face-api.esm-nobundle.js",
       },
+      fs: { browser: "./src/lib/empty-browser-module.ts" },
+      path: { browser: "./src/lib/empty-browser-module.ts" },
+      crypto: { browser: "./src/lib/empty-browser-module.ts" },
     },
   },
 };

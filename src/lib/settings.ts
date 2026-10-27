@@ -13,12 +13,10 @@ import { db } from "./supabase";
 import {
   DEFAULT_DUTY_HOURS,
   DEFAULT_FACE_ENGINE,
-  DEFAULT_MATCH_THRESHOLD,
   MAX_DUTY_HOURS,
-  MAX_MATCH_THRESHOLD,
   MIN_DUTY_HOURS,
-  MIN_MATCH_THRESHOLD,
   type FaceEngine,
+  matchThresholdBand,
   parseEngine,
 } from "./face";
 import {
@@ -152,16 +150,20 @@ export async function getFaceDutyHours(): Promise<number> {
 }
 
 /**
- * How close two embeddings must be to count as the same person
- * (settings.face_match_threshold). Lower is stricter.
+ * How close two embeddings must be to count as the same person.
+ *
+ * Reads the row belonging to the engine in use — `face_match_threshold` for
+ * legacy, `face_match_threshold_sface` for SFace — because the two engines work
+ * in different vector spaces and their thresholds are not comparable. A single
+ * shared value was fine while only one engine could ever run; now that the engine
+ * is a setting, sharing it would mean switching engines silently applies a
+ * threshold calibrated for a different model.
+ *
+ * Lower is stricter, in both cases.
  */
-export async function getFaceMatchThreshold(): Promise<number> {
-  return clampFloat(
-    await getSetting("face_match_threshold"),
-    DEFAULT_MATCH_THRESHOLD,
-    MIN_MATCH_THRESHOLD,
-    MAX_MATCH_THRESHOLD
-  );
+export async function getFaceMatchThreshold(engine: FaceEngine): Promise<number> {
+  const band = matchThresholdBand(engine);
+  return clampFloat(await getSetting(band.setting), band.fallback, band.min, band.max);
 }
 
 /**
@@ -186,9 +188,9 @@ export async function getFaceRequireProfileAngles(): Promise<boolean> {
 /**
  * Which face engine this cafe is using (settings.face_engine).
  *
- * 'legacy' or 'sface'. An unrecognised value reads as 'legacy' rather than
- * throwing: a typo in a settings row must not take sign-in down, and legacy is
- * the engine whose vectors every existing enrolment holds.
+ * 'legacy' or 'sface'. An unrecognised value reads as the default (sface) rather
+ * than throwing: a typo in a settings row must not take sign-in down, and both
+ * engines are installed.
  *
  * See FaceEngine in lib/face.ts for why the two cannot be mixed.
  */

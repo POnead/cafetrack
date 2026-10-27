@@ -28,8 +28,11 @@ import {
   classifyCameraError,
   describeCameraProblem,
 } from "@/lib/face-diagnostics";
-import { FACE_POSES, POSE_COPY } from "@/lib/face";
-import { framesBody, useFacePoses } from "@/lib/use-face-poses";
+import { POSE_COPY } from "@/lib/face";
+import { framesBody, useFacePoses, type PoseFrame } from "@/lib/use-face-poses";
+import { useAutoFaceCapture } from "@/lib/use-auto-face-capture";
+import FaceScanOverlay from "@/components/FaceScanOverlay";
+import FaceCaptureGuide from "@/components/FaceCaptureGuide";
 
 type Phase =
   | "loading"
@@ -239,7 +242,45 @@ export default function VerifyPage() {
    */
   const poses = useFacePoses();
 
-  /** Read the current frame, and send the whole presentation once it is complete. */
+  /** Send a complete presentation to the server and act on the answer. */
+  const submitFrames = useCallback(
+    async (frames: readonly PoseFrame[]) => {
+      setPhase("verifying");
+      setMessage(null);
+      try {
+        const res = await fetch("/api/auth/verify-face", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          // Every angle, in one body. A check that sent only the straight-on
+          // frame would fail on any account holding side samples.
+          body: JSON.stringify(framesBody(frames)),
+        });
+        const data = await res.json();
+
+        if (res.ok && data.ok) {
+          setPhase("passed");
+          // Nothing left to read, so the light goes off while they read the
+          // confirmation rather than staying on until the next page loads.
+          stopCamera();
+          // Long enough to read the confirmation, then in.
+          setTimeout(() => router.replace("/dashboard"), 1200);
+          return;
+        }
+
+        setPhase("failed");
+        setMessage(
+          data.error ||
+            "That face was not recognised. Try again, or ask your manager for an override."
+        );
+      } catch {
+        setPhase("capture");
+        setMessage("That could not be checked. Try again.");
+      }
+    },
+    [router, stopCamera]
+  );
+
+  /** Read one image (the file-upload path), and submit once the set is complete. */
   const verify = useCallback(
     async (source: HTMLVideoElement | HTMLImageElement) => {
       setPhase("verifying");
@@ -259,33 +300,13 @@ export default function VerifyPage() {
           return;
         }
 
-        const res = await fetch("/api/auth/verify-face", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          // Every angle, in one body. A check that sent only the straight-on
-          // frame would fail on any account holding side samples.
-          body: JSON.stringify(framesBody(result.frames)),
-        });
-        const data = await res.json();
-
-        if (res.ok && data.ok) {
-          setPhase("passed");
-          // Long enough to read the confirmation, then in.
-          setTimeout(() => router.replace("/dashboard"), 1200);
-          return;
-        }
-
-        setPhase("failed");
-        setMessage(
-          data.error ||
-            "That face was not recognised. Try again, or ask your manager for an override."
-        );
+        await submitFrames(result.frames);
       } catch {
         setPhase("capture");
         setMessage("That could not be checked. Try again.");
       }
     },
-    [router, poses]
+    [poses, submitFrames]
   );
 
   /** The insecure-origin path: the OS camera app hands back a file. */
@@ -314,6 +335,24 @@ export default function VerifyPage() {
     },
     [verify]
   );
+
+  /*
+   * Automatic capture. Once the camera is live the loop watches for a face,
+   * waits for the head to reach the angle being asked for, reads it, and moves
+   * on — no capture button while it is working. See use-auto-face-capture.
+   */
+  const scan = useAutoFaceCapture({
+    sequence: poses,
+    videoRef,
+    /*
+     * Only while the live camera is the thing being used. A file picked through
+     * "Take a photo instead" moves the screen to `verifying`, which stops the
+     * loop — otherwise the camera could finish its own presentation while the
+     * file is still being read, and the two would submit against each other.
+     */
+    active: cameraOn && phase === "capture",
+    onComplete: (frames) => void submitFrames(frames),
+  });
 
   if (phase === "loading") {
     return (
@@ -381,41 +420,71 @@ export default function VerifyPage() {
         so a browser that ignores autoplay for the stream still starts.
       */}
       {cameraOn && (
-        <div className="relative mb-4 overflow-hidden rounded-2xl bg-cocoa-900">
-          <video
-            ref={attachStream}
-            playsInline
-            muted
-            autoPlay
-            className="mx-auto block w-full max-w-sm"
-          />
+        <div className="mb-5 overflow-hidden rounded-2xl bg-cocoa-900 p-2 sm:p-3">
+          <div className="relative mx-auto aspect-[4/5] max-h-[65vh] w-full max-w-sm overflow-hidden rounded-xl">
+            <video
+              ref={attachStream}
+              playsInline
+              muted
+              autoPlay
+              className="block h-full w-full object-cover"
+            />
+            {/* The loading screen for the angle being read. */}
+            {scan.phase === "scanning" && (
+              <FaceScanOverlay
+                step={Math.min(scan.progress + 1, scan.total)}
+                total={scan.total}
+              />
+            )}
+            {/* The live guide, until the loop hands over to the manual button. */}
+            {scan.phase === "prompt" && (
+              <FaceCaptureGuide
+                poses={scan.poses}
+                activePose={scan.activePose}
+                done={scan.frames.map((f) => f.pose)}
+                state={scan.liveState}
+                holdProgress={scan.holdProgress}
+                flashPose={scan.flashPose}
+                message={scan.message}
+              />
+            )}
+          </div>
         </div>
       )}
 
       {cameraOn ? (
-        <div className="mb-4 flex justify-center">
-          <button
-            type="button"
-            className="btn-primary"
-            onClick={() => {
-              const v = videoRef.current;
-              if (!v) return;
-              /*
-               * A camera that has just opened can be asked for a frame before it
-               * has produced one, and the read fails with a message about the
-               * photo rather than about the timing. Saying so plainly is quicker
-               * than the person trying three more times.
-               */
-              if (!v.videoWidth) {
-                setMessage("The camera is still starting — try again in a moment.");
-                return;
-              }
-              void verify(v);
-            }}
-          >
-            Take the {POSE_COPY[poses.activePose].short} photo
-          </button>
-        </div>
+        /*
+         * The manual fallback. Hidden while auto-capture is working; it appears
+         * only after repeated failures, which is the one case where the loop has
+         * stopped being useful.
+         */
+        scan.showManual ? (
+          <div className="mb-5 grid gap-2 sm:grid-cols-2">
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => void scan.captureNow()}
+            >
+              Take the {POSE_COPY[scan.activePose].short} photo
+            </button>
+            <button type="button" className="btn-ghost" onClick={scan.resume}>
+              Keep scanning
+            </button>
+          </div>
+        ) : phase === "failed" ? (
+          <div className="mb-5 flex justify-center">
+            <button
+              type="button"
+              className="btn-primary min-h-12 w-full"
+              onClick={() => {
+                scan.reset();
+                setPhase("capture");
+              }}
+            >
+              Try again
+            </button>
+          </div>
+        ) : null
       ) : (
         <div className="mb-4 flex justify-center">
           <button
@@ -430,7 +499,7 @@ export default function VerifyPage() {
       )}
 
       {loadingModels && (
-        <div className="mb-4">
+        <div className="mb-5 rounded-xl border border-cream-200 bg-white px-4 py-3.5">
           <div className="h-2 overflow-hidden rounded-full bg-cream-200">
             <div
               className="h-full rounded-full bg-ochre-400 transition-all"
@@ -455,24 +524,23 @@ export default function VerifyPage() {
 
         Measured on the real model: the same person re-shot with room around the
         face sits at 0.002-0.02 from their own reference, and cropped tight enough
-        to clip the chin, at 0.030. That last figure is close enough to the 0.033
-        cut-off that a reasonable photo of the right person gets refused — and the
-        message that comes back ("that is not you") is worse than useless, because
-        it is untrue. One line here costs a retake instead.
+        to clip the chin, at 0.030. That last figure used to sit right on the
+        0.033 cut-off; the default is looser now (0.05), but a badly framed photo
+        still costs a scan, and one line here buys a retake instead.
 
-        With the camera open the line becomes the prompt for the angle being
-        asked for, so the person is never guessing which of the three is next.
+        Only while the camera is off. Once it is open the live guide carries the
+        angle, the nudge and the count on the preview itself.
       */}
-      <p className="mb-4 text-center text-xs text-cocoa-500">
-        {cameraOn
-          ? POSE_COPY[poses.activePose].instruction
-          : "Fill the frame with your face, but keep room around it — your whole head, from the top of your hair down to your chin, with a little to spare. If it does not match, try again with a little more light or with the camera a little further away."}
-      </p>
-
-      {cameraOn && poses.frames.length > 0 && (
-        <p className="mb-4 text-center text-xs text-cocoa-400">
-          {poses.frames.length} of {FACE_POSES.length} photos taken.
-        </p>
+      {!cameraOn && (
+        <div className="mb-5 rounded-xl border border-cream-200 bg-white px-4 py-3.5">
+          <p className="text-sm font-semibold text-cocoa-700">For the clearest check</p>
+          <p className="mt-1 text-xs leading-relaxed text-cocoa-500">
+            Fill the frame with your face, but keep room around it — your whole
+            head, from the top of your hair down to your chin, with a little to
+            spare. If it does not match, try again with a little more light or
+            with the camera a little further away.
+          </p>
+        </div>
       )}
 
       {/*
@@ -482,26 +550,32 @@ export default function VerifyPage() {
         because the people who need it most are the ones a failed camera leaves
         stranded.
       */}
-      <label className="btn-ghost flex w-full cursor-pointer items-center justify-center">
-        Take a photo instead
-        <input
-          type="file"
-          accept="image/jpeg,image/png,image/webp"
-          capture="user"
-          className="sr-only"
-          onChange={(e) => {
-            void onFile(e.target.files?.[0]);
-            e.target.value = "";
-          }}
-        />
-      </label>
+      <div className="mt-4 space-y-2 rounded-2xl border border-cream-200 bg-white p-3.5">
+        <label className="btn-ghost flex min-h-12 w-full cursor-pointer items-center justify-center">
+          Take a photo instead
+          <input
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            capture="user"
+            className="sr-only"
+            onChange={(e) => {
+              void onFile(e.target.files?.[0]);
+              e.target.value = "";
+            }}
+          />
+        </label>
+        <p className="text-center text-xs leading-relaxed text-cocoa-400">
+          Use the camera app on your device or choose an existing image.
+        </p>
+      </div>
 
       {message && (
         <div
-          className={`mt-4 rounded-xl px-3.5 py-3 text-sm ${
+          role="status"
+          className={`mt-4 rounded-2xl border px-4 py-3.5 text-sm leading-relaxed ${
             phase === "failed"
-              ? "bg-terracotta-50 text-terracotta-700"
-              : "bg-amber-50 text-cocoa-700"
+              ? "border-terracotta-100 bg-terracotta-50 text-terracotta-700"
+              : "border-amber-200 bg-amber-50 text-cocoa-700"
           }`}
         >
           {message}
@@ -510,7 +584,7 @@ export default function VerifyPage() {
 
       <button
         type="button"
-        className="mt-5 w-full text-center text-xs text-cocoa-400 underline"
+        className="mt-4 w-full rounded-xl px-3 py-2.5 text-center text-sm font-medium text-cocoa-500 transition hover:bg-cream-100 hover:text-cocoa-700"
         onClick={() => router.replace("/login")}
       >
         Sign out
@@ -530,12 +604,14 @@ function Screen({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex min-h-screen items-center justify-center bg-white px-6 py-12">
-      <div className="w-full max-w-sm text-center">
-        <div className="script-logo-dark mb-6 text-3xl">CafeTrack</div>
-        <h1 className="deco-title text-4xl">{title}</h1>
+    <div className="flex min-h-[100svh] items-center justify-center bg-cream-50 px-4 py-8 sm:px-6 sm:py-12">
+      <div className="w-full max-w-md text-center">
+        <div className="script-logo-dark mb-5 text-3xl">CafeTrack</div>
+        <h1 className="deco-title text-3xl sm:text-4xl">{title}</h1>
         {subtitle && <p className="mt-2 text-sm text-cocoa-500">{subtitle}</p>}
-        <div className="mt-6">{children}</div>
+        <div className="mt-6 rounded-3xl border border-cream-200 bg-cream-50/70 p-4 text-left shadow-sm sm:p-6">
+          {children}
+        </div>
       </div>
     </div>
   );

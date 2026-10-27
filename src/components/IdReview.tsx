@@ -197,9 +197,15 @@ export default function IdReview({ userId, onDone, onClose }: Props) {
         whether a card has been doctored.
       */}
       {hasDocuments ? (
-        <div className="grid grid-cols-2 gap-3">
-          <figure className="space-y-1">
-            <div className="flex aspect-[85.6/54] items-center justify-center overflow-hidden rounded-xl border border-cream-200 bg-cream-100">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <figure className="min-w-0 space-y-2 rounded-2xl border border-cream-200 bg-cream-50 p-3">
+            <figcaption className="flex items-center justify-between gap-2 text-xs font-semibold text-cocoa-700">
+              <span>Front of ID</span>
+              <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-medium text-cocoa-400">
+                Document
+              </span>
+            </figcaption>
+            <div className="flex aspect-[85.6/54] items-center justify-center overflow-hidden rounded-xl border border-cream-200 bg-white">
               {user.has_front ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
@@ -211,11 +217,16 @@ export default function IdReview({ userId, onDone, onClose }: Props) {
                 <span className="text-xs text-cocoa-400">No front</span>
               )}
             </div>
-            <figcaption className="text-center text-[11px] text-cocoa-400">ID</figcaption>
           </figure>
 
-          <figure className="space-y-1">
-            <div className="flex aspect-[85.6/54] items-center justify-center overflow-hidden rounded-xl border border-cream-200 bg-cream-100">
+          <figure className="min-w-0 space-y-2 rounded-2xl border border-cream-200 bg-cream-50 p-3">
+            <figcaption className="flex items-center justify-between gap-2 text-xs font-semibold text-cocoa-700">
+              <span>Photo of person</span>
+              <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-medium text-cocoa-400">
+                Portrait
+              </span>
+            </figcaption>
+            <div className="flex aspect-[4/3] items-center justify-center overflow-hidden rounded-xl border border-cream-200 bg-white">
               {user.has_photo ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
@@ -227,20 +238,19 @@ export default function IdReview({ userId, onDone, onClose }: Props) {
                 <span className="text-xs text-cocoa-400">No photo</span>
               )}
             </div>
-            <figcaption className="text-center text-[11px] text-cocoa-400">Person</figcaption>
           </figure>
 
           {user.has_back && (
-            <figure className="col-span-2 space-y-1">
-              <div className="flex items-center justify-center overflow-hidden rounded-xl border border-cream-200 bg-cream-100">
+            <figure className="space-y-2 rounded-2xl border border-cream-200 bg-cream-50 p-3 sm:col-span-2">
+              <figcaption className="text-xs font-semibold text-cocoa-700">Back of ID</figcaption>
+              <div className="flex aspect-[85.6/54] max-h-64 items-center justify-center overflow-hidden rounded-xl border border-cream-200 bg-white">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
                   src={`/api/users/${user.id}/id?part=back`}
                   alt={`Back of the ID for ${user.full_name}`}
-                  className="max-h-40 w-auto object-contain"
+                  className="h-full w-full object-contain"
                 />
               </div>
-              <figcaption className="text-center text-[11px] text-cocoa-400">Back of the ID</figcaption>
             </figure>
           )}
         </div>
@@ -265,7 +275,13 @@ export default function IdReview({ userId, onDone, onClose }: Props) {
       {/* ---- what the checks concluded ---- */}
       {signals.length > 0 && (
         <div className="space-y-2">
-          <p className="label !mb-0">What the checks found</p>
+          <div>
+            <p className="label !mb-0">Scan and verification checks</p>
+            <p className="mt-1 text-[11px] leading-snug text-cocoa-400">
+              These checks are decision aids, not proof that a document is genuine. Compare the
+              images and make the final decision yourself.
+            </p>
+          </div>
           {signals.map((s) => (
             <div
               key={s.id}
@@ -311,9 +327,9 @@ export default function IdReview({ userId, onDone, onClose }: Props) {
             </div>
           )}
 
-          <div className="flex flex-wrap justify-end gap-2">
+          <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:justify-end">
             <button
-              className="btn-ghost text-xs"
+              className="btn-ghost col-span-2 text-xs sm:col-span-1"
               onClick={purge}
               disabled={busy}
               title="Removes the stored images. Recorded in the audit trail."

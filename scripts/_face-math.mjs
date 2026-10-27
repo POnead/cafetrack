@@ -22,6 +22,7 @@ import {
   MAX_DUTY_HOURS,
   MAX_MATCH_THRESHOLD,
   MEASURED_CLOSEST_DIFFERENT_PEOPLE,
+  MEASURED_FARTHEST_DIFFERENT_PEOPLE,
   MEASURED_SAME_PERSON_WORST,
   MIN_DUTY_HOURS,
   MIN_MATCH_THRESHOLD,
@@ -264,9 +265,19 @@ check(
   "the worst measured same-person re-capture still matches",
   isMatch(real, atCosine(real, MEASURED_SAME_PERSON_WORST), DEFAULT_MATCH_THRESHOLD) === true
 );
+/*
+ * The looser default accepts the closest measured stranger pair. That is the
+ * deliberate cost of admitting a real re-capture taken on a till camera rather
+ * than the enrolment camera; the strict midpoint this used to be still refuses
+ * it, and a cafe can switch back to that in Settings.
+ */
 check(
-  "the closest measured pair of different people does not match",
-  isMatch(real, atCosine(real, MEASURED_CLOSEST_DIFFERENT_PEOPLE), DEFAULT_MATCH_THRESHOLD) === false
+  "the looser default accepts the closest measured stranger pair on purpose",
+  isMatch(real, atCosine(real, MEASURED_CLOSEST_DIFFERENT_PEOPLE), DEFAULT_MATCH_THRESHOLD) === true
+);
+check(
+  "the old strict midpoint still refuses that pair",
+  isMatch(real, atCosine(real, MEASURED_CLOSEST_DIFFERENT_PEOPLE), 0.033) === false
 );
 
 section("isMatch — a missing vector is never a match");
@@ -392,20 +403,29 @@ check("the ranges are ordered", MIN_DUTY_HOURS < MAX_DUTY_HOURS && MIN_MATCH_THR
  * brightness and compression.
  *
  * The old default of 0.6 sat above the whole different-person band, so every
- * face matched every other face.
+ * face matched every other face. The current default is deliberately looser
+ * than the closest stranger pair because a till camera is not the enrolment
+ * camera, and real staff were being refused; the tests below pin down both ends
+ * of that trade-off so it cannot drift into "yes" again.
  */
 section("the threshold against measured faces");
 
 check(
-  "the default rejects every measured pair of different people",
-  DEFAULT_MATCH_THRESHOLD < MEASURED_CLOSEST_DIFFERENT_PEOPLE,
-  `default ${DEFAULT_MATCH_THRESHOLD} is not below ${MEASURED_CLOSEST_DIFFERENT_PEOPLE}`
+  "the default admits the worst measured same-person reading",
+  DEFAULT_MATCH_THRESHOLD > MEASURED_SAME_PERSON_WORST,
+  `default ${DEFAULT_MATCH_THRESHOLD} would refuse a real person (worst case ${MEASURED_SAME_PERSON_WORST})`
 );
 
 check(
-  "the default still admits the worst measured same-person reading",
-  DEFAULT_MATCH_THRESHOLD > MEASURED_SAME_PERSON_WORST,
-  `default ${DEFAULT_MATCH_THRESHOLD} would refuse a real person (worst case ${MEASURED_SAME_PERSON_WORST})`
+  "the default is looser than the closest measured stranger pair on purpose",
+  DEFAULT_MATCH_THRESHOLD > MEASURED_CLOSEST_DIFFERENT_PEOPLE,
+  `default ${DEFAULT_MATCH_THRESHOLD} is still at the strict midpoint`
+);
+
+check(
+  "the default never reaches the far end of the stranger band",
+  DEFAULT_MATCH_THRESHOLD < MEASURED_FARTHEST_DIFFERENT_PEOPLE,
+  `default ${DEFAULT_MATCH_THRESHOLD} would accept every measured stranger (farthest ${MEASURED_FARTHEST_DIFFERENT_PEOPLE})`
 );
 
 check(

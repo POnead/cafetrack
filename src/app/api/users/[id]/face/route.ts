@@ -4,6 +4,7 @@ import { requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import {
   DEFAULT_FACE_ENGINE,
+  DESCRIPTOR_VERSION,
   FACE_POSES,
   POSE_COPY,
   PRIMARY_POSE,
@@ -15,7 +16,7 @@ import {
   parsePose,
   poseFromSignal,
   poseSatisfies,
-  REPLACEMENT_MISMATCH_DISTANCE,
+  replacementMismatchDistance,
 } from "@/lib/face";
 import {
   deleteFaceSamples,
@@ -72,9 +73,8 @@ const POSE_LABEL: Record<FacePose, string> = {
  * One field of the upload, per angle.
  *
  * `embedding_front`, `image_front`, `signal_front`, `quality_front` and the same
- * for the two side angles. A bare `embedding`/`image` is still accepted and means
- * the straight-on angle, so the create form and the suite that drives it keep
- * working without knowing about angles at all.
+ * for the two side angles. A bare `embedding`/`image` still means the straight-on
+ * angle for compatibility, but every enrolment must include all three angles.
  */
 function fieldFor(
   form: FormData,
@@ -146,13 +146,9 @@ export const POST = handler(
     /*
      * Read every angle that was sent, in capture order.
      *
-     * The straight-on angle is required; the two turned ones are not. That
-     * asymmetry is deliberate. A photograph of a turned head is the hardest
-     * thing this model is asked to read — a real capture can simply fail, and
-     * the admin is standing next to a person who needs an account today.
-     * Refusing the whole enrolment because one side angle would not read would
-     * trade a usable account for a theoretical completeness, so a missing side
-     * angle is reported back and the account is enrolled without it.
+     * All three angles are required for an enrolment or replacement. Accepting a
+     * partial set makes the UI claim an account has completed multi-angle
+     * verification when it has not.
      *
      * The reverse — a side angle the admin *thinks* they took but which is
      * really straight on — is refused, because that is a sample that would be
@@ -172,13 +168,9 @@ export const POST = handler(
 
       // Nothing sent for this angle.
       if (rawEmbedding === null && rawImage === null) {
-        if (pose === PRIMARY_POSE) {
-          return fail(
-            "A straight-on photo is required. Take the photo again — " +
-              "the face could not be read from it."
-          );
-        }
-        continue;
+        return fail(
+          `A ${POSE_LABEL[pose]} photo is required. Capture all three views before saving.`
+        );
       }
 
       // Half an angle is a client bug, not a usable sample.
@@ -305,13 +297,28 @@ export const POST = handler(
     let possiblyDifferentPerson = false;
     let previousDistance: number | null = null;
 
-    const previousEmbedding = parseEmbedding(before.face_embedding);
-    if (previousEmbedding) {
-      previousDistance = distance(previousEmbedding, frontEmbedding);
+    /*
+     * Compare like with like, or not at all.
+     *
+     * A vector from another engine — or from the old reader, which embedded the
+     * whole frame — lives in a different space, so a distance between it and this
+     * capture is a number with no meaning. Warning from one would fire on every
+     * re-enrolment after the engine switch, and an admin who sees a false warning
+     * every time learns to ignore the true one.
+     */
+    const newModel = captured.find((c) => c.pose === PRIMARY_POSE)?.model ?? DEFAULT_FACE_ENGINE;
+    const previousFront = (await loadFaceSamples(before.id, before.face_embedding)).find(
+      (s) =>
+        s.pose === PRIMARY_POSE && s.model === newModel && s.version === DESCRIPTOR_VERSION
+    );
+
+    if (previousFront) {
+      previousDistance = distance(previousFront.embedding, frontEmbedding);
       // A loose bar on purpose: the same person's captures vary more than this
       // under ordinary conditions — lighting, glasses, a long shift — while a
       // different person sits well outside it, so only a real mismatch trips it.
-      possiblyDifferentPerson = previousDistance > REPLACEMENT_MISMATCH_DISTANCE;
+      // The bar is per engine; see replacementMismatchDistance in lib/face.ts.
+      possiblyDifferentPerson = previousDistance > replacementMismatchDistance(newModel);
     }
 
     const angles = captured.map((c) => c.pose);
@@ -324,7 +331,7 @@ export const POST = handler(
       {
         username: data.username,
         full_name: data.full_name,
-        replaced: Boolean(previousEmbedding),
+        replaced: Boolean(before.face_embedding),
         // Which angles this enrolment actually holds, and how far each head was
         // turned when it was captured. This is the record that makes the pose
         // bands in lib/face.ts calibratable later: it is the only place the

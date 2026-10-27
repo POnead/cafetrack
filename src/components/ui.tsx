@@ -220,12 +220,16 @@ export function Modal({
   title,
   children,
   width = "max-w-lg",
+  scrollable = false,
+  footer,
 }: {
   open: boolean;
   onClose: () => void;
   title: string;
   children: ReactNode;
   width?: string;
+  scrollable?: boolean;
+  footer?: ReactNode;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -240,7 +244,11 @@ export function Modal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-cocoa-900/40 p-4 pt-16 backdrop-blur-[2px]">
-      <div className={`w-full ${width} card overflow-hidden !p-0 shadow-warm-lg`}>
+      <div
+        className={`w-full ${width} card overflow-hidden !p-0 shadow-warm-lg ${
+          scrollable ? "flex max-h-[calc(100dvh-5rem)] flex-col" : ""
+        }`}
+      >
         <div className="flex items-center justify-between border-b border-cream-200 bg-cream-50 px-5 py-3.5">
           <h3 className="text-sm font-bold text-cocoa-800">{title}</h3>
           <button
@@ -258,7 +266,14 @@ export function Modal({
             </svg>
           </button>
         </div>
-        <div className="p-5">{children}</div>
+        <div className={`p-5 ${scrollable ? "min-h-0 flex-1 overflow-y-auto" : ""}`}>
+          {children}
+        </div>
+        {footer && (
+          <div className="shrink-0 border-t border-cream-200 bg-white px-5 py-4">
+            {footer}
+          </div>
+        )}
       </div>
     </div>
   );

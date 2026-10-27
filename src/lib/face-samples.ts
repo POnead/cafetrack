@@ -21,7 +21,8 @@
  */
 import { db } from "./supabase";
 import {
-  DEFAULT_FACE_ENGINE,
+  DESCRIPTOR_VERSION,
+  LEGACY_ENGINE,
   FACE_POSES,
   PRIMARY_POSE,
   type FaceEngine,
@@ -30,6 +31,7 @@ import {
   type StoredFaceSample,
   formatEmbedding,
   matchPresentation,
+  parseDescriptorVersion,
   parseEngine,
   parsePose,
   parseStoredEmbedding,
@@ -43,6 +45,8 @@ export type FaceSample = {
   embedding: Float32Array;
   /** Which engine produced the vector. Cross-engine comparison is refused. */
   model: FaceEngine;
+  /** Which revision of the reader produced it. Cross-version comparison is refused. */
+  version: number;
   image: string | null;
   yawSignal: number | null;
   quality: number | null;
@@ -61,7 +65,7 @@ export type FaceSampleInput = {
   quality: number | null;
 };
 
-const COLUMNS = "pose, embedding, model, image, yaw_signal, quality, captured_at";
+const COLUMNS = "pose, embedding, model, descriptor_version, image, yaw_signal, quality, captured_at";
 
 function toNumberOrNull(value: unknown): number | null {
   const n = typeof value === "number" ? value : Number(value);
@@ -101,9 +105,13 @@ export async function loadFaceSamples(
     samples.push({
       pose,
       embedding,
-      // A row that predates the column, or holds something unrecognised, is
-      // legacy — that is what every vector written before the split actually is.
-      model: parseEngine(row.model) ?? DEFAULT_FACE_ENGINE,
+      /*
+       * A row whose model does not parse predates the column, so it is legacy —
+       * not `DEFAULT_FACE_ENGINE`, which is where a *new* install starts. The
+       * column default is 'legacy' too, so this only fires on corrupt data.
+       */
+      model: parseEngine(row.model) ?? LEGACY_ENGINE,
+      version: parseDescriptorVersion(row.descriptor_version),
       image: typeof row.image === "string" && row.image.startsWith("data:") ? row.image : null,
       yawSignal: toNumberOrNull(row.yaw_signal),
       quality: toNumberOrNull(row.quality),
@@ -118,7 +126,10 @@ export async function loadFaceSamples(
       samples.unshift({
         pose: PRIMARY_POSE,
         embedding: legacy,
-        model: DEFAULT_FACE_ENGINE,
+        // `users.face_embedding` is the pre-angles column. Whatever engine the
+        // cafe runs now, that vector was written by the legacy one.
+        model: LEGACY_ENGINE,
+        version: 1,
         image: null,
         yawSignal: null,
         quality: null,
@@ -142,32 +153,68 @@ export function toGallery(samples: readonly FaceSample[]): StoredFaceSample[] {
 }
 
 /**
- * The samples a check may compare against, given the engine in use.
+ * The samples a check may compare against, given the engine and reader version
+ * in use.
  *
  * Filtering here rather than inside the matcher is the point: a matcher that can
- * see samples from another engine can compare against them by accident, and the
- * result is a genuine person reported as a stranger.
+ * see samples from another engine — or from a reader that embedded the wrong
+ * thing — can compare against them by accident, and the result is a genuine
+ * person reported as a stranger.
  */
 export function galleryFor(
   samples: readonly FaceSample[],
-  engine: FaceEngine
+  engine: FaceEngine,
+  version: number = DESCRIPTOR_VERSION
 ): StoredFaceSample[] {
-  return toGallery(samples.filter((s) => s.model === engine));
+  return toGallery(samples.filter((s) => s.model === engine && s.version === version));
 }
 
 /**
- * Store this enrolment's angles, and drop any angle it did not include.
+ * Which of these accounts hold a sample the current engine and reader can use.
  *
- * The second half is not tidiness. An admin replacing a face may capture only
- * the straight-on photo — the screen allows it, and after a change of appearance
- * that is the normal thing to do. If the old left and right rows survived, the
- * account would keep requiring turned-head frames that belong to the *previous*
- * enrolment: every check would be compared against a face the person no longer
- * presents, and the screen would ask them to turn anyway. So a new enrolment
- * replaces the whole set, which is also what the capture screen shows.
+ * The roster asks one question — "who will be refused at the till?" — and this is
+ * the cheapest honest answer: one query for the whole list rather than one per
+ * person. An account with only the pre-angles `users.face_embedding` vector is
+ * absent from the table entirely, so it is absent from this set too, which is
+ * exactly the forced re-enrolment state.
+ *
+ * A sample from another engine, or from the old reader that embedded the whole
+ * frame, does not count: the comparison refuses it, so counting it here would
+ * show a green tick next to somebody who cannot sign in.
+ */
+export async function currentSampleUserIds(
+  userIds: readonly string[],
+  engine: FaceEngine,
+  version: number = DESCRIPTOR_VERSION
+): Promise<Set<string>> {
+  if (userIds.length === 0) return new Set();
+
+  const { data } = await db()
+    .from("user_face_samples")
+    .select("user_id, model, descriptor_version")
+    .in("user_id", [...userIds]);
+
+  const current = new Set<string>();
+  for (const row of (data ?? []) as Record<string, unknown>[]) {
+    if (typeof row.user_id !== "string") continue;
+    if ((parseEngine(row.model) ?? LEGACY_ENGINE) !== engine) continue;
+    if (parseDescriptorVersion(row.descriptor_version) !== version) continue;
+    current.add(row.user_id);
+  }
+  return current;
+}
+
+/**
+ * Store this enrolment's complete angle set, and drop any stale angles for the
+ * same engine.
+ *
+ * If the old left and right rows survived, the account would keep requiring
+ * turned-head frames that belong to the *previous* enrolment: every check would
+ * be compared against a face the person no longer presents. So a new enrolment
+ * replaces the whole set.
  *
  * A failed delete is reported rather than thrown, like a failed write: the
- * straight-on sample is already stored and the account works.
+ * straight-on face record is already stored.
  */
 export async function saveFaceSamples(
   userId: string,
@@ -181,6 +228,7 @@ export async function saveFaceSamples(
     pose: e.pose,
     embedding: formatEmbedding(e.embedding),
     model: e.model,
+    descriptor_version: DESCRIPTOR_VERSION,
     image: e.image,
     yaw_signal: e.yawSignal,
     quality: e.quality,
@@ -274,9 +322,16 @@ export async function evaluatePresentation(args: {
   requireProfileAngles: boolean;
   /** Only samples from this engine may be compared against. */
   engine: FaceEngine;
+  /**
+   * And only samples from this reader version. Defaults to the current one:
+   * a sample written by an older reader describes a different thing, even under
+   * the same model, and comparing across the two is what produces a wall of
+   * "not recognised" that nobody can explain.
+   */
+  version?: number;
 }): Promise<PresentationResult> {
   const samples = await loadFaceSamples(args.userId, args.legacyEmbedding);
-  const gallery = galleryFor(samples, args.engine);
+  const gallery = galleryFor(samples, args.engine, args.version ?? DESCRIPTOR_VERSION);
   const required = posesRequired(gallery, args.requireProfileAngles);
 
   const result = matchPresentation(args.frames, gallery, required, args.threshold);

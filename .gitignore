@@ -14,6 +14,9 @@ next-env.d.ts
 .pglite.manifest.json
 backups/
 .pglite.replaced/
+# A database that would not open, kept beside the live one until the restore is
+# trusted. Same size as .pglite, and nothing a clone needs.
+.pglite-corrupt-*/
 ui-screenshots/
 # The throwaway database and build dir used by `npm run dev:test`
 .pglite-test/
@@ -23,6 +26,11 @@ ui-screenshots/
 *.traineddata
 *.traineddata.gz
 .cache/
+
+# Photographs for `npm run probe:face`. Real faces: never committed. The README
+# explains the layout, and is the only file in the folder that belongs in git.
+face-probe-images/*
+!face-probe-images/README.md
 
 # Face model weights (~12MB), copied out of @vladmandic/face-api by
 # `npm run setup:face`. A build product, not source: committing them would put

@@ -216,7 +216,7 @@ export const POST = handler(async (req: Request) => {
   const frontFrame = frames?.find((f) => f.pose === PRIMARY_POSE)?.embedding ?? null;
 
   if (frames && faceUsable) {
-    const threshold = await getFaceMatchThreshold();
+    const threshold = await getFaceMatchThreshold(engine);
 
     /*
      * Straight-on only, on this screen, and that is a policy rather than an
@@ -246,7 +246,7 @@ export const POST = handler(async (req: Request) => {
    * The enrolled face is a live photograph; the ID card portrait is a printed
    * one. They are the same person but the distance between them is far larger
    * than between two live photographs, so this uses the ID match threshold
-   * (0.55) rather than the face match threshold (0.033).
+   * (0.55) rather than the face match threshold (0.05).
    *
    * The ID card embedding is computed in the browser from the stored image and
    * sent here — the server never runs the face model itself.

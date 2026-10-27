@@ -30,18 +30,29 @@ const CAPTURE_EDGE = 1600;
 /** JPEG quality. Matches the re-encode IdUpload already applies to files. */
 const CAPTURE_QUALITY = 0.82;
 
+export type IdCameraFacing = "rear" | "front" | "unknown";
+
+export type IdCameraChoice = {
+  deviceId: string;
+  label: string;
+  facing: IdCameraFacing;
+};
+
 /**
  * Ask for a camera pointed at the card.
  *
- * `facingMode: "environment"` first, then anything. The fallback is not
- * politeness: a laptop has one camera and reports it as whatever it likes, and
- * a device that cannot supply an "environment" camera would otherwise fail
- * outright rather than opening the one it has.
+ * Request an environment-facing camera exactly first. If the device has none,
+ * fall back to its default camera, but report its direction as unknown unless
+ * the browser can identify it. Enrollment still runs the local card-outline
+ * detector on that camera and requires the captured image to be reviewed.
  *
  * Constrained the same way the face capture is — a hand-held device at a card,
  * not a studio.
  */
-export async function openIdCamera(): Promise<MediaStream> {
+async function requestIdCamera(
+  deviceId?: string,
+  requireRear = false
+): Promise<{ stream: MediaStream; facing: IdCameraFacing }> {
   if (!navigator.mediaDevices?.getUserMedia) {
     throw new Error(
       "This browser will not open a camera here. The address has to start with https:// (or be localhost)."
@@ -52,12 +63,33 @@ export async function openIdCamera(): Promise<MediaStream> {
   // capture, which is deliberately modest so a cheap phone still copes.
   const size = { width: { ideal: 1600 }, height: { ideal: 1200 } };
 
-  try {
-    return await navigator.mediaDevices.getUserMedia({
+  if (deviceId) {
+    const stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
-      video: { ...size, facingMode: { ideal: "environment" } },
+      video: { ...size, deviceId: { exact: deviceId } },
     });
+    return { stream, facing: facingFromSettings(stream) };
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        ...size,
+        facingMode: requireRear ? { exact: "environment" } : { ideal: "environment" },
+      },
+    });
+    return {
+      stream,
+      facing: requireRear ? "rear" : facingFromSettings(stream),
+    };
   } catch (e) {
+    if (
+      e instanceof DOMException &&
+      ["NotAllowedError", "SecurityError"].includes(e.name)
+    ) {
+      throw e;
+    }
     /*
      * Retry with no camera hint before giving up.
      *
@@ -67,11 +99,49 @@ export async function openIdCamera(): Promise<MediaStream> {
      * attempt fails too, the original error is the informative one.
      */
     try {
-      return await navigator.mediaDevices.getUserMedia({ audio: false, video: size });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: size });
+      return { stream, facing: facingFromSettings(stream) };
     } catch {
       throw e;
     }
   }
+}
+
+/** Existing ID sign-in camera behavior. */
+export async function openIdCamera(): Promise<MediaStream> {
+  return (await requestIdCamera()).stream;
+}
+
+/** Strict rear-camera request used by ID enrollment. */
+export function openIdEnrollmentCamera(deviceId?: string): Promise<{
+  stream: MediaStream;
+  facing: IdCameraFacing;
+}> {
+  return requestIdCamera(deviceId, true);
+}
+
+function facingFromSettings(stream: MediaStream): IdCameraFacing {
+  const mode = stream.getVideoTracks()[0]?.getSettings().facingMode;
+  return mode === "environment" ? "rear" : mode === "user" ? "front" : "unknown";
+}
+
+function facingFromLabel(label: string): IdCameraFacing {
+  if (/\b(back|rear|environment)\b/i.test(label)) return "rear";
+  if (/\b(front|user|selfie)\b/i.test(label)) return "front";
+  return "unknown";
+}
+
+export async function listIdCameras(): Promise<IdCameraChoice[]> {
+  if (!navigator.mediaDevices?.enumerateDevices) return [];
+
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  return devices
+    .filter((device) => device.kind === "videoinput")
+    .map((device, index) => ({
+      deviceId: device.deviceId,
+      label: device.label || `Camera ${index + 1}`,
+      facing: facingFromLabel(device.label),
+    }));
 }
 
 /**

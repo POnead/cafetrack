@@ -33,7 +33,16 @@ insert into settings (key, value) values
   -- should not be tied to a timetable the cafe does not really keep.
   ('face_verification_enabled', '0'),
   ('face_duty_hours', '9'),
-  ('face_match_threshold', '0.033'),
+  ('face_match_threshold', '0.05'),
+  -- SFace's own threshold, and its own row.
+  --
+  -- A different key rather than a different value in the same one, because the
+  -- two engines are different vector spaces: legacy's useful band is a hundredth
+  -- wide, SFace's is nearer 0.1-1.2. Sharing a row would mean switching engines
+  -- silently applied a tolerance calibrated for a different model. The default is
+  -- SFACE_MATCH_THRESHOLD in lib/face.ts; `npm run probe:face` is what turns it
+  -- from OpenCV's guidance into a measured number.
+  ('face_match_threshold_sface', '0.637'),
   -- Signing in with a face instead of a password (staff only).
   --
   -- Off by default, and separate from face_verification_enabled on purpose: one
@@ -93,11 +102,16 @@ insert into settings (key, value) values
   -- What it does instead is report that the account needs re-enrolling, which is
   -- the honest state: switching engines invalidates every stored vector.
   --
-  -- Deliberately not exposed as a switch on the Settings page yet. The capture
-  -- screens still compute the legacy embedding, so flipping it would lock every
-  -- staff member out until their face was re-enrolled. It is stored and enforced
-  -- at matching time; the control arrives with the re-enrolment flow.
-  ('face_engine', 'legacy'),
+  -- SFace since the reader rework: YuNet detects, the five points are aligned to
+  -- the ArcFace reference and cropped, and only then is the 112x112 face embedded.
+  -- The legacy engine used to embed the whole webcam frame (see readFace in
+  -- lib/face-client.ts), which is why its measured band was impossibly tight.
+  --
+  -- Deliberately not exposed as a switch on the Settings page yet: a cafe with
+  -- existing legacy enrolments would lock its staff out until each was re-taken.
+  -- It is stored and enforced at matching time; the control arrives with the
+  -- re-enrolment flow.
+  ('face_engine', 'sface'),
   -- How close the portrait printed on the card and the photo of the person must
   -- be to count as the same person. Cosine distance, like every other threshold
   -- in this app, so lower is stricter — but see lib/id-verification/local.ts,
@@ -1478,6 +1492,16 @@ create table if not exists user_face_samples (
   -- bad camera. Matching filters on this column, which also makes a staged
   -- migration possible: old samples keep working until each person is re-enrolled.
   model       text not null default 'legacy',
+  -- Which revision of the reader produced `embedding`. Separate from `model`
+  -- because a reader can be wrong without the model changing — which is exactly
+  -- what happened: the original reader embedded the whole webcam frame instead
+  -- of the face, so every version-1 vector describes a room, not a person.
+  --
+  -- Defaults to 1 so every row written before this column existed is correctly
+  -- marked without a backfill. Matching filters on it, so a version bump is a
+  -- re-enrolment list rather than a silent wave of people who cannot get in.
+  -- See DESCRIPTOR_VERSION in lib/face.ts.
+  descriptor_version integer not null default 1,
   captured_at timestamptz not null default now(),
   -- Who took it. Same reasoning as users.face_enrolled_by: it is the first
   -- question asked when an account holds a face that does not work.
@@ -1497,6 +1521,13 @@ alter table user_face_samples enable row level security;
 -- engine column is also added explicitly. Installs that predate the two-engine
 -- split get 'legacy', which is what every stored vector in them actually is.
 alter table user_face_samples add column if not exists model text not null default 'legacy';
+
+-- Same reasoning for the reader version: every row already in the table was
+-- written by the original reader, so 1 is not a placeholder — it is the truth.
+-- A check only compares samples at DESCRIPTOR_VERSION (lib/face.ts), which means
+-- these rows stop matching when the cafe moves to the reworked reader, and the
+-- account shows up as needing re-enrolment instead of failing mysteriously.
+alter table user_face_samples add column if not exists descriptor_version integer not null default 1;
 
 -- The key widened from (user_id, pose) to (user_id, pose, model), so that a
 -- person can hold samples from both engines while their account is migrated.

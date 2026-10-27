@@ -52,6 +52,19 @@ const PUBLIC_PATHS = [
   // any account: "legacy" or "sface". It returns nothing else — no threshold, no
   // counts, no names — so there is nothing here to probe with.
   "/api/face/config",
+  /*
+   * The face measurement page (`npm run probe:face`).
+   *
+   * It has to be reachable without a session because the whole point is to run
+   * the models on a machine that may not be signed in, and because Playwright
+   * drives it before any login. It is not a hole: the page itself calls
+   * `notFound()` unless this is a dev build or `CAFETRACK_FACE_PROBE=1`, and the
+   * same condition gates this entry, so a production install without the flag
+   * gets the ordinary 404 and one with it has deliberately opted in.
+   */
+  ...(process.env.NODE_ENV !== "production" || process.env.CAFETRACK_FACE_PROBE === "1"
+    ? ["/dev/face-probe"]
+    : []),
 ];
 
 // Next 16 renamed the `middleware` file convention to `proxy`; the export is
@@ -125,7 +138,15 @@ export const config = {
   // loader, so an HTML body arrives as "no available backend found" and the
   // browser console says nothing about a sign-in page. Same class of mistake,
   // so it is excluded here rather than discovered later.
+  //
+  // `_next/hmr` (and its webpack-mode name) is the dev live-reload socket. It
+  // carries no application data, but it is fetched before anyone signs in — and
+  // a redirect to /login makes the websocket handshake fail. The page still
+  // renders, React then never hydrates, and every control on a public screen
+  // (the sign-in form, the face probe) silently does nothing. The matcher is
+  // deliberately narrow elsewhere so an RSC payload for a protected page is
+  // still gated; only the socket is excluded.
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|icon.svg|brand/|models/|onnx/).*)",
+    "/((?!_next/static|_next/image|_next/hmr|_next/webpack-hmr|favicon.ico|icon.svg|brand/|models/|onnx/).*)",
   ],
 };

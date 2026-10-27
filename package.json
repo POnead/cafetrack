@@ -24,6 +24,7 @@
     "test:pages": "node scripts/_pages.mjs",
     "test:journeys": "node scripts/_journeys.mjs",
     "test:ui": "node scripts/_ui.mjs",
+    "capture:ui": "node scripts/_capture-ui.mjs",
     "test:tour": "node scripts/_usertour.mjs",
     "test:face": "node scripts/_ts-node.mjs scripts/_face-math.mjs",
     "test:sface": "node scripts/_ts-node.mjs scripts/_face-sface-tests.mjs",
@@ -48,6 +49,7 @@
   "dependencies": {
     "@electric-sql/pglite": "^0.5.8",
     "@supabase/supabase-js": "^2.45.4",
+    "@techstark/opencv-js": "^5.0.0-release.1",
     "@tensorflow/tfjs": "^4.22.0",
     "@tensorflow/tfjs-backend-wasm": "^4.22.0",
     "@vladmandic/face-api": "^1.7.15",

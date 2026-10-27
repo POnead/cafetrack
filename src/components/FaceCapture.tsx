@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Capture a face for enrolment — three angles, in order.
+ * Capture a face for enrolment — three angles, in order, without a button.
  *
  * Straight on, then turned to the person's own left, then to their right. The
  * three are collected here rather than in three separate visits because the
@@ -17,17 +17,27 @@
  * them at the till is what makes a printed portrait held up to the camera fail.
  * See `matchPresentation` in lib/face.ts.
  *
+ * ## Automatic, like the check screens
+ *
+ * This screen used to be the last one asking for a button press, and the button
+ * was gated on a pose the person could not see. The result was a queue of admins
+ * turning their heads at a camera that said "not far enough" and gave them
+ * nothing to aim at. It now runs the same loop the till runs
+ * (`useAutoFaceCapture`): prompt, watch, read, flash, next angle. The manual
+ * "take it now" appears only after the loop gives up, which is the same fallback
+ * the check screens offer.
+ *
  * ## The pose is checked, not assumed
  *
  * A frame is filed under an angle only when the landmarks agree that the head is
- * turned that way (`poseFromSignal`), so a side slot cannot be filled with
+ * turned that way (`poseStateOfRead`), so a side slot cannot be filled with
  * another straight-on photo — the mistake an admin would make while holding a
  * queue. The signal is also sent with the photo so the server can refuse the same
  * mistake if the browser's copy of this is ever rewritten.
  *
  * ## Two ways in, as before
  *
- *   camera  — a live preview per angle, with the prompt for that angle on screen
+ *   camera  — a live preview, the guide, and the angles collected on their own
  *   file    — choose a photo for whichever angle is next
  *
  * Both produce the same thing: a small JPEG and a 128-float embedding, produced
@@ -50,7 +60,12 @@ import {
   permissionHelp,
   toJpegDataUrl,
 } from "@/lib/face-client";
-import { readFaceFor, useFaceEngine, type EngineRead } from "@/lib/face-engine";
+import {
+  poseStateOfRead,
+  readFaceFor,
+  useFaceEngine,
+  type EngineRead,
+} from "@/lib/face-engine";
 import {
   FACE_POSES,
   PRIMARY_POSE,
@@ -59,7 +74,6 @@ import {
   type FacePose,
   fileFrame,
   poseAlreadyHeld,
-  poseFromSignal,
   poseRefusal,
 } from "@/lib/face";
 import {
@@ -68,6 +82,10 @@ import {
   probeCamera,
   type CameraProblem,
 } from "@/lib/face-diagnostics";
+import { useFacePoses, type PoseFrame } from "@/lib/use-face-poses";
+import { useAutoFaceCapture } from "@/lib/use-auto-face-capture";
+import FaceCaptureGuide from "@/components/FaceCaptureGuide";
+import FaceScanOverlay from "@/components/FaceScanOverlay";
 
 /** One captured angle, ready to be sent to the server. */
 export type FaceShot = {
@@ -90,15 +108,15 @@ export type FaceShot = {
 };
 
 export type FaceCaptureResult = {
-  /** Whatever has been captured so far. The straight-on one is the required one. */
+  /** Whatever has been captured so far. All three poses are required to save. */
   shots: FaceShot[];
 };
 
 type Props = {
   /** Called every time the set changes, so a form can hold a partial enrolment. */
   onCapture: (result: FaceCaptureResult) => void;
-  /** Existing photo, to show as the current reference when replacing one. */
-  currentPhoto?: string | null;
+  /** Existing photos, keyed by pose, to show while replacing an enrolment. */
+  currentPhotos?: Partial<Record<FacePose, string | null>>;
   disabled?: boolean;
 };
 
@@ -106,16 +124,13 @@ type Phase =
   | "idle"
   | "checking-models"
   | "loading-models"
-  | "ready"
   | "camera"
   | "reading"
   | "no-camera"
   | "denied"
   | "models-missing";
 
-/** What the person is asked to do for each angle. One source for every screen. */
-
-export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props) {
+export default function FaceCapture({ onCapture, currentPhotos, disabled }: Props) {
   /*
    * Enrolment uses the same engine the cafe verifies with, always.
    *
@@ -134,19 +149,38 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
   const [activePose, setActivePose] = useState<FacePose>(PRIMARY_POSE);
   const [blocked, setBlocked] = useState<CameraProblem | null>(null);
 
+  /*
+   * The angles this camera session is collecting.
+   *
+   * Frozen when the camera opens, and null when it is closed. A retake collects
+   * one angle; a fresh enrolment collects whatever is missing. It has to be a
+   * snapshot rather than `missing`, because `missing` shrinks as frames land and
+   * the sequence would then consider itself complete early.
+   */
+  const [session, setSession] = useState<readonly FacePose[] | null>(null);
+
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+
+  /*
+   * The set as the last publish left it.
+   *
+   * The capture loop reads this from callbacks that fire between renders, so it
+   * cannot rely on the `shots` closure being current.
+   */
+  const shotsRef = useRef<Partial<Record<FacePose, FaceShot>>>({});
+  shotsRef.current = shots;
 
   /** The angles still missing, in capture order. */
   const missing = FACE_POSES.filter((pose) => !shots[pose]);
   const capturedPoses = FACE_POSES.filter((pose) => shots[pose]);
-  const frontCaptured = Boolean(shots[PRIMARY_POSE]);
 
   /* Anything that holds the camera open while the panel is closed would keep a
    * green privacy light on after someone thought they had stopped. */
   const stopCamera = useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
+    setSession(null);
   }, []);
 
   const attachStream = useCallback((node: HTMLVideoElement | null) => {
@@ -159,6 +193,73 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
   }, []);
 
   useEffect(() => stopCamera, [stopCamera]);
+
+  /** Publish the set upwards, in capture order. */
+  const publish = useCallback(
+    (next: Partial<Record<FacePose, FaceShot>>) => {
+      shotsRef.current = next;
+      setShots(next);
+      onCapture({ shots: FACE_POSES.map((pose) => next[pose]).filter(Boolean) as FaceShot[] });
+    },
+    [onCapture]
+  );
+
+  /*
+   * An angle landed while the camera was open.
+   *
+   * Published straight away rather than at the end of the set: someone can cancel
+   * after two angles, or close the dialog, and those two are still good. Waiting
+   * for `onComplete` would throw them away — and on a slow enrolment that is a
+   * minute of the admin's time.
+   */
+  const onFrame = useCallback(
+    (frame: PoseFrame, photo: string | null) => {
+      if (!photo) return;
+      publish({
+        ...shotsRef.current,
+        [frame.pose]: {
+          pose: frame.pose,
+          photo,
+          embedding: frame.embedding,
+          model: enrolmentEngine,
+          poseSignal: frame.poseSignal,
+          quality: frame.quality,
+        },
+      });
+    },
+    [publish, enrolmentEngine]
+  );
+
+  /*
+   * The sequence the loop drives. Separate from the file-upload path below: that
+   * one reads a still and needs no loop, and the two must not share frame state
+   * or a cancelled camera would leak into an upload.
+   */
+  const cameraPoses = useFacePoses(session ?? FACE_POSES);
+
+  /*
+   * Automatic capture. Once the camera is live the loop watches for a face, waits
+   * for the head to reach the angle being asked for, reads it, and moves on — no
+   * capture button while it is working. See use-auto-face-capture.
+   */
+  const scan = useAutoFaceCapture({
+    sequence: cameraPoses,
+    videoRef,
+    active: phase === "camera",
+    poses: session ?? FACE_POSES,
+    /*
+     * The photo is grabbed at the same instant as the embedding, so the JPEG and
+     * the 128 floats always describe the same frame.
+     */
+    capturePhoto: (video) =>
+      toJpegDataUrl(video, video.videoWidth || 640, video.videoHeight || 480),
+    onFrame,
+    onComplete: () => {
+      stopCamera();
+      setPhase("idle");
+      setMessage(null);
+    },
+  });
 
   /* Verify the weights are really there before asking for a camera. A missing
    * model discovered halfway through a capture has already made someone sit in
@@ -202,17 +303,8 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
     }
   }, []);
 
-  /** Publish the set upwards, in capture order. */
-  const publish = useCallback(
-    (next: Partial<Record<FacePose, FaceShot>>) => {
-      setShots(next);
-      onCapture({ shots: FACE_POSES.map((pose) => next[pose]).filter(Boolean) as FaceShot[] });
-    },
-    [onCapture]
-  );
-
   const openFor = useCallback(
-    async (pose: FacePose) => {
+    async (sessionPoses: readonly FacePose[]) => {
       setMessage(null);
       setBlocked(null);
 
@@ -229,7 +321,8 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
         return;
       }
 
-      setActivePose(pose);
+      setSession(sessionPoses);
+      setActivePose(sessionPoses[0] ?? PRIMARY_POSE);
       setPhase("checking-models");
       if (!(await warmUp())) return;
 
@@ -248,9 +341,15 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
   );
 
   const startCamera = useCallback(() => {
-    const next = missing[0] ?? PRIMARY_POSE;
-    void openFor(next);
+    void openFor(missing);
   }, [missing, openFor]);
+
+  const cancelCamera = useCallback(() => {
+    stopCamera();
+    setPhase("idle");
+    setMessage(null);
+    setActivePose(missing[0] ?? PRIMARY_POSE);
+  }, [stopCamera, missing]);
 
   const checkAgain = useCallback(async () => {
     setMessage(null);
@@ -270,35 +369,36 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
   /**
    * Turn one read into a stored angle, or say why it cannot be one.
    *
-   * Returns whether the frame was filed, and which angle is asked for next (null
-   * when the set is complete). The caller needs the second half to know whether
-   * to keep the camera open.
+   * Used by the file-upload path only; the camera path files frames through
+   * `useFacePoses`. Returns whether the frame was filed.
    */
   const accept = useCallback(
     (
       expected: FacePose,
       read: Extract<EngineRead, { ok: true }>,
       photo: string
-    ): { accepted: boolean; nextPose: FacePose | null } => {
-      const seen = poseFromSignal(read.poseSignal);
-      const held = FACE_POSES.filter((pose) => shots[pose]);
-      const filing = fileFrame({ expected, seen, held });
+    ): { accepted: boolean } => {
+      const state = poseStateOfRead(read);
+      const held = FACE_POSES.filter((pose) => shotsRef.current[pose]);
+      const filing = fileFrame({ expected, seen: state.pose, held });
 
       if (filing.kind === "turn-more") {
-        setMessage(poseRefusal(expected, null));
-        return { accepted: false, nextPose: null };
+        // Too far round, tilted, pitched, or between angles — and the refusal
+        // names which. See poseRefusal.
+        setMessage(poseRefusal(expected, state));
+        return { accepted: false };
       }
 
       if (filing.kind === "already-have") {
-        const missing = FACE_POSES.find((pose) => !held.includes(pose)) ?? null;
-        setMessage(poseAlreadyHeld(filing.pose, missing));
-        return { accepted: false, nextPose: null };
+        const left = FACE_POSES.find((pose) => !held.includes(pose)) ?? null;
+        setMessage(poseAlreadyHeld(filing.pose, left));
+        return { accepted: false };
       }
 
       // Filed under the angle the frame actually shows — normally the one asked
       // for, and sometimes the one next to it. See fileFrame.
       const next = {
-        ...shots,
+        ...shotsRef.current,
         [filing.pose]: {
           pose: filing.pose,
           photo,
@@ -311,45 +411,10 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
 
       publish(next);
       setMessage(null);
-
-      const nextMissing = FACE_POSES.filter((pose) => !next[pose]);
-      if (nextMissing.length === 0) {
-        stopCamera();
-        setPhase("idle");
-        return { accepted: true, nextPose: null };
-      }
-
-      setActivePose(nextMissing[0]);
-      return { accepted: true, nextPose: nextMissing[0] };
+      setActivePose(FACE_POSES.find((pose) => !next[pose]) ?? filing.pose);
+      return { accepted: true };
     },
-    [shots, publish, stopCamera, enrolmentEngine]
-  );
-
-  /** Take one frame and turn it into a photo plus an embedding. */
-  const grab = useCallback(
-    async (source: HTMLVideoElement, w: number, h: number) => {
-      setPhase("reading");
-      setMessage(null);
-      try {
-        const photo = toJpegDataUrl(source, w, h);
-        const read = await readFaceFor(enrolmentEngine, source);
-        if (!read.ok) {
-          setPhase("camera");
-          setMessage(read.message);
-          return;
-        }
-        const { accepted, nextPose } = accept(activePose, read, photo);
-        if (!accepted) {
-          setPhase("camera");
-          return;
-        }
-        setPhase(nextPose ? "camera" : "idle");
-      } catch {
-        setPhase("camera");
-        setMessage("That photo could not be read. Try again in better light.");
-      }
-    },
-    [accept, activePose, enrolmentEngine]
+    [publish, enrolmentEngine]
   );
 
   const onFile = useCallback(
@@ -410,14 +475,14 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
   const retake = useCallback(
     (pose: FacePose) => {
       // Drop the angle and ask for it again, without losing the others.
-      const next = { ...shots };
+      const next = { ...shotsRef.current };
       delete next[pose];
       publish(next);
       setActivePose(pose);
       setMessage(null);
-      if (phase !== "camera") void openFor(pose);
+      if (phase !== "camera") void openFor([pose]);
     },
-    [shots, publish, phase, openFor]
+    [publish, phase, openFor]
   );
 
   const pct =
@@ -427,19 +492,62 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
     phase === "checking-models" || phase === "loading-models" || phase === "reading";
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-start gap-2.5">
-        <span className="mt-0.5 shrink-0 text-cocoa-400">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-            <path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2" strokeLinecap="round" />
-            <circle cx="12" cy="12" r="3.2" />
-          </svg>
-        </span>
-        <p className="text-sm text-cocoa-600">
-          Three photos: straight on, then turned to their left, then their right.
-          The turned ones are what stop a printed photo being held up at the till,
-          so they are worth getting right.
-        </p>
+    <div className="space-y-5">
+      <div className="rounded-2xl border border-cream-200 bg-cream-50 p-4 sm:p-5">
+        <div className="mb-4">
+          <p className="text-sm font-semibold text-cocoa-800">Capture three views</p>
+          <p className="mt-1 text-xs leading-relaxed text-cocoa-500">
+            Capture the straight-on, left-turn, and right-turn views. All three
+            are required to save a face enrolment.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-3 gap-2 sm:gap-3">
+          {FACE_POSES.map((pose, index) => {
+            const shot = shots[pose];
+            const hasExistingPhoto = Boolean(currentPhotos?.[pose]);
+            const complete = Boolean(shot || hasExistingPhoto);
+            return (
+              <div
+                key={pose}
+                className={`min-w-0 rounded-xl border p-2.5 text-center sm:p-3 ${
+                  complete
+                    ? "border-sage-100 bg-white"
+                    : "border-cream-200 bg-white/70"
+                }`}
+              >
+                <div className="flex items-center justify-center gap-1.5">
+                  <span
+                    className={`flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-bold ${
+                      complete
+                        ? "bg-sage-500 text-white"
+                        : "bg-cream-200 text-cocoa-600"
+                    }`}
+                  >
+                    {complete ? "✓" : index + 1}
+                  </span>
+                  <span
+                    className="hidden rounded-full bg-ochre-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-cocoa-700 sm:inline"
+                  >
+                    Required
+                  </span>
+                </div>
+                <p className="mt-2 flex min-h-8 items-center justify-center text-[11px] font-semibold leading-tight text-cocoa-700 sm:text-xs">
+                  {POSE_COPY[pose].label}
+                </p>
+                <p className="mt-0.5 text-[10px] text-cocoa-400">
+                  {shot
+                    ? "Captured"
+                    : hasExistingPhoto
+                      ? "On file"
+                      : pose === missing[0]
+                        ? "Next"
+                        : "Required"}
+                </p>
+              </div>
+            );
+          })}
+        </div>
       </div>
 
       {phase === "models-missing" && (
@@ -454,7 +562,8 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
 
       {(phase === "denied" || phase === "no-camera") && (
         <div
-          className={`rounded-xl px-3.5 py-3 text-sm ${
+          role="status"
+          className={`rounded-2xl px-4 py-4 text-sm leading-relaxed ${
             phase === "denied"
               ? "bg-terracotta-50 text-terracotta-700"
               : "bg-amber-50 text-cocoa-700"
@@ -489,48 +598,86 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
       )}
 
       {phase === "camera" && (
-        <div className="space-y-2.5">
-          <div className="relative overflow-hidden rounded-2xl bg-cocoa-900">
-            <video
-              ref={attachStream}
-              playsInline
-              muted
-              autoPlay
-              className="mx-auto block w-full max-w-sm"
-            />
+        <div className="space-y-4">
+          <div className="overflow-hidden rounded-2xl bg-cocoa-900 p-2 sm:p-3">
+            {/*
+              The guide is positioned over the video's own box, not the panel's,
+              so its status and feedback stay anchored to the live preview.
+            */}
+            <div className="relative mx-auto aspect-[4/5] max-h-[min(65vh,36rem)] w-full max-w-sm overflow-hidden rounded-xl">
+              <video
+                ref={attachStream}
+                playsInline
+                muted
+                autoPlay
+                className="block h-full w-full object-cover"
+              />
+              {/* The loading screen for the angle being read. */}
+              {scan.phase === "scanning" && (
+                <FaceScanOverlay
+                  step={Math.min(scan.progress + 1, scan.total)}
+                  total={scan.total}
+                />
+              )}
+              {/* The live guide, until the loop hands over to the manual button. */}
+              {scan.phase === "prompt" && (
+                <FaceCaptureGuide
+                  poses={scan.poses}
+                  activePose={scan.activePose}
+                  done={scan.frames.map((f) => f.pose)}
+                  state={scan.liveState}
+                  holdProgress={scan.holdProgress}
+                  flashPose={scan.flashPose}
+                  message={scan.message}
+                />
+              )}
+            </div>
           </div>
-          <p className="text-center text-xs text-cocoa-500">
-            {POSE_COPY[activePose].instruction}
-          </p>
-          <div className="flex gap-2">
+
+          {scan.showManual && (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-relaxed text-cocoa-700">
+              <p className="font-semibold text-cocoa-800">{scan.message}</p>
+              <p className="mt-1">
+                The camera is not finding the angle on its own. You can take it
+                by hand, or keep scanning.
+              </p>
+            </div>
+          )}
+
+          <div className="grid gap-2 sm:grid-cols-2">
+            {scan.showManual && (
+              <>
+                <button
+                  type="button"
+                  className="btn-primary min-h-11"
+                  disabled={disabled}
+                  onClick={() => void scan.captureNow()}
+                >
+                  Take the {POSE_COPY[scan.activePose].short} photo
+                </button>
+                <button type="button" className="btn-ghost min-h-11" onClick={scan.resume}>
+                  Keep scanning
+                </button>
+              </>
+            )}
             <button
               type="button"
-              className="btn-primary flex-1"
-              disabled={disabled}
-              onClick={() => {
-                const v = videoRef.current;
-                if (v) void grab(v, v.videoWidth || 640, v.videoHeight || 480);
-              }}
-            >
-              Take the {POSE_COPY[activePose].short} photo
-            </button>
-            <button
-              type="button"
-              className="btn-ghost"
-              onClick={() => {
-                stopCamera();
-                setPhase("idle");
-                setActivePose(missing[0] ?? PRIMARY_POSE);
-              }}
+              className={`btn-ghost min-h-11 ${scan.showManual ? "" : "sm:col-span-2"}`}
+              onClick={cancelCamera}
             >
               Cancel
             </button>
           </div>
+
+          <p className="rounded-xl bg-cream-50 px-3.5 py-3 text-center text-xs leading-relaxed text-cocoa-500">
+            Nothing to press — each photo is taken on its own once the head is in
+            the position shown. Nothing is saved until all three are done.
+          </p>
         </div>
       )}
 
       {busy && (
-        <div className="rounded-xl bg-cream-50 px-3.5 py-3 text-sm text-cocoa-700">
+        <div className="rounded-2xl border border-cream-200 bg-cream-50 px-4 py-4 text-sm text-cocoa-700">
           <div className="flex items-center gap-2.5">
             <div className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-cream-200 border-t-ochre-400" />
             <div className="min-w-0 flex-1">
@@ -565,52 +712,49 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
         </div>
       )}
 
-      {message && (
+      {/* While the camera is open the guide already shows this, in the place the
+          person is looking. Below it would be the same sentence twice. */}
+      {message && phase !== "camera" && (
         <div className="rounded-xl bg-amber-50 px-3.5 py-2.5 text-sm text-cocoa-700">
           {message}
         </div>
       )}
 
-      {/* The three slots, always visible, so it is obvious what is done and what
-          is left. Clicking a filled one retakes just that angle. */}
-      {(capturedPoses.length > 0 || currentPhoto) && phase !== "camera" && (
-        <div className="grid grid-cols-3 gap-2">
-          {FACE_POSES.map((pose) => {
+      {/* Filled angles remain visible as photo previews; the step cards above
+          keep progress clear before and after capture. */}
+      {(capturedPoses.length > 0 || FACE_POSES.some((pose) => currentPhotos?.[pose])) &&
+        phase !== "camera" && (
+        <div className="grid grid-cols-3 gap-2.5">
+          {FACE_POSES.filter((pose) => shots[pose] || currentPhotos?.[pose]).map((pose) => {
             const shot = shots[pose];
+            const photo = shot?.photo ?? currentPhotos?.[pose];
+            if (!photo) return null;
             return (
-              <div key={pose} className="rounded-xl border border-cream-200 bg-cream-50 p-1.5">
-                {shot ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={shot.photo}
-                    alt={`The ${POSE_COPY[pose].short} photo`}
-                    className="h-20 w-full rounded-lg object-cover"
-                  />
-                ) : pose === PRIMARY_POSE && currentPhoto ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={currentPhoto}
-                    alt="The straight-on photo already on file"
-                    className="h-20 w-full rounded-lg object-cover opacity-60"
-                  />
-                ) : (
-                  <div className="flex h-20 w-full items-center justify-center rounded-lg border border-dashed border-cream-300 text-[11px] text-cocoa-400">
-                    Not taken
-                  </div>
-                )}
-                <p className="mt-1 text-center text-[11px] font-semibold text-cocoa-600">
-                  {POSE_COPY[pose].label}
-                </p>
-                {shot && (
-                  <button
-                    type="button"
-                    className="mt-0.5 w-full text-center text-[11px] text-cocoa-500 underline"
-                    disabled={disabled}
-                    onClick={() => retake(pose)}
-                  >
-                    Retake
-                  </button>
-                )}
+              <div
+                key={pose}
+                className="overflow-hidden rounded-xl border border-cream-200 bg-white p-1.5"
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={photo}
+                  alt={`The ${POSE_COPY[pose].short} photo`}
+                  className="aspect-square w-full rounded-lg object-cover"
+                />
+                <div className="flex items-center justify-between gap-1 px-1 pt-2">
+                  <span className="truncate text-[10px] font-semibold text-cocoa-600">
+                    {POSE_COPY[pose].label}
+                  </span>
+                  {shot && (
+                    <button
+                      type="button"
+                      className="shrink-0 text-[10px] font-semibold text-cocoa-500 underline"
+                      disabled={disabled}
+                      onClick={() => retake(pose)}
+                    >
+                      Retake
+                    </button>
+                  )}
+                </div>
               </div>
             );
           })}
@@ -618,37 +762,38 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
       )}
 
       {(phase === "idle" || phase === "no-camera" || phase === "denied") && (
-        <div className="space-y-3">
-          <div className="grid gap-2 sm:grid-cols-2">
-            {cameraAvailable() ? (
-              <button
-                type="button"
-                className="btn-primary"
-                disabled={disabled}
-                onClick={startCamera}
-              >
-                {missing.length === FACE_POSES.length
-                  ? "Take the photos"
-                  : `Take the ${POSE_COPY[activePose].short} photo`}
-              </button>
-            ) : (
-              <label className="btn-primary inline-flex cursor-pointer items-center justify-center">
-                Take the photos
-                <input
-                  type="file"
-                  accept="image/jpeg,image/png,image/webp"
-                  capture="user"
-                  className="sr-only"
+        <div className="space-y-4">
+          <div className="grid gap-2.5 sm:grid-cols-2">
+            {missing.length > 0 &&
+              (cameraAvailable() ? (
+                <button
+                  type="button"
+                  className="btn-primary min-h-12"
                   disabled={disabled}
-                  onChange={(e) => {
-                    void onFile(e.target.files?.[0]);
-                    e.target.value = "";
-                  }}
-                />
-              </label>
-            )}
+                  onClick={startCamera}
+                >
+                  {capturedPoses.length === 0
+                    ? "Take the photos"
+                    : `Take the ${POSE_COPY[missing[0]].short} photo`}
+                </button>
+              ) : (
+                <label className="btn-primary inline-flex min-h-12 cursor-pointer items-center justify-center">
+                  Take the photos
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    capture="user"
+                    className="sr-only"
+                    disabled={disabled}
+                    onChange={(e) => {
+                      void onFile(e.target.files?.[0]);
+                      e.target.value = "";
+                    }}
+                  />
+                </label>
+              ))}
 
-            <label className="btn-ghost inline-flex cursor-pointer items-center justify-center">
+            <label className="btn-ghost inline-flex min-h-12 cursor-pointer items-center justify-center">
               Upload a photo
               <input
                 type="file"
@@ -663,20 +808,17 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
             </label>
           </div>
 
-          {/* Only offered when the straight-on photo exists: it is the one the
-              system cannot work without. */}
-          {frontCaptured && missing.length > 0 && (
-            <p className="text-[11px] text-cocoa-500">
-              You can save with the straight-on photo alone — the account will be
-              checked on that one. The turned photos are what make the check
-              stronger, so add them when you can.
+          {capturedPoses.length > 0 && missing.length > 0 && (
+            <p className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-3 text-xs leading-relaxed text-cocoa-700">
+              All three views are required. Capture the {POSE_COPY[missing[0]].short}
+              {missing.length > 1 ? " and remaining views" : " view"} before saving.
             </p>
           )}
 
           {!cameraAvailable() && (
-            <div className="rounded-xl bg-amber-50 px-3.5 py-2.5 text-xs text-cocoa-700">
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3.5 text-sm leading-relaxed text-cocoa-700">
               <p className="font-semibold text-cocoa-800">{captureHint()}</p>
-              <p className="mt-1">{cameraUnavailableReason()}</p>
+              <p className="mt-1.5">{cameraUnavailableReason()}</p>
             </div>
           )}
         </div>
@@ -684,7 +826,3 @@ export default function FaceCapture({ onCapture, currentPhoto, disabled }: Props
     </div>
   );
 }
-
-
-
-

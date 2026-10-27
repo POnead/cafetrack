@@ -9,8 +9,16 @@ import {
   describeCameraProblem,
   type CameraProblem,
 } from "@/lib/face-diagnostics";
-import { captureIdFrame, openIdCamera } from "@/lib/id-camera";
+import {
+  captureIdFrame,
+  listIdCameras,
+  openIdCamera,
+  openIdEnrollmentCamera,
+  type IdCameraChoice,
+  type IdCameraFacing,
+} from "@/lib/id-camera";
 import { fingerprintFromCanvas } from "@/lib/card-fingerprint";
+import { useAutoIdCapture } from "@/lib/use-auto-id-capture";
 
 /**
  * Attach a government ID and a photo of the person, and send both up.
@@ -203,9 +211,18 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
   const [camSlot, setCamSlot] = useState<Slot | null>(null);
   const [camBlocked, setCamBlocked] = useState<CameraProblem | null>(null);
   const [camBusy, setCamBusy] = useState(false);
+  const [camFacing, setCamFacing] = useState<IdCameraFacing>("unknown");
+  const [camDevices, setCamDevices] = useState<IdCameraChoice[]>([]);
+  const [activeCameraId, setActiveCameraId] = useState("");
+  const [pendingFront, setPendingFront] = useState<{ file: File; preview: string } | null>(null);
 
   const camVideoRef = useRef<HTMLVideoElement | null>(null);
   const camStreamRef = useRef<MediaStream | null>(null);
+
+  useEffect(() => {
+    if (!pendingFront) return;
+    return () => URL.revokeObjectURL(pendingFront.preview);
+  }, [pendingFront]);
 
   /*
    * Attach the stream to the video element as it mounts.
@@ -373,7 +390,7 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
 
   /** Open the camera for one slot, closing whatever was open before. */
   const startCam = useCallback(
-    async (slot: Slot) => {
+    async (slot: Slot, deviceId?: string) => {
       setNote(null);
       setCamBlocked(null);
 
@@ -390,8 +407,34 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
       setCamSlot(slot);
 
       try {
-        const stream = await openIdCamera();
+        const result =
+          slot === "front"
+            ? await openIdEnrollmentCamera(deviceId)
+            : { stream: await openIdCamera(), facing: "unknown" as const };
+        const stream = result.stream;
         camStreamRef.current = stream;
+        if (slot === "front") {
+          const track = stream.getVideoTracks()[0];
+          const selectedDeviceId = track?.getSettings().deviceId ?? deviceId ?? "";
+          setActiveCameraId(selectedDeviceId);
+          setCamFacing(result.facing);
+          try {
+            const devices = await listIdCameras();
+            setCamDevices(devices);
+            if (result.facing === "unknown") {
+              setCamFacing(
+                devices.find((camera) => camera.deviceId === selectedDeviceId)?.facing ??
+                  "unknown"
+              );
+            }
+          } catch (error) {
+            setNote(
+              error instanceof Error
+                ? `Available cameras could not be listed: ${error.message}`
+                : "Available cameras could not be listed."
+            );
+          }
+        }
         // The <video> mounts because camSlot changed; attachCamStream runs on
         // that mount and picks the stream up.
         attachCamStream(camVideoRef.current);
@@ -404,6 +447,16 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
       }
     },
     [attachCamStream, stopCam]
+  );
+
+  const switchCamera = useCallback(
+    async (deviceId: string) => {
+      if (!deviceId || deviceId === activeCameraId) return;
+      camStreamRef.current?.getTracks().forEach((track) => track.stop());
+      camStreamRef.current = null;
+      await startCam("front", deviceId);
+    },
+    [activeCameraId, startCam]
   );
 
   /**
@@ -448,6 +501,31 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
     },
     [readFaces, revoke]
   );
+
+  const acceptCameraFront = useCallback(
+    async (file: File) => {
+      stopCam();
+      setPendingFront({ file, preview: URL.createObjectURL(file) });
+    },
+    [stopCam]
+  );
+
+  const idScanner = useAutoIdCapture({
+    videoRef: camVideoRef,
+    active: camSlot === "front" && !camBlocked && !camBusy,
+    onCapture: acceptCameraFront,
+  });
+
+  const confirmFrontCapture = useCallback(async () => {
+    if (!pendingFront) return;
+    await pick("front", pendingFront.file);
+    setPendingFront(null);
+  }, [pendingFront, pick]);
+
+  const retakeFrontCapture = useCallback(() => {
+    setPendingFront(null);
+    void startCam("front", activeCameraId || undefined);
+  }, [activeCameraId, startCam]);
 
   // Publish only when the selection actually differs from what was last handed
   // up, so the parent's state is not replaced on every unrelated render.
@@ -532,15 +610,36 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
   }, [files.front]);
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
       {(Object.keys(SLOT_COPY) as Slot[]).map((slot) => (
-        <div key={slot}>
-          <label className="label" htmlFor={`id-${slot}`}>
-            {SLOT_COPY[slot].label}
-            {!SLOT_COPY[slot].required && (
-              <span className="ml-1 font-normal text-cocoa-400">(optional)</span>
-            )}
-          </label>
+        <section
+          key={slot}
+          aria-labelledby={`id-${slot}-label`}
+          className={`rounded-2xl border p-3.5 sm:p-4 ${
+            slot === "front"
+              ? "border-ochre-300 bg-ochre-50/50"
+              : "border-cream-200 bg-white"
+          }`}
+        >
+          <div className="mb-3 flex items-start justify-between gap-3">
+            <div>
+              <h3 id={`id-${slot}-label`} className="text-sm font-semibold text-cocoa-800">
+                {SLOT_COPY[slot].label}
+              </h3>
+              <p className="mt-0.5 text-[11px] leading-snug text-cocoa-500">
+                {SLOT_COPY[slot].hint}
+              </p>
+            </div>
+            <span
+              className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-semibold ${
+                SLOT_COPY[slot].required
+                  ? "bg-ochre-100 text-ochre-800"
+                  : "bg-cream-100 text-cocoa-500"
+              }`}
+            >
+              {SLOT_COPY[slot].required ? "Required" : "Optional"}
+            </span>
+          </div>
 
           {/*
             The live preview, for whichever slot has its camera open.
@@ -557,13 +656,13 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
             too, for browsers that ignore autoplay on a stream.
           */}
           {camSlot === slot && (
-            <div className="relative mb-2 overflow-hidden rounded-xl bg-cocoa-900">
+            <div className="relative mb-3 overflow-hidden rounded-2xl bg-cocoa-900">
               <video
                 ref={attachCamStream}
                 playsInline
                 muted
                 autoPlay
-                className="mx-auto block w-full max-w-sm"
+                className="mx-auto block max-h-72 w-full object-contain"
               />
 
               {/*
@@ -575,9 +674,9 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
               */}
               <div
                 aria-hidden="true"
-                className="pointer-events-none absolute inset-0 flex items-center justify-center p-3"
+                className="pointer-events-none absolute inset-0 flex items-center justify-center p-5"
               >
-                <div className="aspect-[1.59/1] w-full max-w-[15rem] rounded-lg border-2 border-dashed border-cream-100/60" />
+                <div className="aspect-[1.59/1] w-[88%] max-w-[21rem] rounded-xl border-2 border-dashed border-cream-100/80 shadow-[0_0_0_999px_rgba(22,18,14,0.28)]" />
               </div>
 
               {camBlocked && (
@@ -587,6 +686,112 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
                   </p>
                 </div>
               )}
+            </div>
+          )}
+
+          {slot === "front" && camSlot === "front" && !camBlocked && camDevices.length > 1 && (
+            <label className="mb-3 flex items-center gap-2 text-xs text-cocoa-600">
+              Camera
+              <select
+                aria-label="ID camera"
+                className="min-w-0 flex-1 rounded-lg border border-cream-300 bg-white px-2.5 py-2"
+                value={activeCameraId}
+                disabled={camBusy}
+                onChange={(event) => void switchCamera(event.target.value)}
+              >
+                <option value="">Select a camera</option>
+                {camDevices.map((camera) => (
+                  <option key={camera.deviceId} value={camera.deviceId}>
+                    {camera.label}
+                    {camera.facing === "rear" ? " (rear)" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+
+          {slot === "front" &&
+            camSlot === "front" &&
+            !camBlocked &&
+            !camBusy &&
+            camFacing !== "rear" && (
+            <p
+              className="mb-3 rounded-xl border border-cream-200 bg-cream-50 px-3.5 py-3 text-xs leading-relaxed text-cocoa-700"
+            >
+              Automatic scanning is active on this camera. It waits for a card-shaped outline and a
+              steady frame; you will review the photo before it can be used.
+            </p>
+          )}
+
+          {slot === "front" && pendingFront && (
+            <div className="mb-3 rounded-xl border border-ochre-200 bg-white p-3.5">
+              <p className="text-sm font-semibold text-cocoa-800">Review the ID photo</p>
+              <p className="mt-1 text-xs leading-relaxed text-cocoa-500">
+                Make sure this shows the whole ID card, not your face. It will not be added until
+                you confirm.
+              </p>
+              <div className="mt-3 overflow-hidden rounded-lg bg-cocoa-900">
+                <img
+                  src={pendingFront.preview}
+                  alt="Captured ID photo pending confirmation"
+                  className="max-h-64 w-full object-contain"
+                />
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className="btn-primary !px-3 !py-1.5 text-xs"
+                  disabled={disabled || reading}
+                  onClick={() => void confirmFrontCapture()}
+                >
+                  Use this ID
+                </button>
+                <button
+                  type="button"
+                  className="btn-ghost !px-3 !py-1.5 text-xs"
+                  disabled={disabled}
+                  onClick={retakeFrontCapture}
+                >
+                  Retake
+                </button>
+              </div>
+            </div>
+          )}
+
+          {slot === "front" && camSlot === "front" && !camBlocked && (
+            <div className="mb-3 rounded-xl border border-cream-200 bg-white px-3.5 py-3">
+              <div className="flex items-center gap-2">
+                <span
+                  aria-hidden="true"
+                  className={`h-2.5 w-2.5 shrink-0 rounded-full ${
+                    idScanner.phase === "capturing"
+                      ? "animate-pulse bg-ochre-500"
+                      : idScanner.phase === "hold"
+                        ? "bg-green-600"
+                        : "bg-cocoa-300"
+                  }`}
+                />
+                <p role="status" aria-live="polite" className="text-xs font-medium text-cocoa-700">
+                  {idScanner.message}
+                </p>
+              </div>
+              <div
+                className="mt-2 h-1.5 overflow-hidden rounded-full bg-cream-100"
+                role="progressbar"
+                aria-label="ID steadiness"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(idScanner.holdProgress * 100)}
+              >
+                <div
+                  className="h-full rounded-full bg-ochre-500 transition-[width] duration-200"
+                  style={{ width: `${Math.round(idScanner.holdProgress * 100)}%` }}
+                />
+              </div>
+              <p className="mt-2 text-[10px] leading-snug text-cocoa-400">
+                The scanner checks for a card-shaped outline, then straightens it for reading. You
+                must confirm every camera photo. Scanning does not verify that an ID is genuine.
+              </p>
             </div>
           )}
 
@@ -604,18 +809,20 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
             </div>
           )}
 
-          <div className="flex items-start gap-3">
-            <div className="h-20 w-28 shrink-0 overflow-hidden rounded-xl border border-cream-200 bg-cream-100">
+          <div className="grid grid-cols-[6rem_minmax(0,1fr)] items-start gap-3 sm:grid-cols-[8rem_minmax(0,1fr)]">
+            <div className="flex aspect-[1.59/1] w-24 items-center justify-center overflow-hidden rounded-xl border border-cream-200 bg-cream-100 sm:w-32">
               {previews[slot] ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
                   src={previews[slot]}
                   alt={`Preview of ${SLOT_COPY[slot].label}`}
-                  className="h-full w-full object-cover"
+                  className={`h-full w-full ${
+                    slot === "photo" ? "object-cover" : "object-contain"
+                  }`}
                 />
               ) : (
-                <span className="flex h-full w-full items-center justify-center text-[10px] text-cocoa-400">
-                  No image
+                <span className="flex h-full w-full items-center justify-center px-1 text-center text-[10px] text-cocoa-400">
+                  Not captured
                 </span>
               )}
             </div>
@@ -642,7 +849,7 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
                 type="file"
                 accept="image/*"
                 capture="environment"
-                disabled={disabled || camSlot === slot}
+                disabled={disabled || camSlot === slot || (slot === "front" && !!pendingFront)}
                 onChange={(e) => void pick(slot, e.target.files?.[0])}
                 className="block w-full text-xs text-cocoa-600 file:mr-2 file:rounded-lg file:border-0 file:bg-cream-100 file:px-2.5 file:py-1.5 file:text-xs file:font-semibold file:text-cocoa-700"
               />
@@ -654,9 +861,17 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
                       type="button"
                       className="btn-primary !px-3 !py-1 text-xs"
                       disabled={disabled || camBusy}
-                      onClick={() => void shoot()}
+                      onClick={() =>
+                        slot === "front"
+                          ? void idScanner.captureManually()
+                          : void shoot()
+                      }
                     >
-                      {camBusy ? "Taking…" : "Take the picture"}
+                      {camBusy
+                        ? "Taking…"
+                        : slot === "front"
+                          ? "Capture manually"
+                          : "Take the picture"}
                     </button>
                     <button
                       type="button"
@@ -673,7 +888,7 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
                     disabled={disabled || camSlot !== null}
                     onClick={() => void startCam(slot)}
                   >
-                    Use camera
+                    {files[slot] ? "Retake with camera" : "Use camera"}
                   </button>
                 )}
 
@@ -688,10 +903,9 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
                   </button>
                 )}
               </div>
-              <p className="text-[11px] leading-snug text-cocoa-400">{SLOT_COPY[slot].hint}</p>
             </div>
           </div>
-        </div>
+        </section>
       ))}
 
       {reading && <p className="text-[11px] text-cocoa-500">Looking for the face on the card…</p>}

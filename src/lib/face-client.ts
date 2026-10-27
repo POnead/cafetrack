@@ -5,6 +5,7 @@
  * the capture side and the matching side agree on one definition of "turned".
  */
 import { headTurnSignal } from "./face";
+import { CANONICAL_68, estimateHeadPose, type HeadPose } from "./head-pose";
 
 /**
  * The face model, in the browser.
@@ -330,6 +331,12 @@ export type FaceRead =
        * match is. See headTurnSignal.
        */
       poseSignal: number | null;
+      /**
+       * The same pose as a real angle, in degrees. This is what the capture gate
+       * reads; `poseSignal` is kept because stored samples recorded it and the
+       * diagnostics page still shows it.
+       */
+      headPose: HeadPose | null;
       /** Which detector pass found the face, for diagnosing "it cannot see me". */
       detector: "ssd" | "tiny-320" | "tiny-512";
       /** Mean luminance of the frame, 0-255, or null if it could not be sampled. */
@@ -343,23 +350,39 @@ export type FaceRead =
       message: string;
     };
 
+/** A face located in a frame, with the light it was found in. */
+export type DetectOutcome =
+  | {
+      ok: true;
+      models: FaceModels;
+      detection: any;
+      detector: "ssd" | "tiny-320" | "tiny-512";
+      brightness: number | null;
+    }
+  | { ok: false; reason: "no-face" | "too-dark"; message: string };
+
 /**
- * Read one face from an image element or video frame.
+ * Find a face in a frame, without computing a descriptor.
  *
- * Runs the full chain — detect, find landmarks, compute the descriptor — because
- * the descriptor is only comparable if the face was aligned the same way it was
- * at enrolment. Skipping the landmarks step makes everything look almost right and
- * match nothing.
+ * Split out of `readFace` because the automatic scanner needs it on a loop:
+ * looking for a face is cheap, and turning that face into a 128-float vector is
+ * not. A scanner that ran the whole chain every 120ms would spend most of its
+ * time computing embeddings for frames it is about to throw away.
  *
- * Detection and landmarks go through face-api's top-level exported functions
- * rather than methods on `nets.tinyFaceDetector`. That instance is not a
- * detection API in this build: its prototype chain carries no `detectSingleFace`
- * at all, so calling it threw "models.tinyFaceDetector.detectSingleFace is not a
- * function". `faceapi.detectSingleFace` is the supported entry point and works.
- * The instance method is still used if it happens to exist, so a future build
- * that restores it is not a downgrade.
+ * The whole chain still shares this one function, so the scanner sees exactly
+ * what a capture would see — the same detectors in the same order, the same
+ * brightness floor. A scan gate that disagreed with the capture about whether a
+ * face is present would flash "captured" at frames the capture then refuses.
+ *
+ * Detection goes through face-api's top-level exported functions rather than
+ * methods on `nets.tinyFaceDetector`. That instance is not a detection API in
+ * this build: its prototype chain carries no `detectSingleFace` at all, so
+ * calling it threw "models.tinyFaceDetector.detectSingleFace is not a function".
+ * `faceapi.detectSingleFace` is the supported entry point and works. The instance
+ * method is still used if it happens to exist, so a future build that restores it
+ * is not a downgrade.
  */
-export async function readFace(source: any): Promise<FaceRead> {
+export async function detectFace(source: any): Promise<DetectOutcome> {
   const models = await loadFaceModels();
   const faceapi = models.faceapi;
 
@@ -458,19 +481,92 @@ export async function readFace(source: any): Promise<FaceRead> {
     };
   }
 
+  return { ok: true, models, detection, detector: usedDetector, brightness };
+}
+
+/** A face located and measured, without a descriptor. The scanner's input. */
+export type FaceOnlyRead =
+  | {
+      ok: true;
+      /** Head-turn proxy, from the 68 landmarks. See headTurnSignal. */
+      poseSignal: number | null;
+      /** The same pose in degrees; see lib/head-pose.ts. */
+      headPose: HeadPose | null;
+      detector: "ssd" | "tiny-320" | "tiny-512";
+      brightness: number | null;
+      box: { x: number; y: number; width: number; height: number };
+      score: number;
+    }
+  | {
+      ok: false;
+      reason: "no-face" | "too-dark" | "low-confidence";
+      message: string;
+    };
+
+/**
+ * The 68 landmarks for a face that has already been located.
+ *
+ * ## Why this crops first
+ *
+ * The landmark net was trained on tight 128x128 face crops. Handed a whole
+ * 640x480 webcam frame it still returns 68 points — but they describe a vague
+ * average face near the middle of the image, not the person in front of the
+ * camera. Those points then drive the pose gate and the alignment, so every
+ * downstream decision is made on the wrong face.
+ *
+ * face-api's own `DetectFaceLandmarksTask` crops to the detection box before
+ * running the net (`node_modules/@vladmandic/face-api/src/globalApi/DetectFaceLandmarksTasks.ts:70-75`),
+ * and `extendWithFaceLandmarks` shifts the points back into frame coordinates.
+ * That is what this does. The alternative — `detectSingleFace(...).withFaceLandmarks()` —
+ * would also be correct, but it re-runs detection and loses the SSD/tiny-320/tiny-512
+ * escalation ladder that `detectFace` exists to provide.
+ */
+async function landmarksFor(
+  models: FaceModels,
+  source: any,
+  detection: any
+): Promise<any | null> {
+  const faceapi = models.faceapi;
+
+  const faces = await faceapi.extractFaces(source, [detection]);
+  const crop = faces?.[0];
+  if (!crop) return null;
+
   // Landmarks take FaceLandmark68NetOptions, a different type, so none are passed
   // and the net's own defaults apply. The detector's options were never meant for
   // it in the first place.
-  const callLandmarks = (input: any): Promise<any> =>
+  const unshifted =
     typeof faceapi.detectFaceLandmarks === "function"
-      ? faceapi.detectFaceLandmarks(input)
-      : models.faceLandmark68Net.detectFaceLandmarks(input);
+      ? await faceapi.detectFaceLandmarks(crop)
+      : await models.faceLandmark68Net.detectFaceLandmarks(crop);
+  if (!unshifted) return null;
 
-  const landmarks = await callLandmarks(source);
-  // No landmarks means the detector saw something face-shaped that the landmark
-  // net rejected. Embedding it anyway would produce a vector that compares badly
-  // against every real enrolment, so it is refused rather than accepted.
-  if (!landmarks) {
+  // `extendWithFaceLandmarks` returns `{ ...detection, landmarks, alignedRect, angle }`
+  // with the points moved from crop coordinates back into frame coordinates.
+  return faceapi.extendWithFaceLandmarks({ detection }, unshifted);
+}
+
+/**
+ * Locate a face and measure its turn — deliberately without a descriptor.
+ *
+ * This is what the automatic scanner runs on a loop: it answers "is there a face
+ * here, and is it the angle I asked for", which is the question a scan gate needs,
+ * at a fraction of the cost of a capture. The recognition net is the expensive
+ * part of the chain, and a scanner that ran it every 120ms would spend nearly all
+ * its time producing vectors for frames it was about to throw away.
+ *
+ * The landmarks are still computed, because the pose is what the gate checks;
+ * skipping them would make the scanner agree to capture frames the capture would
+ * then refuse for having no pose at all.
+ */
+export async function detectFaceOnly(source: any): Promise<FaceOnlyRead> {
+  const found = await detectFace(source);
+  if (!found.ok) return found;
+
+  const { models, detection, detector, brightness } = found;
+
+  const located = await landmarksFor(models, source, detection);
+  if (!located) {
     return {
       ok: false,
       reason: "low-confidence",
@@ -478,7 +574,81 @@ export async function readFace(source: any): Promise<FaceRead> {
     };
   }
 
-  const descriptor = await models.faceRecognitionNet.computeFaceDescriptor(source, landmarks);
+  /*
+   * `landmarks.positions` is the raw iBUG array both pose readers expect. It is
+   * read defensively: face-api has shipped this both as a property and as the
+   * instance's own indexed points, and a pose that cannot be established reads
+   * as null rather than as a guess — a guessed pose files a sample under the
+   * wrong angle, which is worse than no sample.
+   */
+  const points = (located.landmarks as any)?.positions ?? (located.landmarks as any)?._positions;
+
+  return {
+    ok: true,
+    poseSignal: headTurnSignal(points),
+    headPose: estimateHeadPose(points, CANONICAL_68),
+    detector,
+    brightness,
+    box: detection.box,
+    score: detection.score,
+  };
+}
+
+/**
+ * Read one face from an image element or video frame.
+ *
+ * Runs the full chain — detect, crop, find landmarks, align, embed — because the
+ * descriptor is only comparable if the face was aligned the same way it was at
+ * enrolment.
+ *
+ * ## What was wrong before
+ *
+ * The descriptor used to be computed from `source`, the whole frame. The call was
+ * `computeFaceDescriptor(source, landmarks)`, but the net takes **one** argument
+ * (`FaceRecognitionNet.computeFaceDescriptor(input: TNetInput)`), so the landmarks
+ * were silently dropped and the net letterboxed the entire 640x480 scene into
+ * 150x150 and embedded that. Two captures of one person then sat 0.03 apart and
+ * two different people 0.04 apart, because both were embeddings of the room.
+ *
+ * The fix is the same shape as the landmark fix: extract the dlib-aligned face
+ * box from the frame first, and embed *that*.
+ */
+export async function readFace(source: any): Promise<FaceRead> {
+  const found = await detectFace(source);
+  if (!found.ok) return found;
+
+  const { models, detection, detector: usedDetector, brightness } = found;
+  const faceapi = models.faceapi;
+
+  const located = await landmarksFor(models, source, detection);
+  // No landmarks means the detector saw something face-shaped that the landmark
+  // net rejected. Embedding it anyway would produce a vector that compares badly
+  // against every real enrolment, so it is refused rather than accepted.
+  if (!located) {
+    return {
+      ok: false,
+      reason: "low-confidence",
+      message: "That face could not be read clearly. Try again, facing the camera straight on.",
+    };
+  }
+
+  /*
+   * The alignment face-api's own descriptor task uses. `useDlibAlignment` is the
+   * five-point similarity fit the recognition net was trained against; the
+   * default min-bbox alignment is for display, not for descriptors.
+   */
+  const alignedBox = located.landmarks.align(null, { useDlibAlignment: true });
+  const alignedFaces = await faceapi.extractFaces(source, [alignedBox]);
+  const aligned = alignedFaces?.[0];
+  if (!aligned) {
+    return {
+      ok: false,
+      reason: "low-confidence",
+      message: "That face could not be read clearly. Try again in better light.",
+    };
+  }
+
+  const descriptor = await models.faceRecognitionNet.computeFaceDescriptor(aligned);
   if (!descriptor) {
     return {
       ok: false,
@@ -487,22 +657,13 @@ export async function readFace(source: any): Promise<FaceRead> {
     };
   }
 
-  /*
-   * The head turn, from the same 68 points the descriptor was aligned with.
-   *
-   * `landmarks.positions` is the raw iBUG array headTurnSignal expects. It is
-   * read defensively: face-api has shipped this both as a property and as the
-   * instance's own indexed points, and a pose that cannot be established reads
-   * as null rather than as a guess — a guessed pose files a sample under the
-   * wrong angle, which is worse than no sample.
-   */
-  const points = (landmarks as any)?.positions ?? (landmarks as any)?._positions;
-  const poseSignal = headTurnSignal(points);
+  const points = (located.landmarks as any)?.positions ?? (located.landmarks as any)?._positions;
 
   return {
     ok: true,
     embedding: Array.from(descriptor),
-    poseSignal,
+    poseSignal: headTurnSignal(points),
+    headPose: estimateHeadPose(points, CANONICAL_68),
     detector: usedDetector,
     brightness,
     box: detection.box,

@@ -40,8 +40,9 @@
  * detection scores it produced (0.894, 0.882, 0.876, 0.868, 0.845, 0.839, 0.603)
  * match the ones drawn on that image exactly.
  */
-import { cosineDistance } from "./face";
+import { cosineDistance, SFACE_MATCH_THRESHOLD } from "./face";
 import { frameBrightness } from "./face-client";
+import { CANONICAL_5, estimateHeadPose, type HeadPose } from "./head-pose";
 
 /* ------------------------------------------------------------- constants -- */
 
@@ -66,24 +67,28 @@ export const SFACE_INPUT = 112;
 /** Floats in an SFace embedding. Same count as the old model, different space. */
 export const SFACE_LENGTH = 128;
 
+/** SFace outputs are not unit length; cosine matching only needs their direction. */
+export function normalizeSfaceEmbedding(embedding: readonly number[]): number[] | null {
+  if (
+    embedding.length !== SFACE_LENGTH ||
+    embedding.some((value) => !Number.isFinite(value))
+  ) {
+    return null;
+  }
+
+  const norm = Math.hypot(...embedding);
+  if (norm === 0 || !Number.isFinite(norm)) return null;
+  return embedding.map((value) => value / norm);
+}
+
 /**
  * How far apart two SFace embeddings may be, by cosine distance.
  *
- * **Provisional, and deliberately conservative.** Measured on one photograph of
- * eight people — the target and a group — the genuine pair sat at 0.308 while
- * several different people sat between 0.14 and 0.35. That image cannot settle a
- * threshold: the group faces are 40 pixels wide, and at that size the descriptor
- * is dominated by pose and light rather than by who the person is. What it does
- * show is that the scale is nothing like the old model's 0.033 — an ArcFace-family
- * threshold lives near 0.6 — so carrying the old number across would refuse
- * everybody.
- *
- * The number is therefore set where OpenCV's own guidance puts it (cosine
- * similarity 0.363, i.e. distance 0.637) rather than where this measurement puts
- * it, because the honest conclusion is "measure on real captures". It must be
- * re-measured from till-quality enrolments before this engine gates a shift.
+ * Re-exported from lib/face.ts so the server-side settings reader can clamp the
+ * same number without importing this module — which pulls in onnxruntime and is
+ * browser-only. The reasoning lives beside the constant.
  */
-export const SFACE_MATCH_THRESHOLD = 0.637;
+export { SFACE_MATCH_THRESHOLD } from "./face";
 
 /** ArcFace five-point reference for a 112x112 crop: eyes, nose, mouth corners. */
 export const ARCFACE_REFERENCE: readonly { x: number; y: number }[] = [
@@ -388,13 +393,14 @@ export function loadSfaceEngine(): Promise<Engine> {
     const ort: any = await import("onnxruntime-web");
     ort.env.wasm.numThreads = 1;
     /*
-     * Warnings off, errors on.
+     * Warnings off, errors on — for the JavaScript logger.
      *
      * Both models declare their weights as graph inputs, so onnxruntime emits
-     * several hundred "Initializer ... appears in graph inputs" warnings while
-     * the sessions are created. They are true, harmless, and unactionable without
-     * re-exporting the models — and in a dev build they raise the Next.js error
-     * overlay over a screen that is working perfectly.
+     * 144 "Initializer ... appears in graph inputs" warnings while the sessions
+     * are created. They are true, harmless, and unactionable without re-exporting
+     * the models. Those particular lines come from the C++ logger, which this
+     * setting does not reach; see `logSeverityLevel` on the session options below.
+     * This one covers everything the JS layer itself prints.
      */
     ort.env.logLevel = "error";
 
@@ -418,6 +424,20 @@ export function loadSfaceEngine(): Promise<Engine> {
       // runs on whatever tablet the cafe already owns.
       executionProviders: ["wasm"],
       graphOptimizationLevel: "all",
+      /*
+       * Error, not warning — and this is the setting that actually does it.
+       *
+       * `env.logLevel` above only governs the JavaScript logger. The 144
+       * "Initializer ... appears in graph inputs" lines come from the C++
+       * logger inside the wasm build, whose severity is `logSeverityLevel` on
+       * the session, and whose default is 2 (warning). So they arrived anyway:
+       * a dev build counted them as issues and put the error overlay over a
+       * perfectly working enrolment screen, and a real error would have been
+       * 145th in a wall of harmless ones.
+       *
+       * 3 is `error`, so genuine failures still surface.
+       */
+      logSeverityLevel: 3,
     };
 
     const [detector, recogniser] = await Promise.all([
@@ -450,15 +470,105 @@ export function resetSfaceEngine(): void {
   loading = null;
 }
 
-/** Draw a source into a canvas at the given square size and read its pixels. */
-function pixelsAt(source: CanvasImageSource, size: number): ImageData {
+/**
+ * How a source was placed into the detector's square input.
+ *
+ * Kept as a value rather than four loose numbers because both readers have to
+ * undo exactly the same transform, and getting one of the two wrong is how the
+ * landmarks end up describing a face that is not there.
+ */
+type Letterbox = {
+  data: ImageData;
+  /** Model pixels per source pixel. One per axis, and equal but for rounding. */
+  scaleX: number;
+  scaleY: number;
+  /** Where the source's top-left corner landed inside the square. */
+  padX: number;
+  padY: number;
+};
+
+/** The neutral grey used for the letterbox bars. */
+const LETTERBOX_FILL = 114;
+
+/**
+ * Fit a source into the detector's square input without distorting it.
+ *
+ * ## Why this is not a resize
+ *
+ * This used to be `drawImage(source, 0, 0, 640, 640)` — a stretch. A 4:3 webcam
+ * frame reached the detector squashed horizontally by a third, a 16:9 one by
+ * nearly half. YuNet's landmark head was trained on faces at their real
+ * proportions, so it answered with points describing the *stretched* face — and
+ * the stretch is not uniform. It moves the nose against the eyes, which is
+ * precisely the measurement the head-turn decision is built on.
+ *
+ * Measured on one photograph of one face, changing nothing but the frame it was
+ * pasted into: yaw -0.7° in a square frame, +9.2° at 4:3, -31.2° at 2:1. The head
+ * had not moved. A 640x480 camera therefore carried about nine degrees of phantom
+ * turn into every reading and a 16:9 one more than that — enough to refuse a
+ * straight-on face, to file a frontal frame as a side angle, and to hand SFace an
+ * alignment computed from points in the wrong places.
+ *
+ * Letterboxing preserves the face's own proportions: one scale for both axes,
+ * with the leftover space padded. The fill is the neutral grey the detection
+ * literature uses, which introduces no edge of its own.
+ */
+function letterbox(source: CanvasImageSource, size: number): Letterbox {
+  const sourceW = sourceWidth(source);
+  const sourceH = sourceHeight(source);
+  const scale = Math.min(size / sourceW, size / sourceH);
+  const drawW = Math.max(1, Math.round(sourceW * scale));
+  const drawH = Math.max(1, Math.round(sourceH * scale));
+  const padX = Math.floor((size - drawW) / 2);
+  const padY = Math.floor((size - drawH) / 2);
+
   const canvas = document.createElement("canvas");
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (!ctx) throw new Error("This browser cannot read the camera image");
-  ctx.drawImage(source, 0, 0, size, size);
-  return ctx.getImageData(0, 0, size, size);
+  ctx.fillStyle = `rgb(${LETTERBOX_FILL}, ${LETTERBOX_FILL}, ${LETTERBOX_FILL})`;
+  ctx.fillRect(0, 0, size, size);
+  ctx.drawImage(source, padX, padY, drawW, drawH);
+
+  return {
+    data: ctx.getImageData(0, 0, size, size),
+    // The drawn size, not the requested scale: rounding moves a pixel or two, and
+    // the mapping back has to agree with what was actually drawn.
+    scaleX: drawW / sourceW,
+    scaleY: drawH / sourceH,
+    padX,
+    padY,
+  };
+}
+
+/** A landmark or box coordinate in the square input, mapped back to the source. */
+function fromLetterbox(frame: Letterbox, x: number, y: number) {
+  return {
+    x: (x - frame.padX) / frame.scaleX,
+    y: (y - frame.padY) / frame.scaleY,
+  };
+}
+
+/**
+ * A detection box in the square input, mapped back to source coordinates.
+ *
+ * One function for both readers: the two used to carry their own copy of this
+ * arithmetic, and the copy that was missed during the letterbox change is exactly
+ * how the box ends up describing a different part of the frame from the
+ * landmarks.
+ */
+function boxFromLetterbox(
+  frame: Letterbox,
+  detection: { x1: number; y1: number; x2: number; y2: number }
+): { x: number; y: number; width: number; height: number } {
+  const topLeft = fromLetterbox(frame, detection.x1, detection.y1);
+  return {
+    x: topLeft.x,
+    y: topLeft.y,
+    width: (detection.x2 - detection.x1) / frame.scaleX,
+    height: (detection.y2 - detection.y1) / frame.scaleY,
+  };
 }
 
 /**
@@ -494,6 +604,18 @@ export type SfaceRead =
       embedding: number[];
       /** Head-turn proxy from the five points; see headTurnSignal5. */
       poseSignal: number | null;
+      /**
+       * Head pose in degrees, from the same five points. This is the number the
+       * capture gate reads — `poseSignal` stays for the stored samples that
+       * recorded it and for diagnostics.
+       */
+      headPose: HeadPose | null;
+      /**
+       * The five landmarks in source coordinates, in ArcFace order. Exposed so
+       * the capture guide can draw on the face and so the measurement harness
+       * can check detection against a photograph.
+       */
+      points: { x: number; y: number }[];
       /** Which detector found it — there is only one here, but callers log it. */
       detector: "yunet";
       brightness: number | null;
@@ -523,11 +645,11 @@ export async function readFaceSface(source: CanvasImageSource): Promise<SfaceRea
 
   const { detector, recogniser, ort } = await loadSfaceEngine();
 
-  const detectionInput = pixelsAt(source, YUNET_INPUT);
+  const frame = letterbox(source, YUNET_INPUT);
   const outputs = await detector.run({
     input: new ort.Tensor(
       "float32",
-      toNchw(detectionInput.data, 4, YUNET_INPUT, { bgr: true }),
+      toNchw(frame.data.data, 4, YUNET_INPUT, { bgr: true }),
       [1, 3, YUNET_INPUT, YUNET_INPUT]
     ),
   });
@@ -546,18 +668,15 @@ export async function readFaceSface(source: CanvasImageSource): Promise<SfaceRea
   /*
    * Back to source coordinates.
    *
-   * Two scales, not one: the detection frame is square, so a 16:9 video is
-   * stretched to fill it and the x and y mappings differ. Using the width for
-   * both puts every landmark progressively further up the frame the further it
-   * is from the origin — which produces a plausible-looking crop of the wrong
-   * part of the face.
+   * One scale for both axes, minus the letterbox offset. This is the inverse of
+   * what `letterbox` did, and it is the only mapping that keeps a square in the
+   * source square in the model — see the note there for what the two-scale
+   * version did to the head-turn reading.
    */
   const sourceW = sourceWidth(source);
   const sourceH = sourceHeight(source);
-  const scaleX = sourceW / YUNET_INPUT;
-  const scaleY = sourceH / YUNET_INPUT;
 
-  const points = best.points.map((p) => ({ x: p.x * scaleX, y: p.y * scaleY }));
+  const points = best.points.map((p) => fromLetterbox(frame, p.x, p.y));
 
   const full = document.createElement("canvas");
   full.width = sourceW;
@@ -587,23 +706,21 @@ export async function readFaceSface(source: CanvasImageSource): Promise<SfaceRea
   const embeddingOut = await recogniser.run({
     [recogniser.inputNames[0]]: cropInput,
   });
-  const embedding = Array.from(
+  const embedding = normalizeSfaceEmbedding(Array.from(
     (embeddingOut[recogniser.outputNames[0]] as TensorLike).data
-  ) as number[];
+  ));
+  if (!embedding) throw new Error("SFace returned an invalid face embedding");
 
   return {
     ok: true,
     embedding,
     poseSignal: headTurnSignal5(points),
+    headPose: estimateHeadPose(points, CANONICAL_5),
+    points,
     detector: "yunet",
     brightness,
     score: best.score,
-    box: {
-      x: best.x1 * scaleX,
-      y: best.y1 * scaleY,
-      width: (best.x2 - best.x1) * scaleX,
-      height: (best.y2 - best.y1) * scaleY,
-    },
+    box: boxFromLetterbox(frame, best),
   };
 }
 
@@ -616,6 +733,68 @@ function sourceWidth(source: CanvasImageSource): number {
 function sourceHeight(source: CanvasImageSource): number {
   const anySource = source as any;
   return anySource.videoHeight || anySource.naturalHeight || anySource.height || YUNET_INPUT;
+}
+
+/**
+ * Locate a face with YuNet alone — deliberately without running SFace.
+ *
+ * This is what the automatic scanner calls on a loop. YuNet is a 98KB model and
+ * answers in tens of milliseconds; SFace is a 9.4MB model and answers slower, and
+ * its answer is only wanted for the one frame the gate decides to keep. A scanner
+ * that embedded every frame would be paying the expensive half of the chain for
+ * frames it was about to throw away.
+ */
+export async function detectSfaceOnly(source: CanvasImageSource): Promise<SfaceRead> {
+  const brightness = frameBrightness(source);
+  if (brightness !== null && brightness < 35) {
+    return {
+      ok: false,
+      reason: "too-dark",
+      message:
+        "It is too dark to read a face. Move somewhere with more light on your face — " +
+        "a window or a lamp in front of you, not behind.",
+    };
+  }
+
+  const { detector, recogniser, ort } = await loadSfaceEngine();
+  // The recogniser is loaded by the same call, which is fine — the scanner runs
+  // before the first capture, and both sessions are needed within seconds anyway.
+
+  const frame = letterbox(source, YUNET_INPUT);
+  const outputs = await detector.run({
+    input: new ort.Tensor(
+      "float32",
+      toNchw(frame.data.data, 4, YUNET_INPUT, { bgr: true }),
+      [1, 3, YUNET_INPUT, YUNET_INPUT]
+    ),
+  });
+
+  const candidates = nonMaximumSuppression(decodeYunet(outputs as Record<string, TensorLike>));
+  if (candidates.length === 0) {
+    return {
+      ok: false,
+      reason: "no-face",
+      message: "No face found. Face the camera, in even light, with nothing covering your face.",
+    };
+  }
+
+  const best = candidates[0];
+  const points = best.points.map((p) => fromLetterbox(frame, p.x, p.y));
+
+  return {
+    ok: true,
+    embedding: [],
+    // Deliberately empty: this read did not run SFace. The type carries the field
+    // so both readers share one shape, and an empty array is the honest version of
+    // "there is no vector here" — a caller that used it would fail loudly.
+    poseSignal: headTurnSignal5(points),
+    headPose: estimateHeadPose(points, CANONICAL_5),
+    points,
+    detector: "yunet",
+    brightness,
+    score: best.score,
+    box: boxFromLetterbox(frame, best),
+  };
 }
 
 /**

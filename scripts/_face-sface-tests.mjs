@@ -18,15 +18,18 @@
 import {
   ARCFACE_REFERENCE,
   SFACE_INPUT,
+  SFACE_MATCH_THRESHOLD,
   YUNET_INPUT,
   YUNET_SCORE_THRESHOLD,
   alignCrop,
   decodeYunet,
   headTurnSignal5,
   isSfaceMatch,
+  normalizeSfaceEmbedding,
   nonMaximumSuppression,
   similarityTransform,
 } from "../src/lib/face-sface.ts";
+import { DEFAULT_MATCH_THRESHOLD, parseEmbedding } from "../src/lib/face.ts";
 
 let pass = 0;
 let fail = 0;
@@ -367,14 +370,23 @@ const b = unit(8);
 check("an embedding matches itself", isSfaceMatch(a, a));
 check("two unrelated embeddings do not", !isSfaceMatch(a, b));
 
-// The documented danger of a model swap: the old model's threshold is 0.033.
+section("normalizeSfaceEmbedding — output accepted by the shared parser");
+
+const rawSface = new Array(128).fill(0.25);
+const normalizedSface = normalizeSfaceEmbedding(rawSface);
+check("normalizes model output to unit length", normalizedSface !== null &&
+  Math.abs(Math.hypot(...normalizedSface) - 1) < 1e-12);
+check("normalized output passes the shared embedding parser", parseEmbedding(normalizedSface) !== null);
+check("wrong-sized model output is refused", normalizeSfaceEmbedding([1, 2]) === null);
+check("a zero model output is refused", normalizeSfaceEmbedding(new Array(128).fill(0)) === null);
+
+// The documented danger of a model swap: the legacy threshold is 0.05.
 check(
-  "the SFace threshold is nowhere near the old model's 0.033",
-  Math.abs(0.033 - 0.637) > 0.5,
-  "carrying 0.033 across would refuse every enrolled person"
+  "the SFace threshold is nowhere near the legacy threshold",
+  Math.abs(DEFAULT_MATCH_THRESHOLD - SFACE_MATCH_THRESHOLD) > 0.5,
+  `carrying ${DEFAULT_MATCH_THRESHOLD} across would refuse every enrolled person`
 );
 
 console.log(`\n${"-".repeat(46)}`);
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
-

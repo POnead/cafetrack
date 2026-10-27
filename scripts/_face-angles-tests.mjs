@@ -157,6 +157,20 @@ if (!cookie) {
 const uniq = Date.now().toString(36);
 const created = [];
 
+/*
+ * Pin the engine for this suite, and put back whatever the cafe had.
+ *
+ * The app's default is SFace now, and an enrolment that names no model is stored
+ * as the current engine. The suite needs a known engine for both the enrolments
+ * and the checks, and it exercises legacy and SFace side by side further down, so
+ * it sets the engine explicitly per section rather than inheriting whatever a
+ * previous run left behind. Without this, a run after a legacy section would
+ * enrol SFace vectors and then check them against an empty legacy gallery.
+ */
+const configBefore = await (await fetch(`${BASE}/api/face/config`)).json();
+const originalEngine = configBefore?.engine === "legacy" ? "legacy" : "sface";
+await call("PATCH", "/api/settings", { face_engine: "sface" }, cookie);
+
 async function makeStaff(label) {
   const r = await call(
     "POST",
@@ -180,7 +194,7 @@ const legacyUser = await makeStaff("angle1");
 const frontOnlyUser = await makeStaff("anglef");
 const strangerUser = await makeStaff("angles");
 
-section("enrolment — three angles");
+section("enrolment — all three angles are required");
 
 const enrolled = await upload(
   `/api/users/${triUser}/face`,
@@ -199,6 +213,13 @@ check(
   JSON.stringify(enrolled.data?.angles)
 );
 check("the account is now enrolled", enrolled.data?.user?.face_enabled === true);
+const staffList = await call("GET", "/api/users", undefined, cookie);
+const listedAngles = staffList.data?.users?.find((user) => user.id === triUser)?.face_poses;
+check(
+  "the staff list reports all stored photo angles",
+  JSON.stringify(listedAngles) === JSON.stringify(["front", "left", "right"]),
+  JSON.stringify(listedAngles)
+);
 
 section("enrolment — a frame filed under the wrong angle is refused");
 
@@ -210,6 +231,7 @@ const wrongAngle = await upload(
   faceForm({
     front: [PERSON, 0],
     left: [PERSON, 0],
+    right: [PERSON, -0.32],
   }),
   cookie
 );
@@ -225,18 +247,19 @@ check(
   (await call("GET", `/api/users/${frontOnlyUser}/face?pose=left`, undefined, cookie)).status !== 200
 );
 
-// The same account, enrolled properly with the straight-on photo only.
+// A straight-on photo by itself cannot create a partial enrolment.
 const frontOnly = await upload(
   `/api/users/${frontOnlyUser}/face`,
   faceForm({ front: [PERSON, 0] }),
   cookie
 );
-check("a straight-on photo on its own is accepted", frontOnly.status === 200, `${frontOnly.status}`);
+check("a straight-on photo without side views is rejected", frontOnly.status === 400);
 check(
-  "and the account reports one angle",
-  JSON.stringify(frontOnly.data?.angles) === JSON.stringify(["front"]),
-  JSON.stringify(frontOnly.data?.angles)
+  "the missing left-turn photo is named",
+  /left-turn/i.test(frontOnly.data?.error ?? ""),
+  frontOnly.data?.error ?? ""
 );
+check("an incomplete enrolment does not enable face verification", frontOnly.data?.user?.face_enabled !== true);
 
 section("the stored photos are served per angle");
 
@@ -319,41 +342,46 @@ check("a different person is refused", strangerFrames.status === 401, `${strange
 section("re-enrolment — the previous angles do not survive it");
 
 /*
- * Replacing a face with a straight-on photo only is a normal thing to do after a
- * change of appearance. If the old side rows survived, the account would keep
- * requiring turned-head frames captured from a face that no longer exists — so
- * the new enrolment replaces the whole set.
+ * Replacing a face requires a new complete set. Old side rows must not survive
+ * alongside a new front photo or describe a face the person no longer presents.
  */
 const reEnrol = await upload(
   `/api/users/${otherUser}/face`,
-  faceForm({ front: [PERSON, 0] }),
+  faceForm({ front: [PERSON, 0], left: [PERSON, 0.32], right: [PERSON, -0.32] }),
   cookie
 );
-check("a new straight-on photo is accepted", reEnrol.status === 200, `${reEnrol.status}`);
+check("a new three-angle set is accepted", reEnrol.status === 200, `${reEnrol.status}`);
 check(
-  "and the account now reports one angle",
-  JSON.stringify(reEnrol.data?.angles) === JSON.stringify(["front"]),
+  "and the account reports all three angles",
+  JSON.stringify(reEnrol.data?.angles) === JSON.stringify(["front", "left", "right"]),
   JSON.stringify(reEnrol.data?.angles)
 );
 
 const staleSide = await fetch(`${BASE}/api/users/${otherUser}/face?pose=left`, {
   headers: { cookie },
 });
-check("the previous left-turn photo is gone", staleSide.status === 404, `${staleSide.status}`);
+check("the replacement left-turn photo is available", staleSide.status === 200, `${staleSide.status}`);
 
 const afterReEnrol = await call(
   "POST",
   "/api/auth/face-login",
-  { identifier: `anglem${uniq}`, face_frames: [frame("front", PERSON)] },
+  {
+    identifier: `anglem${uniq}`,
+    face_frames: [
+      frame("front", PERSON),
+      frame("left", PERSON),
+      frame("right", PERSON),
+    ],
+  },
   undefined
 );
 check(
-  "and the account is checked on one frame again",
+  "and the replacement enrolment is checked against all three angles",
   afterReEnrol.status === 200,
   `${afterReEnrol.status} ${afterReEnrol.data?.error ?? ""}`
 );
 
-section("matching — the legacy single frame still works");
+section("enrolment — legacy single-angle uploads are rejected");
 
 const legacyEnrol = await upload(
   `/api/users/${legacyUser}/face`,
@@ -365,11 +393,11 @@ const legacyEnrol = await upload(
   })(),
   cookie
 );
-check("an old-style enrolment is accepted", legacyEnrol.status === 200, `${legacyEnrol.status} ${legacyEnrol.data?.error ?? ""}`);
+check("an old-style single-angle upload is rejected", legacyEnrol.status === 400, `${legacyEnrol.status} ${legacyEnrol.data?.error ?? ""}`);
 check(
-  "and reports the one angle",
-  JSON.stringify(legacyEnrol.data?.angles) === JSON.stringify(["front"]),
-  JSON.stringify(legacyEnrol.data?.angles)
+  "and requires the left-turn photo",
+  /left-turn/i.test(legacyEnrol.data?.error ?? ""),
+  legacyEnrol.data?.error ?? ""
 );
 
 const legacyLogin = await call(
@@ -379,8 +407,8 @@ const legacyLogin = await call(
   undefined
 );
 check(
-  "and an old-style single frame still signs that account in",
-  legacyLogin.status === 200,
+  "an account without a complete enrolment cannot sign in",
+  legacyLogin.status === 401,
   `${legacyLogin.status} ${legacyLogin.data?.error ?? ""}`
 );
 
@@ -395,10 +423,16 @@ section("engines — a vector from another engine is never comparable");
 const crossUser = await makeStaff("anglee");
 await upload(
   `/api/users/${crossUser}/face`,
-  faceForm({ front: [PERSON, 0, "sface"] }),
+  faceForm({
+    front: [PERSON, 0, "sface"],
+    left: [PERSON, 0.32, "sface"],
+    right: [PERSON, -0.32, "sface"],
+  }),
   cookie
 );
 
+// The cafe has to be on legacy for this to be a cross-engine check at all.
+await call("PATCH", "/api/settings", { face_engine: "legacy" }, cookie);
 const crossProbe = await call(
   "POST",
   "/api/auth/face-login",
@@ -410,6 +444,7 @@ check(
   crossProbe.status === 401,
   `${crossProbe.status}`
 );
+await call("PATCH", "/api/settings", { face_engine: "sface" }, cookie);
 
 section("migration — an account can hold both engines at once");
 
@@ -423,7 +458,11 @@ section("migration — an account can hold both engines at once");
 const bothUser = await makeStaff("angleb");
 await upload(
   `/api/users/${bothUser}/face`,
-  faceForm({ front: [PERSON, 0], left: [PERSON, 0.32], right: [PERSON, -0.32] }),
+  faceForm({
+    front: [PERSON, 0, "legacy"],
+    left: [PERSON, 0.32, "legacy"],
+    right: [PERSON, -0.32, "legacy"],
+  }),
   cookie
 );
 const secondEnrol = await upload(
@@ -441,6 +480,10 @@ check(
   JSON.stringify(secondEnrol.data?.angles) === JSON.stringify(["front", "left", "right"]),
   JSON.stringify(secondEnrol.data?.angles)
 );
+
+// The cafe is on SFace for the enrolments above; the legacy rows are what the
+// next check is about, so switch the engine to legacy first.
+await call("PATCH", "/api/settings", { face_engine: "legacy" }, cookie);
 
 const stillLegacy = await call(
   "POST",
@@ -463,9 +506,11 @@ const afterSwitch = await call(
   },
   undefined
 );
-await call("PATCH", "/api/settings", { face_engine: "legacy" }, cookie);
 
 check("and the new engine works once the cafe switches", afterSwitch.status === 200, `${afterSwitch.status}`);
+// Put the cafe back the way it was found, not on whichever engine this suite
+// happened to finish with.
+await call("PATCH", "/api/settings", { face_engine: originalEngine }, cookie);
 
 section("revoking removes every angle");
 

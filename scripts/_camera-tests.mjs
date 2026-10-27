@@ -109,6 +109,8 @@ try {
   await idPage.waitForTimeout(1500);
 
   // Open the account's details, then the ID modal.
+  const creationDetailsClose = idPage.getByRole("button", { name: "Close" });
+  if (await creationDetailsClose.count()) await creationDetailsClose.first().click();
   await idPage.getByRole("button", { name: /^view$/i }).first().click();
   await idPage.waitForTimeout(400);
   const verifyBtn = idPage.getByRole("button", { name: /verify id|replace id/i }).first();
@@ -164,12 +166,18 @@ try {
       );
       check("the video has a live stream attached", state.hasStream);
 
-      // Capture, and prove the File travelled the same path a picked file would.
-      await idPage.getByRole("button", { name: /take the picture/i }).first().click();
+      // The ID front is held for review before it enters the slot.
+      await idPage.getByRole("button", { name: /capture manually|take the picture/i }).first().click();
       await idPage.waitForTimeout(2500);
 
-      const preview = await idPage.locator('img[alt^="Preview of"]').count();
-      check("the captured picture becomes the slot's preview", preview > 0, `${preview} preview(s)`);
+      const pendingPreview = await idPage
+        .locator('img[alt="Captured ID photo pending confirmation"]')
+        .count();
+      check("the captured picture is shown for review", pendingPreview > 0);
+      check(
+        "the captured picture requires confirmation",
+        (await idPage.getByRole("button", { name: "Use this ID" }).count()) > 0
+      );
     }
   }
 
