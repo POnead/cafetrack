@@ -4,7 +4,13 @@ import { signSession, setSessionCookie, deactivatedMessage } from "@/lib/auth";
 import { readStep2Ticket } from "@/lib/auth/step2-ticket";
 import { audit } from "@/lib/audit";
 import { getFaceEngine, getSessionMinutes, getFaceMatchThreshold } from "@/lib/settings";
-import { PRIMARY_POSE, parseEmbedding, parseFaceFrames, matchPresentation } from "@/lib/face";
+import {
+  PRIMARY_POSE,
+  descriptorVersionFor,
+  parseEmbedding,
+  parseFaceFrames,
+  matchPresentation,
+} from "@/lib/face";
 import { galleryFor, loadFaceSamples } from "@/lib/face-samples";
 import { recordFaceVerification } from "@/lib/face-gate";
 import { getIdGate } from "@/lib/id-gate";
@@ -199,6 +205,37 @@ export const POST = handler(async (req: Request) => {
    */
   if (!frames) {
     return refuse("nothing_recognised", false);
+  }
+
+  /*
+   * Was this vector produced by the reader the server is comparing with?
+   *
+   * The login screen declares its engine and that reader's revision with every
+   * attempt. A tab left open across a change to the reader keeps the old script
+   * in memory, and its vectors are in a space nothing on file can be compared
+   * with: every attempt lands about 1.0 away from every real vector, which reads
+   * exactly like "the account holder's own face does not match". That is how a
+   * stale tab wasted an afternoon; this turns it into an instruction.
+   *
+   * Not a security check — a caller can declare anything, and a wrong declaration
+   * only makes its own comparison fail. It is deliberately not counted as a
+   * failed second step, because it is not one: the ticket stays good, and the
+   * person does not lose one of their five tries to a page that needs reloading.
+   */
+  const declaredEngine = typeof body.face_engine === "string" ? body.face_engine.trim() : "";
+  const declaredVersion = Number(body.descriptor_version);
+  const expectedVersion = descriptorVersionFor(engine);
+
+  const staleClient =
+    (declaredEngine !== "" && declaredEngine !== engine) ||
+    (Number.isFinite(declaredVersion) && declaredVersion !== expectedVersion);
+
+  if (staleClient) {
+    return fail(
+      "This page is running an older face reader. Reload the page and sign in again.",
+      409,
+      { reload: true }
+    );
   }
 
   /* ---- face -------------------------------------------------------------- */

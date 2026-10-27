@@ -388,7 +388,22 @@ const a = unit(7);
 const b = unit(8);
 check("an embedding matches itself", isSfaceMatch(a, a));
 check("two unrelated embeddings do not", !isSfaceMatch(a, b));
-check("the closest observed impostor distance is refused", !isSfaceMatch(a, atCosine(a, 0.14)));
+
+/*
+ * The bands this threshold was measured against, from this app's own stored
+ * enrolments once the reader fed the model 0-255 (see lib/face.ts):
+ *
+ *   same person, front re-captured    0.019 - 0.119
+ *   same person, front vs side        0.253 - 0.473
+ *   different people, closest pair    0.559 (side), 0.653 (front vs front)
+ *
+ * Both ends are asserted, so raising the threshold past a measured impostor or
+ * lowering it under a measured genuine capture breaks a test rather than a
+ * sign-in.
+ */
+check("a re-captured same face is accepted", isSfaceMatch(a, atCosine(a, 0.12)));
+check("the furthest genuine side angle is accepted", isSfaceMatch(a, atCosine(a, 0.473)));
+check("the closest measured impostor is refused", !isSfaceMatch(a, atCosine(a, 0.559)));
 
 section("normalizeSfaceEmbedding — output accepted by the shared parser");
 
@@ -400,10 +415,11 @@ check("normalized output passes the shared embedding parser", parseEmbedding(nor
 check("wrong-sized model output is refused", normalizeSfaceEmbedding([1, 2]) === null);
 check("a zero model output is refused", normalizeSfaceEmbedding(new Array(128).fill(0)) === null);
 
-// The documented danger of a model swap: each engine keeps its own strict band.
+// The documented danger of a model swap: each engine keeps its own band, and
+// SFace's is the measured one rather than OpenCV's generic 0.637 advice.
 check(
-  "the SFace ceiling is stricter than its previous unmeasured threshold",
-  SFACE_MATCH_THRESHOLD === 0.1 && SFACE_MATCH_THRESHOLD < 0.637
+  "the SFace ceiling is the measured one, below OpenCV's generic advice",
+  SFACE_MATCH_THRESHOLD === 0.5 && SFACE_MATCH_THRESHOLD < 0.637
 );
 check(
   "the legacy and SFace thresholds remain engine-specific",

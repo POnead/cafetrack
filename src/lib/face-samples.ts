@@ -21,10 +21,10 @@
  */
 import { db } from "./supabase";
 import {
-  DESCRIPTOR_VERSION,
   LEGACY_ENGINE,
   FACE_POSES,
   PRIMARY_POSE,
+  descriptorVersionFor,
   type FaceEngine,
   type FaceFrameInput,
   type FacePose,
@@ -164,7 +164,7 @@ export function toGallery(samples: readonly FaceSample[]): StoredFaceSample[] {
 export function galleryFor(
   samples: readonly FaceSample[],
   engine: FaceEngine,
-  version: number = DESCRIPTOR_VERSION
+  version: number = descriptorVersionFor(engine)
 ): StoredFaceSample[] {
   return toGallery(samples.filter((s) => s.model === engine && s.version === version));
 }
@@ -185,7 +185,7 @@ export function galleryFor(
 export async function currentSampleUserIds(
   userIds: readonly string[],
   engine: FaceEngine,
-  version: number = DESCRIPTOR_VERSION
+  version: number = descriptorVersionFor(engine)
 ): Promise<Set<string>> {
   if (userIds.length === 0) return new Set();
 
@@ -228,7 +228,7 @@ export async function saveFaceSamples(
     pose: e.pose,
     embedding: formatEmbedding(e.embedding),
     model: e.model,
-    descriptor_version: DESCRIPTOR_VERSION,
+    descriptor_version: descriptorVersionFor(e.model),
     image: e.image,
     yaw_signal: e.yawSignal,
     quality: e.quality,
@@ -331,7 +331,7 @@ export async function evaluatePresentation(args: {
   version?: number;
 }): Promise<PresentationResult> {
   const samples = await loadFaceSamples(args.userId, args.legacyEmbedding);
-  const gallery = galleryFor(samples, args.engine, args.version ?? DESCRIPTOR_VERSION);
+  const gallery = galleryFor(samples, args.engine, args.version ?? descriptorVersionFor(args.engine));
   const required = posesRequired(gallery, args.requireProfileAngles);
 
   const result = matchPresentation(args.frames, gallery, required, args.threshold);

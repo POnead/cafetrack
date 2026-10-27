@@ -80,11 +80,11 @@ const EDITABLE: Record<
    * Cosine distance, so a fraction rather than a count. Lower is stricter.
    *
    * One key per engine, because the two engines do not share a scale: the legacy
-   * reader's allowed band is 0.01-0.033, while SFace's is 0.01-0.1. Storing one
-   * value for both would mean switching engines silently
-   * applies a tolerance calibrated for a different model — the exact failure this
-   * split exists to prevent. The bounds come from matchThresholdBand in
-   * lib/face.ts, which also carries the reasoning.
+   * reader's allowed band is 0.01-0.033, while SFace's is 0.01-0.55, measured on
+   * this app's own enrolments. Storing one value for both would mean switching
+   * engines silently applies a tolerance calibrated for a different model — the
+   * exact failure this split exists to prevent. The bounds come from
+   * matchThresholdBand in lib/face.ts, which also carries the reasoning.
    *
    * Three decimals, because the legacy band is narrow enough that 0.033 rounded
    * to two places is a different, stricter setting the cafe never chose.

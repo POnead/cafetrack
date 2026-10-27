@@ -63,23 +63,29 @@ export const MAX_MATCH_THRESHOLD = 0.033;
 /*
  * SFace's threshold, and its own range.
  *
- * A different number because it is a different vector space. SFace embeddings
- * are L2-normalised 128-float ArcFace-family vectors, and the same person
- * re-captured has been estimated around 0.15-0.40 by cosine distance — three to
- * ten times the legacy engine's band. Carrying 0.033 across would refuse many
- * genuine SFace captures; carrying SFace's number back to legacy would admit
- * everyone.
+ * A different number because it is a different vector space. Measured on this
+ * app's own enrolments with the reader feeding the model 0-255 (see the note in
+ * lib/face-sface.ts):
  *
- * The previously used 0.637 follows OpenCV's generic guidance (cosine
- * similarity 0.363), but it was not validated against this app's enrollment and
- * till-camera captures. The 0.1 ceiling is below the closest different-person
- * reading seen in the small-face probe (0.14), prioritizing stranger rejection
- * over convenience. It will refuse genuine captures; do not raise it without
- * representative genuine and impostor measurements.
+ *   same person, front re-captured    0.019 - 0.119
+ *   same person, front vs side        0.253 - 0.473
+ *   different people, closest pair    0.559 (side angle), 0.653 (front vs front)
+ *
+ * 0.5 accepts every measured genuine reading, including the side angles, and
+ * refuses every measured stranger with a 0.06 margin at the closest pair. It is
+ * deliberately not OpenCV's generic 0.637 (cosine similarity 0.363), which is
+ * loose enough to accept the closest measured impostor.
+ *
+ * The previous 0.1 was measured against a double-normalised input — the reader
+ * divided by 255 even though the graph does its own normalisation — so the model
+ * was answering with its bias vector and every face sat within about 0.1 of every
+ * other. Those readings, and the 0.1 derived from them, are not a calibration of
+ * this model. A tab still running that script sends exactly those vectors, and
+ * lands at 0.9-1.1 from every real one.
  */
-export const SFACE_MATCH_THRESHOLD = 0.1;
+export const SFACE_MATCH_THRESHOLD = 0.5;
 export const MIN_SFACE_MATCH_THRESHOLD = 0.01;
-export const MAX_SFACE_MATCH_THRESHOLD = 0.1;
+export const MAX_SFACE_MATCH_THRESHOLD = 0.55;
 
 /**
  * Which settings key, range and fallback apply to which engine.
@@ -146,18 +152,15 @@ export const REPLACEMENT_MISMATCH_DISTANCE = 0.04;
 /**
  * The same warning, for SFace.
  *
- * Not 0.04: SFace works in a different vector space, where even the same person
- * re-captured has been estimated around 0.15-0.40; the previous threshold was
- * 0.637.
- * Carrying the legacy number across would flag every replacement as a different
- * person, and the admin would learn to ignore the warning.
- *
- * Set above the match threshold on purpose — this is a "that looks like somebody
- * else" hint, not an admission rule — and provisional for the same reason
- * SFACE_MATCH_THRESHOLD is: `npm run probe:face` is what replaces it with a
- * measured number.
+ * Not 0.04: SFace works in a different vector space. Measured on this app's own
+ * enrolments, the same person re-captured sits at 0.02-0.12 and a different
+ * person at 0.65 or more, so 0.55 flags a real mismatch without firing on an
+ * ordinary re-photograph. It sits just above the 0.5 match threshold on purpose:
+ * this is a "that looks like somebody else" hint, not an admission rule, and
+ * tying it to the editable threshold would let someone quieten the warning by
+ * loosening their settings.
  */
-export const SFACE_REPLACEMENT_MISMATCH_DISTANCE = 0.85;
+export const SFACE_REPLACEMENT_MISMATCH_DISTANCE = 0.55;
 
 /** The replacement-warning distance for the engine that produced the vectors. */
 export function replacementMismatchDistance(engine: FaceEngine): number {
@@ -468,11 +471,29 @@ export const LEGACY_ENGINE: FaceEngine = "legacy";
  *
  *   1  the original reader. For `legacy`, a descriptor of the full frame.
  *   2  the reworked reader: crop to the detected face, align, then embed.
+ *   3  SFace fed 0-255 instead of 0-1. The graph normalises internally, so the
+ *      old SFace vectors describe a near-constant input and cannot be compared
+ *      with the new ones. Legacy vectors are unaffected.
  *
  * `descriptor_version` on `user_face_samples` defaults to 1, so every row written
  * before this column existed is correctly marked as version 1 without a backfill.
  */
 export const DESCRIPTOR_VERSION = 2;
+
+/** The SFace reader's version. See the note on `DESCRIPTOR_VERSION`. */
+export const SFACE_DESCRIPTOR_VERSION = 3;
+
+/**
+ * Which reader version a vector from this engine is compared under.
+ *
+ * The two engines changed independently: the SFace input scale was wrong, the
+ * legacy reader was not. Bumping one shared constant would invalidate every
+ * legacy enrolment for a fault that never touched it, and the person at the till
+ * would be refused for a change that did not involve their engine.
+ */
+export function descriptorVersionFor(engine: FaceEngine): number {
+  return engine === "sface" ? SFACE_DESCRIPTOR_VERSION : DESCRIPTOR_VERSION;
+}
 
 /** The version every row written before `descriptor_version` existed holds. */
 export const LEGACY_DESCRIPTOR_VERSION = 1;

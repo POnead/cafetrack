@@ -55,7 +55,7 @@ insert into settings (key, value) values
   -- Deliberately strict. A row left over from an older install may hold a looser
   -- value; readers clamp it to the current range (see matchThresholdBand), and
   -- `on conflict do nothing` above means only a fresh install gets these seeds.
-  ('face_match_threshold_sface', '0.1'),
+  ('face_match_threshold_sface', '0.5'),
   -- Signing in with a face instead of a password (staff only).
   --
   -- Off by default, and separate from face_verification_enabled on purpose: one

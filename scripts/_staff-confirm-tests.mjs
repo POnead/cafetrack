@@ -357,7 +357,12 @@ section("wrong readings are refused when the account *has* a second factor");
   const sideOnly = await confirm(tSide, { face_embedding: wrongFace });
   ok("a face matching only this account's side sample is refused", sideOnly.res.status === 401, `got ${sideOnly.res.status}`);
 
-  const borderlineDistance = fx.engine === "sface" ? 0.14 : 0.04;
+  /*
+   * The SFace numbers move with the corrected reader: genuine captures measure
+   * 0.02-0.47 and strangers 0.56 and up, so a refusal has to sit above 0.5 and
+   * the ceiling check above the 0.55 maximum. The legacy numbers are unchanged.
+   */
+  const borderlineDistance = fx.engine === "sface" ? 0.51 : 0.04;
   const borderline = atCosineDistance(storedFace, borderlineDistance);
   const tBorderline = (await passwordStep(fx.borderlineFaceOnly)).body.ticket;
   const borderlineResult = await confirm(tBorderline, { face_embedding: borderline });
@@ -365,7 +370,7 @@ section("wrong readings are refused when the account *has* a second factor");
 
   const thresholdKey =
     fx.engine === "sface" ? "face_match_threshold_sface" : "face_match_threshold";
-  const aboveLimit = fx.engine === "sface" ? 0.101 : 0.034;
+  const aboveLimit = fx.engine === "sface" ? 0.551 : 0.034;
   const thresholdUpdate = await fetch(`${BASE}/api/settings`, {
     method: "PATCH",
     headers: {
@@ -394,6 +399,43 @@ section("wrong readings are refused when the account *has* a second factor");
 
 /* ================================================================== */
 
+section("a tab left open across a reader change");
+
+{
+  const fx = await makeStaffWithFactors();
+
+  /*
+   * The failure that cost a day: a login tab open since before the reader was
+   * fixed keeps the old script in memory and sends vectors from the old space, so
+   * the account holder's own face lands about 1.0 from their own photograph. The
+   * answer must be "reload", not "that did not match", and it must not spend one
+   * of the five failed second steps the account is allowed.
+   */
+  const staleTicket = (await passwordStep(fx.faceOnly)).body.ticket;
+  const staleVersion = await confirm(staleTicket, {
+    face_embedding: storedFace,
+    // Any revision but the reader's own.
+    descriptor_version: 1,
+  });
+  ok("an old reader revision is refused", staleVersion.res.status === 409, `got ${staleVersion.res.status}`);
+  ok("the answer says to reload", staleVersion.body?.reload === true, JSON.stringify(staleVersion.body));
+  ok("and issues no cookie", !staleVersion.cookie.includes("cafetrack_session"));
+
+  const staleEngine = await confirm(staleTicket, {
+    face_embedding: storedFace,
+    face_engine: fx.engine === "sface" ? "legacy" : "sface",
+    descriptor_version: fx.engine === "sface" ? 2 : 3,
+  });
+  ok("a vector from the other engine is refused the same way", staleEngine.res.status === 409, `got ${staleEngine.res.status}`);
+  ok("with the same reload instruction", staleEngine.body?.reload === true, JSON.stringify(staleEngine.body));
+
+  // The ticket was never spent, and a current client on it still works.
+  const afterReload = await confirm(staleTicket, { face_embedding: storedFace });
+  ok("the reloaded page can use the same ticket", afterReload.res.status === 200, `got ${afterReload.res.status}`);
+}
+
+/* ================================================================== */
+
 section("a wrong face cannot pass by matching the ID portrait");
 
 {
@@ -409,11 +451,13 @@ section("a wrong face cannot pass by matching the ID portrait");
    * the till could satisfy the step with the password holder's own card portrait
    * as the reference.
    *
-   * 0.3 is well inside the old 0.55 acceptance and well outside every genuine
-   * band, so this is the reading that used to mint a session. The enrolled face
-   * now has to match on its own, and this must be a refusal.
+   * 0.7 is outside both acceptance bands — the 0.55 ID threshold and the 0.5
+   * measured SFace threshold — while a genuine SFace side angle can reach 0.47.
+   * A smaller number like 0.3 would now be a plausible genuine capture, so it
+   * would stop testing the hole. The enrolled face has to match on its own, and
+   * this must be a refusal.
    */
-  const impostor = atCosineDistance(storedFace, 0.3);
+  const impostor = atCosineDistance(storedFace, 0.7);
 
   const t = (await passwordStep(own.faceOnly)).body.ticket;
   const r = await confirm(t, {

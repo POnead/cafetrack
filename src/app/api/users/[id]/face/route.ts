@@ -4,11 +4,11 @@ import { requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import {
   DEFAULT_FACE_ENGINE,
-  DESCRIPTOR_VERSION,
   FACE_POSES,
   POSE_COPY,
   PRIMARY_POSE,
   type FacePose,
+  descriptorVersionFor,
   distance,
   formatEmbedding,
   parseEmbedding,
@@ -309,7 +309,9 @@ export const POST = handler(
     const newModel = captured.find((c) => c.pose === PRIMARY_POSE)?.model ?? DEFAULT_FACE_ENGINE;
     const previousFront = (await loadFaceSamples(before.id, before.face_embedding)).find(
       (s) =>
-        s.pose === PRIMARY_POSE && s.model === newModel && s.version === DESCRIPTOR_VERSION
+        s.pose === PRIMARY_POSE &&
+        s.model === newModel &&
+        s.version === descriptorVersionFor(newModel)
     );
 
     if (previousFront) {

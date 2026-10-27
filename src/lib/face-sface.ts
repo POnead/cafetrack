@@ -697,9 +697,20 @@ export async function readFaceSface(source: CanvasImageSource): Promise<SfaceRea
   const transform = similarityTransform(points, ARCFACE_REFERENCE);
   const crop = alignCrop(rgb, full.width, full.height, transform);
 
+  /*
+   * 0-255, not 0-1.
+   *
+   * The exported graph starts with `Sub(127.5)` and `Mul(0.0078125)`, so it
+   * normalises internally. Dividing by 255 here a second time leaves every pixel
+   * near -0.996: the network then answers with its bias vector and every face
+   * lands within about 0.1 of every other, which is what made a stranger pass and
+   * also what a browser tab still running the pre-fix script kept sending.
+   * OpenCV's own `FaceRecognizerSF::feature` also passes a scale of 1 for this
+   * reason. `npm run probe:face` measures the separation.
+   */
   const cropInput = new ort.Tensor(
     "float32",
-    toNchw(crop, 3, SFACE_INPUT, { scale: 1 / 255 }),
+    toNchw(crop, 3, SFACE_INPUT),
     [1, 3, SFACE_INPUT, SFACE_INPUT]
   );
 
@@ -803,7 +814,9 @@ export async function detectSfaceOnly(source: CanvasImageSource): Promise<SfaceR
  * Same cosine distance as every other comparison in this app — the metric does
  * not change with the model, only the threshold does, and that is the whole
  * danger of a model swap: 0.033 would refuse many genuine SFace captures, while
- * the old 0.637 SFace default was unmeasured and too permissive for staff login.
+ * OpenCV's generic 0.637 is loose enough to accept the closest measured
+ * different-person pair (0.559). See SFACE_MATCH_THRESHOLD in lib/face.ts for
+ * the measured bands.
  */
 export function isSfaceMatch(a: number[] | Float32Array, b: number[] | Float32Array): boolean {
   const left = a instanceof Float32Array ? a : Float32Array.from(a);

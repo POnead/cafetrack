@@ -19,7 +19,7 @@ import {
   describeCameraProblem,
   type CameraProblem,
 } from "@/lib/face-diagnostics";
-import { PRIMARY_POSE } from "@/lib/face";
+import { PRIMARY_POSE, descriptorVersionFor } from "@/lib/face";
 import { useFacePoses } from "@/lib/use-face-poses";
 import { useAutoFaceCapture } from "@/lib/use-auto-face-capture";
 import FaceScanOverlay from "@/components/FaceScanOverlay";
@@ -181,6 +181,17 @@ export default function StaffCheck({ ticket, fullName, onVerified, onBack }: Pro
           body: JSON.stringify({
             ticket,
             face_embedding: faceEmbedding,
+            /*
+             * Which reader produced the vector, and which revision of it.
+             *
+             * Advisory, but load-bearing for the person in front of the camera:
+             * a tab left open across a reader change keeps the old script in
+             * memory, and its vectors are in a space the server cannot compare.
+             * Without this the only symptom is "that face did not match" for a
+             * face that is on file. See the route's stale-client check.
+             */
+            face_engine: engine,
+            descriptor_version: descriptorVersionFor(engine),
           }),
         });
 
@@ -204,7 +215,7 @@ export default function StaffCheck({ ticket, fullName, onVerified, onBack }: Pro
         setBusy(false);
       }
     },
-    [onVerified, stopCamera, ticket]
+    [engine, onVerified, stopCamera, ticket]
   );
 
   /**

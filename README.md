@@ -245,15 +245,37 @@ What has been verified, and how:
   image of upright faces did not catch (correcting 3° by −3° still looks like a
   face) and a unit test did. See `test:sface`.
 
-What has *not* been established: a reliable threshold. One small-face probe had a
-genuine pair at 0.37 while several different people sat between 0.14 and 0.35,
-but those faces were only 40 pixels wide and do not provide a trustworthy
-separation. Staff login therefore caps SFace at a deliberately strict 0.1, below
-the closest different-person reading observed in that probe; this
-may refuse genuine captures and is not a guarantee against every possible
-impostor. Re-measure it from representative till-quality genuine and impostor
-captures before relaxing the cap. Switching engines also invalidates every stored
-vector, so it needs a staged re-enrolment.
+What has been established: the input scale, and a threshold measured against real
+enrolments. The exported SFace graph normalises internally — its first nodes are
+`Sub(127.5)` and `Mul(1/128)` — so it must be fed pixels in 0-255. The earlier
+reader divided by 255 as well, which left every pixel near -0.996: the model then
+answered with its bias vector, every face sat within about 0.1 of every other, and
+a stranger could pass at the old 0.1 cutoff. With the scale corrected, measured on
+this app's own stored enrolments:
+
+| comparison | cosine distance |
+| --- | --- |
+| same person, front re-captured | 0.019 - 0.119 |
+| same person, front vs side angle | 0.253 - 0.473 |
+| different people, closest pair | 0.559 (side), 0.653 (front vs front) |
+
+Staff login accepts at 0.5: every measured genuine reading is below it and every
+measured stranger above it. That still is not a guarantee against every possible
+impostor; re-measure from representative till-quality captures before relaxing the
+cap. Correcting the reader invalidated every stored SFace vector, so SFace accounts
+need re-enrolment (descriptor version 3); the legacy engine's vectors are untouched.
+Switching engines also invalidates every stored vector, so it needs a staged
+re-enrolment.
+
+**A tab open across a reader change.** The login screen sends the engine and
+descriptor revision it used with every attempt. A tab that has been open since
+before a reader fix keeps the old script in memory, and its vectors are in a space
+nothing on file can be compared with — the account holder's own face then lands
+about 1.0 from their own photograph and the only symptom is "that face did not
+match". The route answers those with a 409 that says to reload, and does not count
+them as failed second steps, so the ticket survives the reload. If a face that is
+plainly on file stops matching after a deploy, reload the page before re-enrolling
+anybody.
 
 **How the two engines are kept apart.** Every row in `user_face_samples` records
 the engine that produced its vector (`model`), and a check only compares against
