@@ -196,9 +196,10 @@ account predates the angles. Nothing is ever requested that the account cannot
 present, so an existing enrolment never becomes an account someone cannot use.
 `Settings → Face → Turned-head checks` switches the side angles off entirely, which
 keeps them on file as reference photos; that is the switch to reach for if real
-staff are refused on the sides. The two screens where an ID card is presented
-(step two and card sign-in) stay single-frame on purpose: the card is the stronger
-factor there and the face is compared in the same camera frame.
+staff are refused on the sides. Staff password confirmation checks the face
+against the face enrolled on that account; an ID card does not substitute for
+that check. The separate card sign-in flow stays single-frame because its face
+is compared with the portrait on the card.
 
 **The bands are provisional.** `FRONT_MAX_SIGNAL` and `SIDE_MIN_SIGNAL` in
 `src/lib/face.ts` bound a proxy, and no real front/left/right captures have been
@@ -244,17 +245,19 @@ What has been verified, and how:
   image of upright faces did not catch (correcting 3° by −3° still looks like a
   face) and a unit test did. See `test:sface`.
 
-What has *not* been established: a threshold. On the one photograph available, a
-genuine pair sat at 0.37 while several different people sat between 0.14 and 0.35
-— but those faces are 40 pixels wide, and at that size the descriptor tracks pose
-and light more than identity. `SFACE_MATCH_THRESHOLD` is therefore set from
-OpenCV's own guidance (cosine similarity 0.363, i.e. distance 0.637) and must be
-re-measured from till-quality captures before this engine gates a shift. Switching
-engines also invalidates every stored vector, so it needs a staged re-enrolment.
+What has *not* been established: a reliable threshold. One small-face probe had a
+genuine pair at 0.37 while several different people sat between 0.14 and 0.35,
+but those faces were only 40 pixels wide and do not provide a trustworthy
+separation. Staff login therefore caps SFace at a deliberately strict 0.1, below
+the closest different-person reading observed in that probe; this
+may refuse genuine captures and is not a guarantee against every possible
+impostor. Re-measure it from representative till-quality genuine and impostor
+captures before relaxing the cap. Switching engines also invalidates every stored
+vector, so it needs a staged re-enrolment.
 
 **How the two engines are kept apart.** Every row in `user_face_samples` records
 the engine that produced its vector (`model`), and a check only compares against
-rows from the engine in use (`settings.face_engine`, `legacy` by default). This is
+rows from the engine in use (`settings.face_engine`, `sface` by default). This is
 not bookkeeping: the two vector spaces are unrelated, so a cross-engine comparison
 would show a real person as a stranger and look exactly like a bad camera. The
 test for it stores a byte-identical vector under the other engine and asserts the
@@ -659,10 +662,35 @@ checked out* with ingredients that no longer exist.
 
 So give the suites a database of their own:
 
+For hands-on testing and the staff-confirmation suite, start the isolated server
+with its secure default: it requires the enrolled-face step after a staff
+password.
+
 ```bash
-npm run dev:test        # terminal 1 — a second server on :3101
-npm run test:isolated   # terminal 2 — every server suite against it
+npm run dev:test           # terminal 1 — a second server on :3101
+npm run test:staff-confirm # terminal 2 — exercises password + face confirmation
 ```
+
+The broader legacy server suite creates staff accounts without enrolled faces
+and uses their password logins as test helpers. To run that suite, explicitly
+opt in to bypassing face confirmation on the throwaway test server:
+
+```bash
+# Bash
+CAFETRACK_TEST_BYPASS_STEP2=1 npm run dev:test
+npm run test:isolated
+```
+
+```powershell
+# PowerShell
+$env:CAFETRACK_TEST_BYPASS_STEP2 = "1"
+npm run dev:test
+# In a second terminal:
+npm run test:isolated
+```
+
+The bypass is disabled by default, is refused in production, and the test server
+prints whether face confirmation is required or explicitly bypassed at startup.
 
 `dev:test` points `CAFETRACK_DB_DIR` at `.pglite-test/` and gives itself its
 own `.next-test/` build directory, because Next locks `.next/dev` and a second
@@ -689,8 +717,12 @@ This suite writes to the movement ledger, which is append-only, so what it
 records cannot be removed afterwards.
 
 Use the throwaway database instead:
-    npm run dev:test          (terminal 1)
-    npm run test:isolated     (terminal 2)
+    CAFETRACK_TEST_BYPASS_STEP2=1 npm run dev:test (terminal 1)
+    npm run test:isolated                           (terminal 2)
+
+The bypass is required only for legacy suites that use password-only staff
+fixtures. For manual staff sign-in testing or `test:staff-confirm`, start
+`npm run dev:test` without that variable.
 
 Or, if you really mean to test against real data:
     CAFETRACK_ALLOW_LIVE_DB=1 npm run <this suite>
@@ -897,8 +929,10 @@ public/
 ## Known limitations
 
 - **The turned-head bands have not been measured against real faces.** The
-  matching threshold (0.05) is measured and the numbers behind it are in
-  `lib/face.ts`; the *pose* bounds (`FRONT_MAX_SIGNAL`, `SIDE_MIN_SIGNAL`) are not.
+  legacy matching threshold (0.033) separates the measured samples, but that
+  small sample is not a guarantee against every impostor. The numbers behind it
+  are in `lib/face.ts`; the *pose* bounds (`FRONT_MAX_SIGNAL`, `SIDE_MIN_SIGNAL`)
+  are not.
   They bound a proxy derived from 2D landmarks, chosen so that a straight-on frame
   and a clearly turned one cannot be confused — but no set of real front/left/right
   captures has been run through them yet. Every enrolment records the signals it
@@ -993,5 +1027,3 @@ public/
   the approval it exists to get.
 - **A pending item has no barcode.** One is drawn only once the item is approved,
   so a label cannot be printed for stock that is not stock yet.
-
-

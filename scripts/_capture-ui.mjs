@@ -625,13 +625,9 @@ async function captureStaffCheck(browser, size) {
   await page.getByRole("heading", { name: "Hello Demo" }).waitFor({ state: "visible" });
   await settle(page);
   await screenshot(page, `${size}/staff/facial-step-two-ready`);
-  await page.getByRole("button", { name: "Open the camera" }).click();
+  await page.getByRole("button", { name: "Start face check" }).click();
   await page.getByText(/camera is blocked for this site/i).waitFor({ state: "visible" });
   await screenshot(page, `${size}/staff/facial-step-two-camera-denied`);
-  await page.getByRole("button", { name: "ID card" }).click();
-  await page.getByRole("button", { name: "Open the camera" }).click();
-  await page.getByText(/camera is blocked for this site/i).waitFor({ state: "visible" });
-  await screenshot(page, `${size}/staff/id-card-sign-in-camera-denied`);
   await context.close();
 }
 
@@ -658,70 +654,10 @@ async function captureActiveStaffCheck(browser, size) {
   await page.getByPlaceholder("Password").fill("capture-only");
   await page.getByRole("button", { name: /^login$/i }).click();
   await page.getByRole("heading", { name: "Hello Demo" }).waitFor({ state: "visible" });
-  await page.getByRole("button", { name: "Open the camera" }).click();
+  await page.getByRole("button", { name: "Start face check" }).click();
   await waitForCameraPreview(page, `sign-in ${size}`);
   await page.waitForTimeout(600);
   await screenshot(page, `${size}/staff/facial-step-two-camera-active`);
-  await context.close();
-}
-
-async function captureIdStaffCheck(browser, size) {
-  const context = await browser.newContext({
-    viewport: size === "desktop" ? DESKTOP : PHONE,
-  });
-  await installFakeCamera(context, { idCard: true });
-  const page = await context.newPage();
-  observe(page, `staff-id-step-${size}`);
-  let confirmAttempts = 0;
-  await page.route("**/api/auth/staff", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        step2_required: true,
-        ticket: "ui-capture-ticket",
-        full_name: "Demo Staff",
-      }),
-    })
-  );
-  await page.route("**/api/auth/staff/id-image?*", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ image: null }),
-    })
-  );
-  await page.route("**/api/auth/staff/confirm", (route) => {
-    confirmAttempts++;
-    return route.fulfill({
-      status: 401,
-      contentType: "application/json",
-      body: JSON.stringify({ error: "That did not match." }),
-    });
-  });
-
-  await setLoginMode(page, "staff");
-  await page.getByPlaceholder("Type username or scan barcode").fill("demo-staff");
-  await page.getByPlaceholder("Password").fill("capture-only");
-  await page.getByRole("button", { name: /^login$/i }).click();
-  await page.getByRole("heading", { name: "Hello Demo" }).waitFor({ state: "visible" });
-  await page.getByRole("button", { name: "ID card" }).click();
-  await page.getByRole("button", { name: "Open the camera" }).click();
-  await waitForCameraPreview(page, `ID sign-in ${size}`);
-  await page.getByRole("progressbar", { name: "ID steadiness" }).waitFor({ state: "visible" });
-  await page.waitForTimeout(250);
-  await screenshot(page, `${size}/staff/id-card-sign-in-camera-active`);
-  await page.getByRole("button", { name: "Capture ID now" }).waitFor({
-    state: "visible",
-    timeout: 15000,
-  });
-  await page.getByText(/That did not match\./).waitFor({
-    state: "visible",
-    timeout: 15000,
-  });
-  await page.waitForTimeout(500);
-  check(`ID sign-in submits one scan (${size})`, confirmAttempts === 1, `${confirmAttempts} submission(s)`);
-  await screenshot(page, `${size}/staff/id-card-sign-in-retry`);
   await context.close();
 }
 
@@ -935,8 +871,6 @@ try {
   await captureStaffCheck(browser, "mobile");
   await captureActiveStaffCheck(browser, "desktop");
   await captureActiveStaffCheck(browser, "mobile");
-  await captureIdStaffCheck(browser, "desktop");
-  await captureIdStaffCheck(browser, "mobile");
 
   const staffContext = await browser.newContext({ viewport: DESKTOP });
   const staffPage = await staffContext.newPage();

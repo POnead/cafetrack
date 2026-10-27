@@ -80,8 +80,8 @@ const EDITABLE: Record<
    * Cosine distance, so a fraction rather than a count. Lower is stricter.
    *
    * One key per engine, because the two engines do not share a scale: the legacy
-   * reader's useful band is a hundredth wide (0.01-0.5), while SFace's is nearer
-   * 0.1-1.2. Storing one value for both would mean switching engines silently
+   * reader's allowed band is 0.01-0.033, while SFace's is 0.01-0.1. Storing one
+   * value for both would mean switching engines silently
    * applies a tolerance calibrated for a different model — the exact failure this
    * split exists to prevent. The bounds come from matchThresholdBand in
    * lib/face.ts, which also carries the reasoning.

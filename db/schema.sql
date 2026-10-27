@@ -33,16 +33,20 @@ insert into settings (key, value) values
   -- should not be tied to a timetable the cafe does not really keep.
   ('face_verification_enabled', '0'),
   ('face_duty_hours', '9'),
-  ('face_match_threshold', '0.05'),
+  ('face_match_threshold', '0.033'),
   -- SFace's own threshold, and its own row.
   --
   -- A different key rather than a different value in the same one, because the
-  -- two engines are different vector spaces: legacy's useful band is a hundredth
-  -- wide, SFace's is nearer 0.1-1.2. Sharing a row would mean switching engines
-  -- silently applied a tolerance calibrated for a different model. The default is
-  -- SFACE_MATCH_THRESHOLD in lib/face.ts; `npm run probe:face` is what turns it
-  -- from OpenCV's guidance into a measured number.
-  ('face_match_threshold_sface', '0.637'),
+  -- two engines are different vector spaces: legacy's useful band is a few
+  -- hundredths wide, SFace's is nearer a tenth. Sharing a row would mean switching
+  -- engines silently applied a tolerance calibrated for a different model. The
+  -- default is SFACE_MATCH_THRESHOLD in lib/face.ts; `npm run probe:face` is what
+  -- replaces the estimate with a measured number.
+  --
+  -- Deliberately strict. A row left over from an older install may hold a looser
+  -- value; readers clamp it to the current range (see matchThresholdBand), and
+  -- `on conflict do nothing` above means only a fresh install gets these seeds.
+  ('face_match_threshold_sface', '0.1'),
   -- Signing in with a face instead of a password (staff only).
   --
   -- Off by default, and separate from face_verification_enabled on purpose: one

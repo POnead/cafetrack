@@ -265,19 +265,13 @@ check(
   "the worst measured same-person re-capture still matches",
   isMatch(real, atCosine(real, MEASURED_SAME_PERSON_WORST), DEFAULT_MATCH_THRESHOLD) === true
 );
-/*
- * The looser default accepts the closest measured stranger pair. That is the
- * deliberate cost of admitting a real re-capture taken on a till camera rather
- * than the enrolment camera; the strict midpoint this used to be still refuses
- * it, and a cafe can switch back to that in Settings.
- */
 check(
-  "the looser default accepts the closest measured stranger pair on purpose",
-  isMatch(real, atCosine(real, MEASURED_CLOSEST_DIFFERENT_PEOPLE), DEFAULT_MATCH_THRESHOLD) === true
+  "the default rejects the closest measured stranger pair",
+  isMatch(real, atCosine(real, MEASURED_CLOSEST_DIFFERENT_PEOPLE), DEFAULT_MATCH_THRESHOLD) === false
 );
 check(
-  "the old strict midpoint still refuses that pair",
-  isMatch(real, atCosine(real, MEASURED_CLOSEST_DIFFERENT_PEOPLE), 0.033) === false
+  "the configurable ceiling also rejects the closest measured stranger pair",
+  isMatch(real, atCosine(real, MEASURED_CLOSEST_DIFFERENT_PEOPLE), MAX_MATCH_THRESHOLD) === false
 );
 
 section("isMatch — a missing vector is never a match");
@@ -402,11 +396,9 @@ check("the ranges are ordered", MIN_DUTY_HOURS < MAX_DUTY_HOURS && MIN_MATCH_THR
  * known-different faces and over one face re-captured at different resolution,
  * brightness and compression.
  *
- * The old default of 0.6 sat above the whole different-person band, so every
- * face matched every other face. The current default is deliberately looser
- * than the closest stranger pair because a till camera is not the enrolment
- * camera, and real staff were being refused; the tests below pin down both ends
- * of that trade-off so it cannot drift into "yes" again.
+ * The old cosine default was deliberately looser than the closest stranger
+ * pair. The security-first default now rejects that pair; these checks keep it
+ * from drifting back into a known false-accept region.
  */
 section("the threshold against measured faces");
 
@@ -417,15 +409,15 @@ check(
 );
 
 check(
-  "the default is looser than the closest measured stranger pair on purpose",
-  DEFAULT_MATCH_THRESHOLD > MEASURED_CLOSEST_DIFFERENT_PEOPLE,
-  `default ${DEFAULT_MATCH_THRESHOLD} is still at the strict midpoint`
+  "the default stays below the closest measured stranger pair",
+  DEFAULT_MATCH_THRESHOLD < MEASURED_CLOSEST_DIFFERENT_PEOPLE,
+  `default ${DEFAULT_MATCH_THRESHOLD} must reject the closest measured stranger (${MEASURED_CLOSEST_DIFFERENT_PEOPLE})`
 );
 
 check(
-  "the default never reaches the far end of the stranger band",
-  DEFAULT_MATCH_THRESHOLD < MEASURED_FARTHEST_DIFFERENT_PEOPLE,
-  `default ${DEFAULT_MATCH_THRESHOLD} would accept every measured stranger (farthest ${MEASURED_FARTHEST_DIFFERENT_PEOPLE})`
+  "the allowed ceiling stays below the closest measured stranger pair",
+  MAX_MATCH_THRESHOLD < MEASURED_CLOSEST_DIFFERENT_PEOPLE,
+  `ceiling ${MAX_MATCH_THRESHOLD} must not be configurable into the measured impostor band`
 );
 
 check(

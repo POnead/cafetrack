@@ -136,7 +136,7 @@ export default function LoginPage() {
       /*
        * Staff: the password is half a login. The route hands back a ticket
        * instead of a session, and the app is unreachable until that ticket is
-       * exchanged for one by a face or an ID card.
+       * exchanged for one by a match with the enrolled face.
        *
        * Checked before anything else because it changes what happens next
        * entirely — there is no session to be in conflict about yet, and the
@@ -430,8 +430,8 @@ export default function LoginPage() {
 
                   So the links are gone rather than moved. Keeping them visible
                   would be a promise the code cannot keep, and the replacement is
-                  in StaffCheck: one camera, one button, and whichever of a face
-                  or a card is put in front of it.
+                  in StaffCheck: one camera and one button, and the face has to
+                  match the one enrolled on the account.
 
                   The routes themselves are untouched and still work, which is
                   what lets this land without dismantling the badge flow.

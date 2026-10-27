@@ -1,9 +1,8 @@
 /**
  * Tests for the second step of staff sign-in.
  *
- *   npm run dev:test          (terminal 1)
- *   CAFETRACK_TEST_STEP2=1 npm run dev:test   (terminal 1)
- *   npm run test:staff-confirm                 (terminal 2)
+ *   npm run dev:test           (terminal 1)
+ *   npm run test:staff-confirm (terminal 2)
  *
  * ## Why this suite exists separately from test:id-login
  *
@@ -20,12 +19,11 @@
  *   2. A ticket is single use. Winning with it burns it.
  *   3. A ticket cannot survive being presented to the session reader.
  *
- * The rest is ordinary: wrong face, wrong card, nothing at all, and the
- * "account has no second factor on file" case that mandatory step two creates.
+ * The rest is ordinary: wrong face, card-only and ID-portrait bypass attempts,
+ * retries on a live ticket, and an account with no second factor.
  *
- * Needs the server running with CAFETRACK_TEST_STEP2=1, which is what makes
- * POST /api/auth/staff hand back a ticket instead of a session. Without it the
- * first assertion below fails immediately, and the rest follow.
+ * The isolated dev server requires the second step by default. Do not start it
+ * with CAFETRACK_TEST_BYPASS_STEP2=1 when running this suite.
  */
 
 import { patternPngBlob } from "./_pattern-png.mjs";
@@ -112,48 +110,39 @@ async function confirm(ticket, extra = {}) {
   return { res, body: await res.json(), cookie: cookieOf(res) };
 }
 
-/** A 128-float vector that will not match anything enrolled. */
+async function enrollFace(adminCookie, staff, front, left = wrongFace) {
+  const form = new FormData();
+  for (const [pose, embedding] of [
+    ["front", front],
+    ["left", left],
+    ["right", unitVector(3)],
+  ]) {
+    form.set(`embedding_${pose}`, embedding.join(","));
+    form.set(`image_${pose}`, await tinyPngBlob(), `${pose}.png`);
+  }
+  return fetch(`${BASE}/api/users/${staff.id}/face`, {
+    method: "POST",
+    headers: { Cookie: adminCookie },
+    body: form,
+  });
+}
+
 /**
- * A staff account that has BOTH a face and a card on file.
+ * A card-only account and independent accounts with enrolled faces.
  *
- * Needed because the fixture used above has neither, and a route that answers
- * "you have nothing to check against" before it ever looks at the reading cannot
- * be tested for what it does with a *wrong* reading. Both are inserted straight
- * into the row by PATCH /api/users, which is also what an admin's enrolment
- * writes — no camera needed, and the vector never has to be a real face because
- * nothing here is matching it against a face, only checking that a mismatch is
- * refused.
+ * The face fixtures use the same enrollment route as the admin UI with synthetic
+ * vectors and tiny images, so the confirmation route can test both positive and
+ * negative decisions without a camera. Separate accounts keep intentional
+ * mismatch tests from exhausting the per-account retry throttle.
  */
 async function makeStaffWithFactors() {
-  const staff = await makeStaff();
-
-  const adminRes = await fetch(`${BASE}/api/auth/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(ADMIN),
-  });
-  const adminCookie = cookieOf(adminRes);
-
-  // Each gets its own account, because they need different things on file: a
-  // card-only fixture cannot test the face path, and a face-only one cannot test
-  // the card path. Sharing one account would also let a failure in one enrolment
-  // masquerade as a failure in the other.
+  // Keep the card-only and face-only accounts separate so one factor cannot
+  // accidentally mask a failure in the other's checks.
   const cardOnly = await makeStaff();
   const faceOnly = await makeStaff();
-
-  /*
-   * Deliberately not the same username space as the rest of the suite.
-   *
-   * Step-two throttling is five failures per account, keyed on the username. A
-   * fixture shared across sections would therefore spend its own budget during
-   * the "wrong readings" section and start answering 429 halfway through the
-   * positives, which is a confusing way to fail. Each section needs its own
-   * account, and this helper is how they get one.
-   */
-  void cardOnly;
-  void faceOnly;
-
-  // Unused above; kept for the throttle explanation only.
+  const sideFaceOnly = await makeStaff();
+  const borderlineFaceOnly = await makeStaff();
+  const otherFaceOnly = await makeStaff();
 
   const cardAdmin = cookieOf(
     await fetch(`${BASE}/api/auth/login`, {
@@ -162,6 +151,11 @@ async function makeStaffWithFactors() {
       body: JSON.stringify(ADMIN),
     })
   );
+  const settingsRes = await fetch(`${BASE}/api/settings`, {
+    headers: { Cookie: cardAdmin },
+  });
+  const settingsBody = await settingsRes.json();
+  const engine = settingsBody?.settings?.face_engine === "sface" ? "sface" : "legacy";
 
   /*
    * A card hash of 16 hex chars is a well-formed 64-bit dHash, and the route
@@ -201,24 +195,11 @@ async function makeStaffWithFactors() {
     body: cardForm,
   });
 
-  /*
-   * Comma-separated text, not JSON.
-   *
-   * parseEmbedding treats a *string* as the text wire format and splits it on
-   * commas; only a JSON array takes the array branch. Sending JSON.stringify()
-   * here therefore yields components like `[-0.238` which Number() refuses, and
-   * the enrolment answers 400 "the face data was missing or malformed". The JSON
-   * array form is only correct for the JSON body /api/auth/staff/confirm reads.
-   */
-  const faceForm = new FormData();
-  faceForm.set("embedding", storedFace.join(","));
-  faceForm.set("image", await tinyPngBlob(), "face.png");
-
-  const face = await fetch(`${BASE}/api/users/${faceOnly.id}/face`, {
-    method: "POST",
-    headers: { Cookie: cardAdmin },
-    body: faceForm,
-  });
+  const foreignFace = unitVector(4);
+  const face = await enrollFace(cardAdmin, faceOnly, storedFace);
+  const sideFace = await enrollFace(cardAdmin, sideFaceOnly, storedFace);
+  const borderlineFace = await enrollFace(cardAdmin, borderlineFaceOnly, storedFace);
+  const otherFace = await enrollFace(cardAdmin, otherFaceOnly, foreignFace, unitVector(5));
 
   /*
    * Approve the card.
@@ -241,8 +222,17 @@ async function makeStaffWithFactors() {
   return {
     cardOnly: { ...cardOnly, storedCard },
     faceOnly,
+    sideFaceOnly,
+    borderlineFaceOnly,
+    otherFaceOnly,
+    foreignFace,
+    engine,
+    adminCookie: cardAdmin,
     cardStatus: card.status,
     faceStatus: face.status,
+    sideFaceStatus: sideFace.status,
+    borderlineFaceStatus: borderlineFace.status,
+    otherFaceStatus: otherFace.status,
     approveStatus: approve.status,
   };
 }
@@ -269,10 +259,19 @@ const storedFace = unitVector(1);
 
 /** Deliberately different from `storedFace`, so the comparison has to refuse it. */
 const wrongFace = unitVector(7);
-const wrongCard = "f".repeat(16);
 
-
-
+function atCosineDistance(unit, distance) {
+  const index = unit.reduce(
+    (best, value, i, values) => Math.abs(value) < Math.abs(values[best]) ? i : best,
+    0
+  );
+  const basis = unit.map((value, i) => (i === index ? 1 : 0) - unit[index] * value);
+  const norm = Math.hypot(...basis);
+  const orthogonal = basis.map((value) => value / norm);
+  const cosine = 1 - distance;
+  const sine = Math.sqrt(1 - cosine * cosine);
+  return unit.map((value, i) => cosine * value + sine * orthogonal[i]);
+}
 /**
  * A flat image for the *face* enrolment, which never looks at fingerprints.
  *
@@ -342,19 +341,50 @@ section("wrong readings are refused when the account *has* a second factor");
   const fx = await makeStaffWithFactors();
   ok("the card fixture stored a card", fx.cardStatus === 200, `got ${fx.cardStatus}`);
   ok("the face fixture enrolled a face", fx.faceStatus === 200, `got ${fx.faceStatus}`);
+  ok("the other staff member enrolled a separate face", fx.otherFaceStatus === 200, `got ${fx.otherFaceStatus}`);
 
   const t1 = (await passwordStep(fx.faceOnly)).body.ticket;
   const r1 = await confirm(t1, { face_embedding: wrongFace });
   ok("a wrong face is refused", r1.res.status === 401, `got ${r1.res.status}`);
   ok("and issues no cookie", !r1.cookie.includes("cafetrack_session"));
 
-  const t2 = (await passwordStep(fx.cardOnly)).body.ticket;
-  const r2 = await confirm(t2, { card_hash: wrongCard });
-  ok("a wrong card is refused", r2.res.status === 401, `got ${r2.res.status}`);
+  const tForeign = (await passwordStep(fx.faceOnly)).body.ticket;
+  const foreign = await confirm(tForeign, { face_embedding: fx.foreignFace });
+  ok("another staff member's enrolled face cannot authorize this account", foreign.res.status === 401, `got ${foreign.res.status}`);
+  ok("and the cross-account face issues no cookie", !foreign.cookie.includes("cafetrack_session"));
 
-  const t3 = (await passwordStep(fx.cardOnly)).body.ticket;
+  const tSide = (await passwordStep(fx.sideFaceOnly)).body.ticket;
+  const sideOnly = await confirm(tSide, { face_embedding: wrongFace });
+  ok("a face matching only this account's side sample is refused", sideOnly.res.status === 401, `got ${sideOnly.res.status}`);
+
+  const borderlineDistance = fx.engine === "sface" ? 0.14 : 0.04;
+  const borderline = atCosineDistance(storedFace, borderlineDistance);
+  const tBorderline = (await passwordStep(fx.borderlineFaceOnly)).body.ticket;
+  const borderlineResult = await confirm(tBorderline, { face_embedding: borderline });
+  ok("a borderline face distance is refused", borderlineResult.res.status === 401, `engine ${fx.engine}, got ${borderlineResult.res.status}`);
+
+  const thresholdKey =
+    fx.engine === "sface" ? "face_match_threshold_sface" : "face_match_threshold";
+  const aboveLimit = fx.engine === "sface" ? 0.101 : 0.034;
+  const thresholdUpdate = await fetch(`${BASE}/api/settings`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: fx.adminCookie,
+    },
+    body: JSON.stringify({ [thresholdKey]: aboveLimit }),
+  });
+  ok("the settings API rejects thresholds above the security ceiling", thresholdUpdate.status === 400, `got ${thresholdUpdate.status}`);
+
+  const t2 = (await passwordStep(fx.cardOnly)).body.ticket;
+  const r2 = await confirm(t2, { card_hash: fx.cardOnly.storedCard });
+  ok("a card on file cannot replace an enrolled face", r2.res.status === 403, `got ${r2.res.status}`);
+  ok("the account is told to enroll a face", r2.body?.no_face === true, JSON.stringify(r2.body));
+  ok("and the card check issues no cookie", !r2.cookie.includes("cafetrack_session"));
+
+  const t3 = (await passwordStep(fx.faceOnly)).body.ticket;
   const r3 = await confirm(t3, { face_embedding: "not a vector", card_hash: 42 });
-  ok("malformed readings are refused", r3.res.status === 401, `got ${r3.res.status}`);
+  ok("malformed face readings are refused", r3.res.status === 401, `got ${r3.res.status}`);
 
   const t4 = (await passwordStep(fx.faceOnly)).body.ticket;
   const r4 = await confirm(t4);
@@ -364,63 +394,50 @@ section("wrong readings are refused when the account *has* a second factor");
 
 /* ================================================================== */
 
-section("the card on file signs in");
+section("a wrong face cannot pass by matching the ID portrait");
 
 {
-  /*
-   * A passing case, on its own fixture. Without it the suite only proves the
-   * route can say no, and a route that always says no passes every refusal
-   * above.
-   */
   const own = await makeStaffWithFactors();
-  const t = (await passwordStep(own.cardOnly)).body.ticket;
-  const r = await confirm(t, { card_hash: own.cardOnly.storedCard });
 
-  ok("the card on file signs in", r.res.status === 200, `got ${r.res.status} ${r.body?.error ?? ""}`);
-  ok("a session cookie is issued", r.cookie.includes("cafetrack_session"));
-  ok("the match is reported as the card", r.body?.matched_by === "id_card", JSON.stringify(r.body));
+  /*
+   * The exact hole this suite exists to keep shut.
+   *
+   * Step two used to compare the live frame against the portrait on the account's
+   * ID card at `id_face_match_threshold` — 0.55 by default, because a printed
+   * portrait is a much harder comparison than two live photographs. At that
+   * distance almost every face is "the same person", so a colleague standing at
+   * the till could satisfy the step with the password holder's own card portrait
+   * as the reference.
+   *
+   * 0.3 is well inside the old 0.55 acceptance and well outside every genuine
+   * band, so this is the reading that used to mint a session. The enrolled face
+   * now has to match on its own, and this must be a refusal.
+   */
+  const impostor = atCosineDistance(storedFace, 0.3);
 
-  // The end of the whole chain: password, then card, then access.
-  const me = await fetch(`${BASE}/api/auth/me`, { headers: { Cookie: r.cookie } });
-  ok("the resulting cookie reads as a session", me.status === 200, `got ${me.status}`);
+  const t = (await passwordStep(own.faceOnly)).body.ticket;
+  const r = await confirm(t, {
+    face_embedding: impostor,
+    // The reference vector a browser would have computed from the card on file.
+    id_face_embedding: storedFace,
+    card_hash: own.cardOnly.storedCard,
+  });
 
-  // Single use, done properly now that there is a success to burn.
-  const second = await confirm(t, { card_hash: own.cardOnly.storedCard });
-  ok("the same ticket cannot be used twice", second.res.status === 401, `got ${second.res.status}`);
-  ok("and the second attempt issues no cookie", !second.cookie.includes("cafetrack_session"));
+  ok("a face that only matches the ID portrait is refused", r.res.status === 401, `got ${r.res.status}`);
+  ok("and issues no cookie", !r.cookie.includes("cafetrack_session"));
+  ok("and the ID portrait is never reported as the factor", r.body?.matched_by !== "face");
 }
-
-/* ================================================================== */
-
-section("the enrolled face signs in");
 
 {
   const own = await makeStaffWithFactors();
   const t = (await passwordStep(own.faceOnly)).body.ticket;
-  const r = await confirm(t, { face_embedding: storedFace });
+  const mismatch = await confirm(t, { face_embedding: wrongFace });
+  ok("a wrong enrolled-face attempt can be retried", mismatch.res.status === 401, `got ${mismatch.res.status}`);
 
-  ok("the enrolled face signs in", r.res.status === 200, `got ${r.res.status} ${r.body?.error ?? ""}`);
-  ok("a session cookie is issued", r.cookie.includes("cafetrack_session"));
-  ok("the match is reported as the face", r.body?.matched_by === "face", JSON.stringify(r.body));
-}
-
-{
-  /*
-   * The panel sends both readings from one frame, so the route must try the
-   * second even when the first is present and does not match. This is the case
-   * that would break silently if the face comparison short-circuited — which is
-   * exactly what a hand holding a card produces, since the portrait on an ID
-   * card is often detected as a low-confidence face.
-   */
-  const own = await makeStaffWithFactors();
-  const t = (await passwordStep(own.cardOnly)).body.ticket;
-  const r = await confirm(t, {
-    face_embedding: wrongFace,
-    card_hash: own.cardOnly.storedCard,
-  });
-
-  ok("a wrong face does not block a good card", r.res.status === 200, `got ${r.res.status}`);
-  ok("and the card is what matched", r.body?.matched_by === "id_card");
+  const retry = await confirm(t, { face_embedding: storedFace });
+  ok("the correct enrolled face succeeds on the same live ticket", retry.res.status === 200, `got ${retry.res.status}`);
+  ok("and the match is reported as the enrolled face", retry.body?.matched_by === "face", JSON.stringify(retry.body));
+  ok("a session cookie is issued after the retry", retry.cookie.includes("cafetrack_session"));
 }
 
 /* ================================================================== */
@@ -430,11 +447,11 @@ section("tickets are superseded, not just spent");
 {
   const own = await makeStaffWithFactors();
 
-  const t = (await passwordStep(own.cardOnly)).body.ticket;
-  const first = await confirm(t, { card_hash: wrongCard });
-  ok("a wrong card on a live ticket is refused", first.res.status === 401, `got ${first.res.status}`);
+  const t = (await passwordStep(own.faceOnly)).body.ticket;
+  const first = await confirm(t, { face_embedding: wrongFace });
+  ok("a wrong face on a live ticket is refused", first.res.status === 401, `got ${first.res.status}`);
 
-  const fresh = (await passwordStep(own.cardOnly)).body.ticket;
+  const fresh = (await passwordStep(own.faceOnly)).body.ticket;
   ok("a new password step issues a different ticket", fresh !== t);
 
   /*
@@ -443,14 +460,15 @@ section("tickets are superseded, not just spent");
    * to invalidate the attempt it replaces, or two live tickets could circulate
    * for one account at once.
    */
-  const stale = await confirm(t, { card_hash: own.cardOnly.storedCard });
+  const stale = await confirm(t, { face_embedding: storedFace });
   ok("a superseded ticket is refused", stale.res.status === 401, `got ${stale.res.status}`);
-  ok("even with the correct card", stale.body?.no_second_factor !== true);
+  ok("even with the correct face", stale.body?.no_second_factor !== true);
   ok(
-    "and says so as an expiry, not as a bad card",
+    "and says so as an expiry, not as a bad face",
     /expired/i.test(stale.body?.error ?? ""),
     stale.body?.error
   );
+  ok("and marks the ticket as expired", stale.body?.expired === true, JSON.stringify(stale.body));
 }
 
 

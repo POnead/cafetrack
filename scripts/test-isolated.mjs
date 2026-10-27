@@ -1,8 +1,8 @@
 /**
  * Run every suite against the isolated test server from `npm run dev:test`.
  *
- *   npm run dev:test          (terminal 1)
- *   npm run test:isolated     (terminal 2)
+ *   CAFETRACK_TEST_BYPASS_STEP2=1 npm run dev:test (terminal 1)
+ *   npm run test:isolated                           (terminal 2)
  *
  * Sets BASE_URL for each child rather than relying on a shell-specific
  * `BASE_URL=... &&` prefix, so this works the same on Windows and POSIX.

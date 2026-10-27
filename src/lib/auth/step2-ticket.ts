@@ -3,8 +3,8 @@ import { createHmac, randomBytes } from "node:crypto";
 import { resolveAuthSecret } from "../secret";
 
 /**
- * The second step of staff sign-in: proof, by face or by ID card, that the
- * person who typed the password is the person it belongs to.
+ * The second step of staff sign-in: proof that the face belongs to the person
+ * who typed the password.
  *
  * ## Why this is a separate file, and separate key
  *

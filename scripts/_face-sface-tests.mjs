@@ -29,7 +29,13 @@ import {
   nonMaximumSuppression,
   similarityTransform,
 } from "../src/lib/face-sface.ts";
-import { DEFAULT_MATCH_THRESHOLD, parseEmbedding } from "../src/lib/face.ts";
+import {
+  DEFAULT_MATCH_THRESHOLD,
+  MAX_SFACE_MATCH_THRESHOLD,
+  MIN_SFACE_MATCH_THRESHOLD,
+  matchThresholdBand,
+  parseEmbedding,
+} from "../src/lib/face.ts";
 
 let pass = 0;
 let fail = 0;
@@ -46,6 +52,19 @@ function check(label, ok, detail = "") {
 
 function section(title) {
   console.log(`\n${title}`);
+}
+
+function atCosine(unit, distance) {
+  const index = unit.reduce(
+    (best, value, i, values) => Math.abs(value) < Math.abs(values[best]) ? i : best,
+    0
+  );
+  const basis = unit.map((value, i) => (i === index ? 1 : 0) - unit[index] * value);
+  const norm = Math.hypot(...basis);
+  const orthogonal = basis.map((value) => value / norm);
+  const cosine = 1 - distance;
+  const sine = Math.sqrt(1 - cosine * cosine);
+  return unit.map((value, i) => cosine * value + sine * orthogonal[i]);
 }
 
 /** Apply a transform the way the browser code does: forward, y' = b*x + a*y + ty. */
@@ -369,6 +388,7 @@ const a = unit(7);
 const b = unit(8);
 check("an embedding matches itself", isSfaceMatch(a, a));
 check("two unrelated embeddings do not", !isSfaceMatch(a, b));
+check("the closest observed impostor distance is refused", !isSfaceMatch(a, atCosine(a, 0.14)));
 
 section("normalizeSfaceEmbedding — output accepted by the shared parser");
 
@@ -380,11 +400,20 @@ check("normalized output passes the shared embedding parser", parseEmbedding(nor
 check("wrong-sized model output is refused", normalizeSfaceEmbedding([1, 2]) === null);
 check("a zero model output is refused", normalizeSfaceEmbedding(new Array(128).fill(0)) === null);
 
-// The documented danger of a model swap: the legacy threshold is 0.05.
+// The documented danger of a model swap: each engine keeps its own strict band.
 check(
-  "the SFace threshold is nowhere near the legacy threshold",
-  Math.abs(DEFAULT_MATCH_THRESHOLD - SFACE_MATCH_THRESHOLD) > 0.5,
-  `carrying ${DEFAULT_MATCH_THRESHOLD} across would refuse every enrolled person`
+  "the SFace ceiling is stricter than its previous unmeasured threshold",
+  SFACE_MATCH_THRESHOLD === 0.1 && SFACE_MATCH_THRESHOLD < 0.637
+);
+check(
+  "the legacy and SFace thresholds remain engine-specific",
+  DEFAULT_MATCH_THRESHOLD === 0.033 && DEFAULT_MATCH_THRESHOLD < SFACE_MATCH_THRESHOLD
+);
+check(
+  "runtime and settings API share the security-first SFace range",
+  matchThresholdBand("sface").min === MIN_SFACE_MATCH_THRESHOLD &&
+    matchThresholdBand("sface").max === MAX_SFACE_MATCH_THRESHOLD &&
+    matchThresholdBand("sface").fallback === SFACE_MATCH_THRESHOLD
 );
 
 console.log(`\n${"-".repeat(46)}`);

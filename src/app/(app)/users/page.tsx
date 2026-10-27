@@ -1585,31 +1585,28 @@ async function toggleItemPermission(user: StaffUser) {
             {/*
               The one warning that is about access rather than about records.
 
-              Staff sign-in is two steps: a password, then a face or an ID card.
-              An account with neither cannot finish signing in at all — not
-              weakly, but not at all — and until this change that was invisible
-              from this screen. The person simply stops being able to get to work
-              and the only clue is a refusal at the till.
+              Staff sign-in is two steps: a password, then a match with the
+              enrolled face. An account without an enrolled face cannot finish
+              signing in, and until this warning that was invisible from this
+              screen. The person simply stops being able to get to work and the
+              only clue is a refusal at the till.
 
               So it is stated here, on the account, in the same place an admin
               already looks to find out why someone cannot do something.
 
-              `verification_status === "verified"` is the proxy for "has a card",
-              not a guess: approving a card is what writes that status, and the
-              fingerprint the sign-in route compares against is written by the
-              same upload.
+              Card approval is separate from this check; only face enrollment
+              lets staff complete the second step.
             */}
             {detailsUser.role === "staff" &&
               detailsUser.is_active &&
-              !detailsUser.face_enabled &&
-              detailsUser.verification_status !== "verified" && (
+              !detailsUser.face_enabled && (
                 <div className="rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs leading-relaxed text-red-800">
                   <span className="font-semibold">Cannot sign in</span>
                   <p className="mt-0.5">
-                    Signing in asks for a password and then a face or an ID card.
-                    This account has neither on file, so {detailsUser.full_name || "they"}{" "}
-                    will be refused at the second step. Add a reference photo
-                    below, or upload and approve their ID.
+                    Signing in asks for a password and then a match with the
+                    enrolled face. This account has no face on file, so{" "}
+                    {detailsUser.full_name || "they"} will be refused at the
+                    second step. Add a reference photo below.
                   </p>
                 </div>
               )}

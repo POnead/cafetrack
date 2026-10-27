@@ -524,9 +524,9 @@ export default function VerifyPage() {
 
         Measured on the real model: the same person re-shot with room around the
         face sits at 0.002-0.02 from their own reference, and cropped tight enough
-        to clip the chin, at 0.030. That last figure used to sit right on the
-        0.033 cut-off; the default is looser now (0.05), but a badly framed photo
-        still costs a scan, and one line here buys a retake instead.
+        to clip the chin, at 0.030. That last figure is close to the stricter
+        0.033 cut-off, so a badly framed photo still costs a scan, and one line
+        here buys a retake instead.
 
         Only while the camera is off. Once it is open the live guide carries the
         angle, the nudge and the count on the preview itself.

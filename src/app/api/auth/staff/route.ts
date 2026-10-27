@@ -18,11 +18,11 @@ export const runtime = "nodejs";
 /**
  * True only on the throwaway test server, never in production.
  *
- * Two-step sign-in makes the face-or-card check mandatory, and a test has neither
- * a face nor an ID card to present. Fifteen suites use POST /api/auth/staff as
- * their login helper and would all fail at the door without an escape, so the
- * test harness sets CAFETRACK_DISABLE_STEP2 and this route behaves exactly as it
- * did before.
+ * Two-step sign-in makes the enrolled-face check mandatory, and a test has no
+ * enrolled face to present. Fifteen suites use POST /api/auth/staff as
+ * their login helper and would all fail at the door without an escape, so a
+ * legacy test suite can explicitly opt in to CAFETRACK_DISABLE_STEP2 and this
+ * route behaves exactly as it did before.
  *
  * The `NODE_ENV` check is the one that matters. The env var is the convenience;
  * being unable to turn step two off on a real deployment is the requirement.
@@ -185,7 +185,7 @@ export const POST = handler(async (req: Request) => {
    *
    * This is the whole point of the change, so it is worth being explicit about
    * what went wrong before. Signing a session here made step two advisory: the
-   * cookie was already in the browser while the face-or-card panel was still on
+   * cookie was already in the browser while the face-check panel was still on
    * screen, so any request made during that window - including one the panel
    * never made - walked straight past the check that was supposed to be the
    * second factor.
@@ -199,10 +199,12 @@ export const POST = handler(async (req: Request) => {
   await logAttempt(true);
 
   /*
-   * Test harness only. See bypassStepTwo() for why this exists and what it costs.
+   * Explicit test bypass only. See bypassStepTwo() for why this exists and what
+   * it costs.
    *
-   * Double-gated on purpose: the flag is set by scripts/dev-test.mjs, and this
-   * branch refuses to run in production even if it somehow is. Fifteen existing
+   * Double-gated on purpose: scripts/dev-test.mjs only sets the flag for an
+   * explicitly requested legacy test mode, and this branch refuses to run in
+   * production even if it somehow is. Fifteen existing
    * suites use this endpoint as their login helper and have no face and no card
    * to present at a second step, so without this the mandatory step two would
    * not be a feature but an outage.

@@ -802,8 +802,8 @@ export async function detectSfaceOnly(source: CanvasImageSource): Promise<SfaceR
  *
  * Same cosine distance as every other comparison in this app — the metric does
  * not change with the model, only the threshold does, and that is the whole
- * danger of a model swap: 0.033 would refuse everyone here and 0.637 would admit
- * everyone on the old vectors.
+ * danger of a model swap: 0.033 would refuse many genuine SFace captures, while
+ * the old 0.637 SFace default was unmeasured and too permissive for staff login.
  */
 export function isSfaceMatch(a: number[] | Float32Array, b: number[] | Float32Array): boolean {
   const left = a instanceof Float32Array ? a : Float32Array.from(a);

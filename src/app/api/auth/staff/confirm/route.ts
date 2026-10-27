@@ -1,14 +1,14 @@
 import { db } from "@/lib/supabase";
 import { handler, ok, fail, readBody, clientIp } from "@/lib/api";
 import { signSession, setSessionCookie, deactivatedMessage } from "@/lib/auth";
-import { readStep2Ticket, STEP2_TTL_SECONDS } from "@/lib/auth/step2-ticket";
+import { readStep2Ticket } from "@/lib/auth/step2-ticket";
 import { audit } from "@/lib/audit";
-import { getFaceEngine, getSessionMinutes, getFaceMatchThreshold, getIdFaceMatchThreshold } from "@/lib/settings";
-import { PRIMARY_POSE, isMatch, parseEmbedding, parseFaceFrames, posesRequired, matchPresentation } from "@/lib/face";
+import { getFaceEngine, getSessionMinutes, getFaceMatchThreshold } from "@/lib/settings";
+import { PRIMARY_POSE, parseEmbedding, parseFaceFrames, matchPresentation } from "@/lib/face";
 import { galleryFor, loadFaceSamples } from "@/lib/face-samples";
 import { recordFaceVerification } from "@/lib/face-gate";
 import { getIdGate } from "@/lib/id-gate";
-import { isSameCard, isValidFingerprint } from "@/lib/id-verification/card-hash";
+import { isValidFingerprint } from "@/lib/id-verification/card-hash";
 import {
   checkLoginThrottle,
   tooManyAttempts,
@@ -20,8 +20,8 @@ import {
 export const runtime = "nodejs";
 
 /**
- * Step two of staff sign-in: prove a face, or an ID card, and receive the session
- * that step one deliberately withheld.
+ * Step two of staff sign-in: prove the face enrolled on the account and receive
+ * the session that step one deliberately withheld.
  *
  * ## What makes this different from the two routes it replaces
  *
@@ -42,13 +42,8 @@ export const runtime = "nodejs";
  * in face-login about uniform answers existed to stop a stranger walking the
  * staff room; that attacker cannot get this far.
  *
- * ## Either signal is enough
- *
- * A face, or a card, or both. One button opens the camera, a frame is grabbed,
- * and whatever is recognisable in it is used. The browser sends both readings when
- * it can make them and the route tries them in turn, so a hand that fills the
- * frame with a face and a hand that fills it with a card both land in the same
- * place.
+ * Only the enrolled face can complete this step. ID-card verification is not a
+ * substitute for the face check here.
  */
 export const POST = handler(async (req: Request) => {
   const body = await readBody(req);
@@ -56,7 +51,7 @@ export const POST = handler(async (req: Request) => {
   const token = String(body.ticket ?? "").trim();
 
   if (!token) {
-    return fail(EXPIRED, 401);
+    return fail(EXPIRED, 401, { expired: true });
   }
 
   /*
@@ -66,14 +61,14 @@ export const POST = handler(async (req: Request) => {
    */
   const ticket = await readStep2Ticket(token);
   if (!ticket) {
-    return fail(EXPIRED, 401);
+    return fail(EXPIRED, 401, { expired: true });
   }
 
   const { data: user, error: lookupError } = await db()
     .from("users")
     .select(
       "id, username, full_name, is_active, deactivation_reason, deactivated_at, " +
-      "face_embedding, face_enabled, id_card_hash, verification_status, id_doc_front, " +
+      "face_embedding, face_enabled, id_card_hash, verification_status, " +
       "session_token, step2_nonce"
     )
     .eq("id", ticket.userId)
@@ -87,7 +82,7 @@ export const POST = handler(async (req: Request) => {
 
   // A ticket for an account that has since been deleted, or a forged user id.
   if (!user) {
-    return fail(EXPIRED, 401);
+    return fail(EXPIRED, 401, { expired: true });
   }
 
   /*
@@ -101,7 +96,7 @@ export const POST = handler(async (req: Request) => {
    * is correct: the new sign-in issued a new nonce, so the old ticket is dead.
    */
   if (!user.step2_nonce || user.step2_nonce !== ticket.nonce) {
-    return fail(EXPIRED, 401);
+    return fail(EXPIRED, 401, { expired: true });
   }
 
   /*
@@ -110,8 +105,8 @@ export const POST = handler(async (req: Request) => {
    * There is no credential being guessed here — the password is already proven
    * and the ticket is unforgeable — so this counts *failed second steps on one
    * account*. Five is the right number: it stops someone holding a stolen
-   * password from grinding through card after card, without punishing a person
-   * who fumbles their card a few times.
+   * password from working through face after face, without punishing a person
+   * whose camera needs a couple of tries.
    */
   const key = userKey(user.username);
   const throttle = await checkLoginThrottle(key, STEP2_METHOD);
@@ -137,7 +132,7 @@ export const POST = handler(async (req: Request) => {
   /* ---- what the account can actually be checked against ------------------- */
 
   /*
-   * Every angle on the account, loaded once.
+   * The account's samples, loaded once.
    *
    * Read before the second-factor check because whether there is anything to
    * compare against is a fact about the row. It also means the legacy vector —
@@ -148,35 +143,39 @@ export const POST = handler(async (req: Request) => {
   // Only vectors from the engine in use may be compared; see FaceEngine.
   const engine = await getFaceEngine();
   const gallery = galleryFor(samples, engine);
-  const faceUsable = Boolean(user.face_enabled && samples.length > 0);
+  const frontalGallery = gallery.filter((sample) => sample.pose === PRIMARY_POSE);
+  const faceUsable = Boolean(user.face_enabled && frontalGallery.length > 0);
   const cardUsable = isValidFingerprint(user.id_card_hash);
 
   /*
-   * Neither. The account passed the password and has nothing to prove itself
-   * with.
+   * No enrolled face. An ID card on file is not a substitute for this step.
    *
-   * This is the state "step two is mandatory" creates, and it is reachable only
-   * by the account's own holder, who is exactly the person who needs telling.
-   * So this one answers specifically rather than with the generic refusal — a
-   * 403 naming the fix, where a stranger gets the same 401 as a bad card.
-   *
-   * Checked before any comparison because it is a fact about the row, not an
-   * outcome of matching, and a person who cannot succeed should not be made to
-   * keep trying.
+   * Checked before comparison because this is a fact about the row, not a match
+   * outcome; the password holder should be told how to fix an unusable account.
    */
-  if (!faceUsable && !cardUsable) {
+  if (!faceUsable) {
     await recordLoginAttempt(key, STEP2_METHOD, false);
     await audit(
       { id: user.id, username: user.username, fullName: user.full_name, role: "staff" },
       "LOGIN_FAILED",
       "user",
       user.id,
-      { method: STEP2_METHOD, reason: "no_second_factor" },
+      { method: STEP2_METHOD, reason: cardUsable ? "no_enrolled_face" : "no_second_factor" },
       { critical: false, ip: clientIp(req), outcome: "failed" }
     );
+
+    if (cardUsable) {
+      return fail(
+        "This account has no enrolled face, so it cannot finish signing in. " +
+          "An administrator can add a face photo on the Staff Accounts page.",
+        403,
+        { no_face: true }
+      );
+    }
+
     return fail(
-      "This account has no face or ID card on file, so it cannot finish signing in. " +
-        "An administrator can add a photo of you, or your ID card, on the Staff Accounts page.",
+      "This account has no face on file, so it cannot finish signing in. " +
+        "An administrator can add a face photo on the Staff Accounts page.",
       403,
       { no_second_factor: true }
     );
@@ -191,99 +190,36 @@ export const POST = handler(async (req: Request) => {
     : legacyFace
       ? [{ pose: PRIMARY_POSE, embedding: legacyFace }]
       : null;
-  const rawHash = String(body.card_hash ?? "").trim().toLowerCase();
-  const cardHash = isValidFingerprint(rawHash) ? rawHash : null;
-  const idFace = parseEmbedding(body.id_face_embedding);
 
   /*
-   * Nothing recognisable in the frame.
+   * No face reading.
    *
-   * A request carrying none of the three is not an identity failure — it is a
-   * camera that showed a wall. Same generic 401 either way, but recorded
-   * separately so the audit can tell "aimed at nothing" from "aimed at the
-   * wrong person".
+   * A camera that showed no face is recorded separately from a face that failed
+   * to match, but both receive the same generic refusal.
    */
-  if (!frames && !cardHash && !idFace) {
+  if (!frames) {
     return refuse("nothing_recognised", false);
   }
 
   /* ---- face -------------------------------------------------------------- */
 
-  let matchedBy: "face" | "id_card" | null = null;
+  let matchedBy: "face" | null = null;
 
-  // The straight-on frame is the one thing every account has a sample for, and
-  // the only frame that is meaningful to compare against a printed portrait.
-  const frontFrame = frames?.find((f) => f.pose === PRIMARY_POSE)?.embedding ?? null;
-
-  if (frames && faceUsable) {
+  if (faceUsable) {
     const threshold = await getFaceMatchThreshold(engine);
 
     /*
-     * Straight-on only, on this screen, and that is a policy rather than an
-     * oversight.
-     *
-     * Step two presents *either* a face or the ID card, from one camera button.
-     * A card cannot turn its head, so asking for a three-angle presentation here
-     * would mean the person who chooses to present their card could never satisfy
-     * the face path — and the card is the stronger of the two factors anyway. The
-     * turned-head requirement belongs to the screens where the face is the only
-     * thing being presented: face sign-in and the duty check.
-     *
-     * `false` is passed explicitly rather than read from the setting, because the
-     * setting means "is this cafe asking for turned-head checks at all" — not
-     * "should this card-or-face screen ask for them".
+     * The login screen captures a straight-on face, so it may only match the
+     * account's enrolled frontal sample. Side-angle references cannot be used as
+     * alternate opportunities to match an unrelated live face.
      */
-    const required = posesRequired(gallery, false);
-
-    if (matchPresentation(frames, gallery, required, threshold).matched) {
+    if (matchPresentation(frames, frontalGallery, [PRIMARY_POSE], threshold).matched) {
       matchedBy = "face";
-    }
-  }
-
-  /*
-   * Face against the ID card portrait.
-   *
-   * The enrolled face is a live photograph; the ID card portrait is a printed
-   * one. They are the same person but the distance between them is far larger
-   * than between two live photographs, so this uses the ID match threshold
-   * (0.55) rather than the face match threshold (0.05).
-   *
-   * The ID card embedding is computed in the browser from the stored image and
-   * sent here — the server never runs the face model itself.
-   */
-  if (!matchedBy && frontFrame && idFace) {
-    const threshold = await getIdFaceMatchThreshold();
-    if (isMatch(frontFrame, idFace, threshold)) {
-      matchedBy = "face";
-    }
-  }
-
-  /* ---- ID card ----------------------------------------------------------- */
-
-  /*
-   * Only tried when the face did not already match, and only against this one
-   * account.
-   *
-   * `isSameCard` compares perceptual hashes with a Hamming tolerance, so a card
-   * photographed at a slight angle, or on a different phone, still lands. The
-   * tolerance is a reasoned number rather than a measured one — see
-   * DUPLICATE_DISTANCE in id-verification/card-hash.ts.
-   *
-   * No OCR here, deliberately. The account is already known, so the ID number on
-   * the card would only ever confirm what the fingerprint has already said, and
-   * reading it would make every sign-in depend on a 7MB text model being present
-   * and a second or two slower. What is lost is the name-mismatch warning the
-   * old route returned; that was advisory, and an admin reviewing the card on
-   * file sees the same thing.
-   */
-  if (!matchedBy && cardHash && cardUsable) {
-    if (isSameCard(cardHash, user.id_card_hash as string)) {
-      matchedBy = "id_card";
     }
   }
 
   if (!matchedBy) {
-    return refuse(matchedBy === null && cardHash ? "card_and_face_no_match" : "no_match", true);
+    return refuse("no_match", true);
   }
 
   /* ---- gates, now that this is provably the account's holder -------------- */
@@ -363,7 +299,7 @@ export const POST = handler(async (req: Request) => {
  * uniformity is kept anyway because it costs nothing and it means a future caller
  * who wires this up differently has not just opened a hole by accident.
  */
-const NO_MATCH = "That did not match the photo or the ID card on this account";
+const NO_MATCH = "That face did not match the photo on this account";
 
 /**
  * The ticket is spent, expired, or was never one.

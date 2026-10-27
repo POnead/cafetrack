@@ -34,25 +34,16 @@ export const EMBEDDING_LENGTH = 128;
  *   same person, realistic re-capture   0.0000 - 0.0301
  *   different people                    0.0362 - 0.0684
  *
- * The midpoint of that gap is 0.033, and that is what this used to be. It was
- * too strict in practice: a till camera is not the camera the enrolment was
- * taken on, and a real re-capture at a different angle, distance or light can
- * land above the measured worst case. Staff were being refused while the model
- * was working correctly.
+ * The default is the midpoint between the worst measured genuine pair (0.0301)
+ * and closest measured impostor pair (0.0362). A higher value admitted at least
+ * one measured stranger. This may refuse legitimate re-captures from a different
+ * camera or lighting; false rejection is preferable to false acceptance, and
+ * staff can retry or ask a manager for help.
  *
- * 0.05 deliberately trades some stranger rejection for admitting the real
- * person. It sits above the closest measured pair of different people (0.0362),
- * so that one pair would be accepted — the cost of the looser setting — but it
- * stays below the middle of the different-person band, so most strangers are
- * still refused. It is also well above the same-person worst case, which is the
- * failure that actually stops a shift.
- *
- * This is a default, not a law: Settings > Face match threshold exposes the same
- * value, and a cafe that wants the stricter 0.033 can set it back. A value at or
- * above 0.0684 accepts every measured stranger, which is the failure the old 0.6
- * default had.
+ * This measurement is limited to the captured sample set; it is not a guarantee
+ * that every possible stranger will be rejected.
  */
-export const DEFAULT_MATCH_THRESHOLD = 0.05;
+export const DEFAULT_MATCH_THRESHOLD = 0.033;
 
 /*
  * The editable range, mirroring the one the settings API enforces.
@@ -67,32 +58,35 @@ export const DEFAULT_MATCH_THRESHOLD = 0.05;
  * override behind it.
  */
 export const MIN_MATCH_THRESHOLD = 0.01;
-export const MAX_MATCH_THRESHOLD = 0.5;
+export const MAX_MATCH_THRESHOLD = 0.033;
 
 /*
  * SFace's threshold, and its own range.
  *
  * A different number because it is a different vector space. SFace embeddings
  * are L2-normalised 128-float ArcFace-family vectors, and the same person
- * re-captured lands around 0.15-0.40 by cosine distance — three to ten times the
- * legacy engine's band. Carrying 0.05 across would refuse every real person, and
- * carrying SFace's number back to legacy would admit everyone.
+ * re-captured has been estimated around 0.15-0.40 by cosine distance — three to
+ * ten times the legacy engine's band. Carrying 0.033 across would refuse many
+ * genuine SFace captures; carrying SFace's number back to legacy would admit
+ * everyone.
  *
- * 0.637 is OpenCV's own guidance (cosine similarity 0.363). It is still
- * provisional: `npm run probe:face` is what turns it into a measured number, and
- * the range below is wide enough to hold whatever that measurement says.
+ * The previously used 0.637 follows OpenCV's generic guidance (cosine
+ * similarity 0.363), but it was not validated against this app's enrollment and
+ * till-camera captures. The 0.1 ceiling is below the closest different-person
+ * reading seen in the small-face probe (0.14), prioritizing stranger rejection
+ * over convenience. It will refuse genuine captures; do not raise it without
+ * representative genuine and impostor measurements.
  */
-export const SFACE_MATCH_THRESHOLD = 0.637;
-export const MIN_SFACE_MATCH_THRESHOLD = 0.1;
-export const MAX_SFACE_MATCH_THRESHOLD = 1.2;
+export const SFACE_MATCH_THRESHOLD = 0.1;
+export const MIN_SFACE_MATCH_THRESHOLD = 0.01;
+export const MAX_SFACE_MATCH_THRESHOLD = 0.1;
 
 /**
  * Which settings key, range and fallback apply to which engine.
  *
- * One lookup rather than the same `engine === "sface" ? ... : ...` in the reader,
- * the settings API and the Settings page. The three have to agree, and a mismatch
- * is invisible: the value is accepted, stored, and then clamped by a different
- * bound than the one the form showed.
+ * One lookup rather than the same `engine === "sface" ? ... : ...` in the reader
+ * and settings API. They have to agree, or a value may be accepted and stored
+ * with bounds different from those used at runtime.
  */
 export type MatchThresholdBand = {
   /** The settings row this engine's threshold lives in. */
@@ -153,7 +147,8 @@ export const REPLACEMENT_MISMATCH_DISTANCE = 0.04;
  * The same warning, for SFace.
  *
  * Not 0.04: SFace works in a different vector space, where even the same person
- * re-captured sits around 0.15-0.40 and the match threshold itself is 0.637.
+ * re-captured has been estimated around 0.15-0.40; the previous threshold was
+ * 0.637.
  * Carrying the legacy number across would flag every replacement as a different
  * person, and the admin would learn to ignore the warning.
  *

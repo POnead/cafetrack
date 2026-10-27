@@ -2,7 +2,10 @@
  * A dev server for running the test suites, isolated from your real data.
  *
  *   npm run dev:test          (in one terminal)
- *   npm run test:isolated     (in another)
+ *   npm run test:staff-confirm (in another; uses the secure default)
+ *
+ * The broader legacy suite can opt into the test-only staff-login bypass by
+ * starting this server with CAFETRACK_TEST_BYPASS_STEP2=1.
  *
  * The suites write to the database: they check stock out, restock it, create
  * and delete accounts, and add to the movement ledger. A ledger is
@@ -62,6 +65,14 @@ const PORT = Number(process.env.TEST_PORT || 3101);
 const DB_DIR = process.env.CAFETRACK_DB_DIR || join(process.cwd(), ".pglite-test");
 const DIST_DIR = process.env.NEXT_DIST_DIR || ".next-test";
 const LOCAL_ENV = loadEnvFile(join(process.cwd(), ".env.local"));
+const bypassStepTwo = process.env.CAFETRACK_TEST_BYPASS_STEP2 === "1";
+const requireStepTwo = process.env.CAFETRACK_TEST_STEP2 === "1";
+
+if (bypassStepTwo && requireStepTwo) {
+  throw new Error(
+    "Set either CAFETRACK_TEST_BYPASS_STEP2=1 or CAFETRACK_TEST_STEP2=1, not both."
+  );
+}
 
 if (process.env.CAFETRACK_TEST_RESET === "1" && existsSync(DB_DIR)) {
   rmSync(DB_DIR, { recursive: true, force: true });
@@ -76,6 +87,9 @@ if (existsSync(DIST_DIR)) {
 console.log(`[dev:test] port ${PORT}`);
 console.log(`[dev:test] database ${DB_DIR}  (your .pglite is not touched)`);
 console.log(`[dev:test] distDir  ${DIST_DIR}`);
+console.log(
+  `[dev:test] staff face confirmation ${bypassStepTwo ? "explicitly bypassed for legacy tests" : "required"}`
+);
 console.log(
   `[dev:test] then run the suites against it, e.g.\n` +
     `            BASE_URL=http://localhost:${PORT} npm run test:all\n`
@@ -141,20 +155,14 @@ const child = spawn(
       // function directly, which is where the dedupe actually lives.
       CAFETRACK_DISABLE_EMAIL: "1",
       /*
-       * Staff sign-in is two steps - a password, then a face or an ID card - and
-       * most suites have neither a face nor a card to present at the second one.
-       * So on the throwaway server POST /api/auth/staff mints a session directly
-       * and skips the ticket, and the fifteen suites that use it as their login
-       * helper are unaffected.
+       * Step two is enforced by default, including in the isolated test server.
+       * Legacy suites that need direct staff sessions must explicitly opt in to
+       * bypassing the face check with CAFETRACK_TEST_BYPASS_STEP2=1.
        *
-       * Set CAFETRACK_TEST_STEP2=1 to get the real two-step behaviour instead,
-       * which is what scripts/_staff-confirm-tests.mjs needs. The suites that
-       * exercise step two are the ones that have to want it.
-       *
-       * The route also refuses to honour the bypass under NODE_ENV=production, so
-       * this convenience cannot become a way to turn the second factor off.
+       * CAFETRACK_TEST_STEP2=1 remains an explicit secure-mode override. The
+       * route refuses to honour the bypass under NODE_ENV=production.
        */
-      CAFETRACK_DISABLE_STEP2: process.env.CAFETRACK_TEST_STEP2 === "1" ? "" : "1",
+      CAFETRACK_DISABLE_STEP2: bypassStepTwo && !requireStepTwo ? "1" : "",
     },
   }
 );

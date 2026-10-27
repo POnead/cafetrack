@@ -44,7 +44,9 @@
     "test:angles": "node scripts/_face-angles-tests.mjs",
     "test:ocr-philsys": "node scripts/_ts-node.mjs scripts/_ocr-philsys-tests.mjs",
     "test:isolated": "node scripts/test-isolated.mjs",
-    "test:all": "npm run test:face && npm run test:sface && npm run test:face-image && npm run test:face-diagnostics && npm run test:id-name && npm run test:ocr && npm run test:ocr-philsys && npm run test:id-forgery && npm run test:id-lookup && npm run test:step2-ticket && npm run test:id && npm run test:angles && npm run test:camera && npm run test:email && npm run test:edge && npm run test:pages && npm run test:journeys && npm run test:ui && npm run test:tour && npm run test:smoke && npm run perf"
+    "test:all": "npm run test:face && npm run test:sface && npm run test:pose && npm run test:face-image && npm run test:face-diagnostics && npm run test:id-name && npm run test:ocr && npm run test:ocr-philsys && npm run test:id-forgery && npm run test:id-lookup && npm run test:step2-ticket && npm run test:id && npm run test:angles && npm run test:camera && npm run test:email && npm run test:edge && npm run test:pages && npm run test:journeys && npm run test:ui && npm run test:tour && npm run test:smoke && npm run perf",
+    "test:pose": "node scripts/_ts-node.mjs scripts/_head-pose-tests.mjs",
+    "probe:face": "node scripts/_ts-node.mjs scripts/_face-probe.mjs"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.8",
