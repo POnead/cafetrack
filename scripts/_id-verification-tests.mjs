@@ -661,6 +661,15 @@ if (userId) {
     afterPurge.data?.user?.has_front === false,
     JSON.stringify({ front: afterPurge.data?.user?.has_front })
   );
+  check(
+    "the ID number and type are removed with the documents, not left on the row",
+    afterPurge.data?.user?.id_doc_number === null &&
+      afterPurge.data?.user?.id_doc_type === null,
+    JSON.stringify({
+      number: afterPurge.data?.user?.id_doc_number,
+      type: afterPurge.data?.user?.id_doc_type,
+    })
+  );
 
   const purgeAgain = await call("DELETE", `/api/users/${userId}/id`, undefined, cookie);
   check(

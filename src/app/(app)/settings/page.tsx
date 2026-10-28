@@ -16,6 +16,11 @@
 import { useEffect, useRef, useState } from "react";
 import { Card, Spinner, Toast, Empty } from "@/components/ui";
 import { matchThresholdBand } from "@/lib/face";
+import {
+  DEFAULT_ID_MATCH_THRESHOLD,
+  MAX_ID_MATCH_THRESHOLD,
+  MIN_ID_MATCH_THRESHOLD,
+} from "@/lib/id-verification/local";
 
 type Ref = { id: string; name: string; min_shelf_life_days?: number | null };
 type Supplier = { id: string; name: string; contact_name: string | null; phone: string | null; email: string | null };
@@ -138,7 +143,8 @@ export default function SettingsPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not save");
 
-      // Store the value the API actually kept, which is the rounded integer.
+      // Store the value the API actually kept, which may be rounded to the
+      // field's precision (see `decimals` in api/settings).
       setSettings((prev) => ({ ...prev, [key]: data.settings[key] }));
       saved.current[key] = data.settings[key];
       setToast({ msg: "Saved", tone: "success" });
@@ -789,6 +795,50 @@ export default function SettingsPage() {
             >
               {settings.id_verification_required === "1" ? "Turn off" : "Turn on"}
             </button>
+          </div>
+
+          {/*
+            The ID portrait threshold.
+
+            API-only until now, which meant the one number that decides whether
+            the face comparison says anything was invisible to the admin who has
+            to act on it. It is not the same scale as the face-match threshold
+            above, and it belongs to SFace regardless of which face model is in
+            use for sign-in — see the note in lib/id-verification/local.ts.
+          */}
+          <div>
+            <label className="label" htmlFor="id_face_match_threshold">
+              Portrait match threshold
+            </label>
+            <input
+              id="id_face_match_threshold"
+              type="number"
+              step="0.001"
+              className="input"
+              min={MIN_ID_MATCH_THRESHOLD}
+              max={MAX_ID_MATCH_THRESHOLD}
+              placeholder={String(DEFAULT_ID_MATCH_THRESHOLD)}
+              value={settings.id_face_match_threshold ?? ""}
+              disabled={saving}
+              onChange={(e) =>
+                setSettings((prev) => ({
+                  ...prev,
+                  id_face_match_threshold: e.target.value,
+                }))
+              }
+              onBlur={(e) => {
+                const v = e.target.value;
+                if (v !== "" && v !== saved.current.id_face_match_threshold) {
+                  saveField("id_face_match_threshold", v);
+                }
+              }}
+            />
+            <p className="mt-1 text-xs text-cocoa-400">
+              How far apart the portrait on the card and the applicant&rsquo;s photo may
+              read and still count as the same face ({MIN_ID_MATCH_THRESHOLD}&ndash;
+              {MAX_ID_MATCH_THRESHOLD}). Lower is stricter. This check has its own
+              model, so the face-model switch above does not change it.
+            </p>
           </div>
         </div>
 

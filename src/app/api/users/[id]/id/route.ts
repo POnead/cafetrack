@@ -307,9 +307,14 @@ export const POST = handler(
     if (photo && !photo.ok) return fail(photo.message);
 
     /*
-     * Both embeddings are computed in the browser and sent up, so the server has
-     * no ML runtime. parseEmbedding does the real validation — 128 finite floats
-     * inside the model's norm band — and returns null for anything else.
+     * Both embeddings are computed in the browser — with SFace, always, whatever
+     * `settings.face_engine` says for sign-in — and sent up, so the server has no
+     * ML runtime. See the note in components/IdUpload.tsx for why the reader
+     * follows `id_face_match_threshold`'s calibration rather than the cafe's
+     * sign-in engine.
+     *
+     * parseEmbedding does the real validation — 128 finite floats inside the
+     * model's norm band — and returns null for anything else.
      *
      * A missing or malformed one is not an error. It means "this check could not
      * run", which becomes an `unknown` signal. Refusing the upload instead would
@@ -595,6 +600,14 @@ export const PATCH = handler(
  * gone, a 'verified' row would be claiming a check that can no longer be
  * substantiated or repeated.
  *
+ * "Removed" covers everything derived from the document, not just the pictures:
+ * the OCR fields, the signals, the provider name, the ID type and number, and the
+ * card fingerprint. The number and the fingerprint are the columns `id-login`
+ * narrows an account by, so leaving them behind would let a card whose documents
+ * were deleted still name its owner. They are also the most sensitive things here
+ * — a national ID number is sensitive personal information under the Data Privacy
+ * Act — and the point of this route is that the cafe can take them back out.
+ *
  * The audit entry is deliberately kept. Removing documents is not something an
  * app should be able to do without a trace.
  */
@@ -608,7 +621,10 @@ export const DELETE = handler(
 
     const { data: before } = await db()
       .from("users")
-      .select("id, username, full_name, role, id_doc_front, id_doc_back, id_photo, verification_status")
+      .select(
+        "id, username, full_name, role, id_doc_front, id_doc_back, id_photo, " +
+          "id_doc_number, id_doc_type, id_card_hash, verification_status"
+      )
       .eq("id", id)
       .maybeSingle();
 
@@ -633,6 +649,11 @@ export const DELETE = handler(
         id_fields: null,
         id_signals: null,
         id_provider: null,
+        // The identifying columns go too. `id-login` matches on exactly these two,
+        // so keeping either would leave a deleted card able to name this account.
+        id_doc_number: null,
+        id_doc_type: null,
+        id_card_hash: null,
         verification_status: "unverified",
         verification_notes: null,
         verified_at: null,
@@ -655,6 +676,8 @@ export const DELETE = handler(
         full_name: data.full_name,
         had_back: Boolean(before.id_doc_back),
         had_photo: Boolean(before.id_photo),
+        // A boolean, never the number itself: the log is append-only.
+        had_number: Boolean(before.id_doc_number),
         previous_status: before.verification_status,
       },
       { ip: clientIp(req) }

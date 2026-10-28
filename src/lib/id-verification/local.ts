@@ -9,17 +9,20 @@
  * ## What it can honestly do
  *
  *   - Compare the portrait printed on the card against a photo of the person.
- *     This is the one strong check, and it works because lib/face-client already
- *     computes both descriptors in the browser.
+ *     This is the one strong check, and it works because lib/face-sface computes
+ *     both descriptors in the browser with SFace — the engine the thresholds in
+ *     this file are calibrated to.
  *   - Look at the shape of the uploads and say whether they are plausibly cards.
  *
  * ## What it cannot do, and will not pretend to
  *
  * It cannot tell whether a Philippine driver's licence is genuine. There is no
  * MRZ on a PhilSys card or an LTO licence, no PDF417 barcode, and no open
- * template library for either to be checked against. It reads no text off the
- * card either. "This is a real licence" and "the card belongs to this person"
- * both stay human judgements made by an admin looking at the two images.
+ * template library for either to be checked against. This module reads no text at
+ * all; the on-device OCR provider (./local-ocr.ts) is separate and runs alongside
+ * it, filling the name field where it can. "This is a real licence" and "the card
+ * belongs to this person" both stay human judgements made by an admin looking at
+ * the two images.
  *
  * That is why this module returns signals and never a verdict — see ./types.ts.
  *
@@ -42,12 +45,13 @@ import {
 /**
  * At or below this cosine distance the two portraits read as the same person.
  *
- * **This number is not measured, and that is a real caveat.**
+ * **This number is not measured on printed portraits, and that is a real caveat.**
  *
- * `face.ts` can justify its own threshold with measurements taken on this app:
- * same-person re-captures landed between 0.0000 and 0.0301, different people
- * between 0.0362 and 0.0684. Those are photographs of one person taken seconds
- * apart in one room, which is a much easier comparison than the one here.
+ * `face.ts` can justify SFace's sign-in threshold with measurements taken on this
+ * app: same-person re-captures landed between 0.019 and 0.119, front-versus-side
+ * between 0.253 and 0.473, and different people between 0.559 and 0.653. Those are
+ * live photographs of one person taken in one room, which is a much easier
+ * comparison than the one here.
  *
  * This is a different problem. One image is a *printed portrait* — flat-lit, low
  * resolution, sometimes years old, sometimes creased — and the other is a live
@@ -55,10 +59,14 @@ import {
  * why every vendor sells a separate and much looser threshold for "selfie versus
  * ID photo" than for "selfie versus selfie".
  *
- * So 0.55 is a reasoned starting point rather than a measured one. It is editable
+ * So 0.55 is a reasoned starting point rather than a measured one. It sits just
+ * below the closest measured stranger pair (0.559), which is what makes it
+ * defensible at all: it leaves room for a printed/live pair while staying under
+ * every different-person reading taken with this engine. It is editable
  * (settings.id_face_match_threshold) precisely so it can be corrected against
- * real cards once the café has some. Do not tune it downward to make the output
- * look tidier; the band in the middle is doing real work.
+ * real cards once the café has some. Re-measure before changing it; do not tune it
+ * downward to make the output look tidier, because the band in the middle is
+ * doing real work.
  */
 export const DEFAULT_ID_MATCH_THRESHOLD = 0.55;
 export const MIN_ID_MATCH_THRESHOLD = 0.1;
@@ -67,12 +75,12 @@ export const MAX_ID_MATCH_THRESHOLD = 0.95;
 /**
  * At or above this, the two portraits are almost certainly different people.
  *
- * Deliberately set above the point where it would routinely fire. Face
- * recognition vendors generally treat anything under roughly 0.35 cosine distance
- * as a match on well-aligned ID crops, so at that calibration a lot of *real*
- * pairs would sit far below the reject line — meaning this is mostly a backstop
- * for an obvious mismatch (the wrong person's card) rather than the routine path,
- * and the honest outcome for anything less obvious is "ask a human".
+ * The measured different-person range for SFace is 0.559-0.653, so this sits
+ * above every one of those readings and fires only on an obvious mismatch (the
+ * wrong person's card, or a photo that is not the same face at all). Everything
+ * between the match threshold and this line is reported as inconclusive, because
+ * a printed portrait and a live photo of the same person can genuinely land there
+ * and the honest outcome is "ask a human".
  */
 export const ID_MATCH_REJECT = 0.85;
 

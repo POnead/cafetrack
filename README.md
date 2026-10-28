@@ -18,7 +18,8 @@ Needs Node.js 18.17 or newer (this project is developed on 24.15) and npm.
 ```bash
 npm install
 cp .env.example .env.local     # optional — the app runs without it
-npm run setup:face             # optional — copies the ~12MB face-model weights
+npm run setup:face             # optional — copies the ~12MB legacy face-model weights
+npm run setup:face:sface       # optional — fetches the ~9.5MB SFace engine and wasm runtime
 npm run dev
 ```
 
@@ -40,12 +41,14 @@ items, the reference lists (categories, locations) and three accounts. Staff
 sign in with the barcode printed on their ID plus their password; admins use a
 username and password.
 
-`npm run setup:face` is the one optional step. The face models are ~12MB of
-binary that already ship inside `@vladmandic/face-api`, so they are copied
-out rather than committed — see [the script](scripts/setup-face-models.mjs) for
-why. Skip it and everything still runs except face enrolment, face sign-in and
-the ID portrait check; those pages say the model files are missing rather than
-showing a camera that does nothing.
+`npm run setup:face` and `npm run setup:face:sface` are the two optional model
+steps. The first copies the original face models out of `@vladmandic/face-api`
+rather than committing them — see [the script](scripts/setup-face-models.mjs) for
+why; the second downloads the SFace engine. Skip them and everything still runs
+except face enrolment, face sign-in, the duty check and the ID portrait check;
+those pages say the model files are missing rather than showing a camera that does
+nothing. The ID portrait check always uses SFace, even when sign-in is set to the
+original model.
 
 To see it work without typing anything: **Inventory → All Items → Print visible
 barcode labels**, print a sheet, then scan a label with the field on **Checkout
@@ -317,22 +320,27 @@ does not lock anyone out:
 
 The capture screens read the engine from `GET /api/face/config` once per page, so
 sign-in, the duty check, step two and card sign-in cannot disagree about which
-model they are running. If the SFace files are missing, the reader falls back to
-the original model rather than leaving the till dead.
+model they are running. There is no silent fallback between engines: a missing
+model file is reported as a missing model, because a vector from the other engine
+matches nothing and would be shown as an unrecognised face. Run both setup
+commands if the café may switch between them.
 
 ### ID verification
 
-The café's own machine can compare two faces and look at an image's dimensions.
-It cannot tell whether a Philippine driver's licence is genuine — those cards
-carry no MRZ and no barcode, and no open tool checks them against a template — so
-the app never claims to. What it produces is evidence, and a human decides.
+The café's own machine can compare two faces, read printed text off a card, and
+look at an image's dimensions. It cannot tell whether a Philippine driver's licence
+is genuine — an LTO licence or a PhilSys card carries no machine-readable zone, and
+the ID checks decode no barcode at all — so the app never claims to. What it
+produces is evidence, and a human decides.
 
 **What the local checks do, with nothing configured:**
 
 - Compare the face printed on the ID against a photo of the person. Both
-  descriptors are computed in the browser by the same face model the duty check
-  already uses, so there is no new dependency and no image processing on the
-  server.
+  descriptors are computed in the browser with SFace — always SFace, whichever
+  model sign-in is using, because `id_face_match_threshold` is calibrated to that
+  scale and the two engines put the same pair of faces at very different
+  distances (a stranger measures about 0.04 with the original model and about 0.6
+  with SFace). The threshold is editable under **Settings → ID verification**.
 - Report the pixel dimensions and aspect ratio of each upload, and flag anything
   whose shape is not consistent with an ID card.
 - Guide a live camera capture of the card. The enrollment flow prefers the
@@ -373,7 +381,10 @@ phone photo of a card from megabytes to a couple of hundred kilobytes.
 how many checks passed, warned, failed or could not run. It does **not** get the ID
 number, the name read off the card, or any similarity figure — that log is
 append-only and hash-chained, so anything written there can never be taken back
-out. The evidence stays on the user row, where **Remove documents** can delete it.
+out. The evidence stays on the user row, where **Remove documents** deletes it —
+the images, the OCR fields, the signals, and the ID type, number and card
+fingerprint, the last two being the columns card sign-in matches on. A removed card
+therefore cannot name its account either.
 
 **Uploading is bounded.** App Router has no request body limit, so the route reads
 the declared `Content-Length` first and then counts the bytes that actually arrive,

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { loadFaceModels, readFace } from "@/lib/face-client";
+import { readFaceSface, sfaceModelsPresent } from "@/lib/face-sface";
 import { cameraAvailable, permissionHelp } from "@/lib/face-client";
 import {
   cameraOriginProblem,
@@ -24,18 +24,17 @@ import { useAutoIdCapture } from "@/lib/use-auto-id-capture";
  * Attach a government ID and a photo of the person, and send both up.
  *
  * Loaded with `ssr: false` and `next/dynamic` by its callers, for the same
- * reason FaceCapture is: reading a face pulls in face-api and TensorFlow, which
+ * reason FaceCapture is: reading a face pulls in ONNX Runtime and SFace, which
  * together are several megabytes, and the staff list is a page an admin opens
  * constantly for something that usually has nothing to do with photos.
  *
- * ## Why face-client is imported here and not passed in
+ * ## Why face-sface is imported here and not passed in
  *
- * Importing it in the parent would put face-api and TensorFlow into that page's
- * *initial* download — the dynamic boundary would still work, but the module
- * graph would be resolved by the page that renders the button, and the several
- * megabytes would be fetched whether or not the admin ever opens this. Owning
- * the import inside the component that needs it is what keeps the staff list
- * light.
+ * Importing it in the parent would put the models into that page's *initial*
+ * download — the dynamic boundary would still work, but the module graph would
+ * be resolved by the page that renders the button, and the several megabytes
+ * would be fetched whether or not the admin ever opens this. Owning the import
+ * inside the component that needs it is what keeps the staff list light.
  *
  * ## What this does before the upload, and why
  *
@@ -47,10 +46,19 @@ import { useAutoIdCapture } from "@/lib/use-auto-id-capture";
  * The server enforces its own limit regardless (see lib/id-document.ts) — this is
  * a courtesy that makes the upload fast, not a control.
  *
- * **Reading two faces.** The portrait printed on the card and the face in the
- * photo are both turned into 128-float descriptors here, in the browser, and both
- * go up as vectors. The server compares them with the same cosine distance every
- * other face comparison in this app uses.
+ * **Reading two faces, always with SFace.** The portrait printed on the card and
+ * the face in the photo are both turned into 128-float descriptors here, in the
+ * browser, and both go up as vectors. The server compares them with the same
+ * cosine distance every other face comparison in this app uses.
+ *
+ * SFace specifically — not whichever engine `settings.face_engine` names for
+ * staff sign-in. The two engines put the same pair of faces at wildly different
+ * distances: a different person measures 0.0362-0.0684 with the legacy model and
+ * 0.559-0.653 with SFace. `settings.id_face_match_threshold` is one number and it
+ * is calibrated to SFace's scale (see lib/id-verification/local.ts), so handing
+ * it a legacy vector would make 0.55 pass almost every pair. The ID flow stores
+ * no descriptors, so this choice cannot strand an enrolment or fight the café's
+ * sign-in engine.
  *
  * Neither descriptor is the picture: it is 1.5KB of floats that cannot be
  * displayed. The pictures are still uploaded, because an admin has to look at
@@ -59,7 +67,9 @@ import { useAutoIdCapture } from "@/lib/use-auto-id-capture";
  * **Failure is soft.** No face in the card image, or no face in the photo, is not
  * an error. It becomes an "unknown" signal on the review screen saying the
  * comparison could not run. Refusing the upload would turn the model's inability
- * to read a face into a refusal to record an ID.
+ * to read a face into a refusal to record an ID. The same applies when the SFace
+ * models are not installed: the upload still goes, and the review screen says the
+ * portrait was not compared.
  */
 
 /** Long edge, in pixels, that every image is reduced to before upload. */
@@ -78,9 +88,9 @@ export type IdUploadResult = {
   front: File;
   back: File | null;
   photo: File | null;
-  /** 128 floats from the portrait printed on the card, if one was read. */
+  /** 128 floats from the portrait printed on the card, if one was read with SFace. */
   cardEmbedding: number[] | null;
-  /** 128 floats from the photo of the person, if one was read. */
+  /** 128 floats from the photo of the person, if one was read with SFace. */
   photoEmbedding: number[] | null;
   /**
    * 64-bit perceptual fingerprint of the card front, as 16 hex characters.
@@ -294,13 +304,19 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
       setReading(true);
       const warnings: string[] = [];
 
-      try {
-        await loadFaceModels();
-      } catch {
+      /*
+       * Both reads use SFace regardless of settings.face_engine — see the note at
+       * the top of this file for why the threshold, not the cafe's sign-in
+       * engine, decides which reader this flow uses.
+       *
+       * Checked before loading, so an install without the model files says so
+       * once, plainly, instead of surfacing the same ONNX failure twice.
+       */
+      if (!(await sfaceModelsPresent().catch(() => false))) {
         setEmbeddings({ cardEmbedding: null, photoEmbedding: null });
         setNote(
-          "The face-matching model could not be loaded, so the portrait will not be compared. " +
-            "Everything else still runs."
+          "The face-matching model is not installed, so the portrait will not be compared. " +
+            "Everything else still runs. Run `npm run setup:face:sface` to install it."
         );
         setReading(false);
         return;
@@ -313,13 +329,20 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
       if (!frontCanvas) {
         warnings.push("The front of the ID could not be opened as an image.");
       } else {
-        const read = await readFace(frontCanvas);
-        if (read.ok) {
-          cardEmbedding = read.embedding;
-        } else {
+        try {
+          const read = await readFaceSface(frontCanvas);
+          if (read.ok) {
+            cardEmbedding = read.embedding;
+          } else {
+            warnings.push(
+              "No face could be read from the card image, so the printed portrait will not be " +
+                "compared. Check the card is large enough and evenly lit in the photo."
+            );
+          }
+        } catch {
           warnings.push(
-            "No face could be read from the card image, so the printed portrait will not be " +
-              "compared. Check the card is large enough in the photo."
+            "The face-matching model failed on the card image, so the printed portrait was not " +
+              "compared."
           );
         }
       }
@@ -329,11 +352,17 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
         if (!photoCanvas) {
           warnings.push("The photo of the person could not be opened as an image.");
         } else {
-          const read = await readFace(photoCanvas);
-          if (read.ok) {
-            photoEmbedding = read.embedding;
-          } else {
-            warnings.push("No face could be read from the photo, so nothing will be compared.");
+          try {
+            const read = await readFaceSface(photoCanvas);
+            if (read.ok) {
+              photoEmbedding = read.embedding;
+            } else {
+              warnings.push("No face could be read from the photo, so nothing will be compared.");
+            }
+          } catch {
+            warnings.push(
+              "The face-matching model failed on the photo of the person, so nothing was compared."
+            );
           }
         }
       }
@@ -344,9 +373,9 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
     },
     /*
      * Nothing reactive is captured: the two files arrive as arguments, the
-     * setters are stable, and `toCanvas`, `loadFaceModels` and `readFace` are
-     * module scope. Listing the imports here was not just noise — the lint rule
-     * is right that a module binding can never change in a way a re-render
+     * setters are stable, and `toCanvas`, `sfaceModelsPresent` and `readFaceSface`
+     * are module scope. Listing the imports here was not just noise — the lint
+     * rule is right that a module binding can never change in a way a re-render
      * would observe, so the array was describing a dependency that does not
      * exist.
      */
