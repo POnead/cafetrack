@@ -83,6 +83,18 @@ export type PdfItem = {
 
 export type PdfMovementSummary = { label: string; count: number; qty: string };
 
+export type PdfTopMover = { sku: string; name: string; qty: string };
+
+export type PdfExpiry = {
+  sku: string;
+  name: string;
+  category: string;
+  location: string;
+  quantity: string;
+  expiry: string;
+  days: number | null;
+};
+
 export type PdfMovementLine = {
   date: string;
   actorName: string;
@@ -100,6 +112,8 @@ export type PdfReport = {
   filterDescription: string;
   tiles: { label: string; value: string | number }[];
   items: PdfItem[];
+  topMovers: PdfTopMover[];
+  soonestExpiry: PdfExpiry[];
   movementSummary: PdfMovementSummary[];
   waste: { sku: string; name: string; qty: string; count: number }[];
   movementLines: PdfMovementLine[];
@@ -124,11 +138,15 @@ export type PdfReport = {
  * keep their full names.
  */
 const ITEM_COLS = [60, 96, 62, 62, 46, 40, 56, 93];
+const TOP_COLS = [70, 349, 96];
+const EXPIRY_COLS = [60, 133, 85, 90, 45, 60, 42];
 const SUMMARY_COLS = [323, 96, 96];
 const WASTE_COLS = [60, 199, 156, 100];
 const LINE_COLS = [62, 68, 62, 56, 78, 76, 36, 77];
 
 assertWidths("inventory", ITEM_COLS);
+assertWidths("most checked out", TOP_COLS);
+assertWidths("soonest expiries", EXPIRY_COLS);
 assertWidths("movement summary", SUMMARY_COLS);
 assertWidths("waste", WASTE_COLS);
 assertWidths("movement details", LINE_COLS);
@@ -168,6 +186,12 @@ export function buildStockReportPdf(report: PdfReport): Promise<Buffer> {
 
       writeSectionTitle(doc, "Inventory");
       writeItemTable(doc, report.items, ITEM_COLS);
+
+      writeSectionTitle(doc, "Most checked out");
+      writeTopMoversTable(doc, report.topMovers, TOP_COLS);
+
+      writeSectionTitle(doc, "Soonest expiries");
+      writeExpiryTable(doc, report.soonestExpiry, EXPIRY_COLS);
 
       writeSectionTitle(doc, "Movement summary");
       writeSummaryTable(doc, report.movementSummary, SUMMARY_COLS);
@@ -578,6 +602,54 @@ function writeItemTable(doc: PDFKit.PDFDocument, items: PdfReport["items"], widt
           lineBreak: false,
         });
     },
+  });
+}
+
+function writeTopMoversTable(
+  doc: PDFKit.PDFDocument,
+  rows: PdfReport["topMovers"],
+  widths: number[]
+) {
+  writeTable(doc, {
+    columns: [
+      { label: "SKU", width: widths[0] },
+      { label: "Item", width: widths[1] },
+      { label: "Qty checked out", width: widths[2], align: "right" },
+    ],
+    widths,
+    emptyMessage: "No checkout activity matches these filters.",
+    wrap: true,
+    rows: rows.map((r) => [r.sku, r.name, r.qty]),
+  });
+}
+
+function writeExpiryTable(
+  doc: PDFKit.PDFDocument,
+  rows: PdfReport["soonestExpiry"],
+  widths: number[]
+) {
+  writeTable(doc, {
+    columns: [
+      { label: "SKU", width: widths[0] },
+      { label: "Item", width: widths[1] },
+      { label: "Category", width: widths[2] },
+      { label: "Location", width: widths[3] },
+      { label: "On hand", width: widths[4], align: "right" },
+      { label: "Expiry", width: widths[5] },
+      { label: "Days", width: widths[6], align: "right" },
+    ],
+    widths,
+    emptyMessage: "No dated items match these filters.",
+    wrap: true,
+    rows: rows.map((r) => [
+      r.sku,
+      r.name,
+      r.category,
+      r.location,
+      r.quantity,
+      r.expiry,
+      r.days === null ? "—" : r.days < 0 ? "Expired" : String(r.days),
+    ]),
   });
 }
 

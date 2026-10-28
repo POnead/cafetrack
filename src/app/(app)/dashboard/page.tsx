@@ -574,6 +574,7 @@ export default function DashboardPage() {
                     <th className="th hidden md:table-cell">Category</th>
                     <th className="th hidden md:table-cell">Location</th>
                     <th className="th text-right">On hand</th>
+                    <th className="th text-right">Threshold</th>
                     <th className="th">Expiry</th>
                     <th className="th">Status</th>
                   </tr>
@@ -605,6 +606,9 @@ export default function DashboardPage() {
                         </td>
                         <td className="td text-right tabular-nums text-cocoa-800">
                           {fmtQty(item.quantity, item.unit)}
+                        </td>
+                        <td className="td text-right tabular-nums text-cocoa-500">
+                          {fmtQty(item.low_stock_threshold, item.unit)}
                         </td>
                         <td className="td text-cocoa-600">
                           {item.expiration_date

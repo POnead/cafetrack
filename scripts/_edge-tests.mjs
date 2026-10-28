@@ -710,6 +710,51 @@ async function rawCall(method, path, rawBody, cookie) {
   check("once unlinked, the supplier can be removed", r.status === 200, `${r.status}`);
   if (supplierProbe?.id) await call("DELETE", `/api/items/${supplierProbe.id}`, null, A2);
 
+  /* ============ 7ab. Analytics and the exported report ================= */
+  /* The report page's three views have to survive the trip through the server:
+   * the snapshot must carry the threshold it renders, the expiry list must be
+   * ranked, and the PDF must be a real downloaded file rather than a print
+   * dialog. None of this is covered by the page smoke test, which only checks
+   * that /reports answers. */
+  section("analytics views and the generated PDF");
+
+  r = await call("GET", "/api/analytics", null, A2);
+  const snap = r.data?.snapshot?.items?.[0];
+  check(
+    "the stock snapshot carries the low-stock threshold it is meant to show",
+    r.status === 200 && snap && Number.isFinite(Number(snap.low_stock_threshold)),
+    snap ? `threshold=${snap.low_stock_threshold}` : "no snapshot"
+  );
+
+  const expiryRows = r.data?.soonestExpiry ?? [];
+  const ranked = expiryRows.every((row, i) => {
+    const d = row.daysUntilExpiry ?? Number.POSITIVE_INFINITY;
+    const prev = i === 0 ? Number.NEGATIVE_INFINITY : (expiryRows[i - 1].daysUntilExpiry ?? Number.POSITIVE_INFINITY);
+    return d >= prev;
+  });
+  check(
+    "the soonest-expiry view is ranked by days remaining",
+    expiryRows.length > 0 && ranked,
+    `${expiryRows.length} dated item(s)`
+  );
+
+  const pdfRes = await fetch(BASE + "/api/report-export", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...(A2 ? { cookie: A2 } : {}) },
+    body: "{}",
+  });
+  const pdfBytes = new Uint8Array(await pdfRes.arrayBuffer());
+  const magic = String.fromCharCode(...pdfBytes.slice(0, 5));
+  check("the report export returns a PDF", pdfRes.status === 200 && magic === "%PDF-", `${pdfRes.status} ${magic}`);
+  check(
+    "the server names the file and dates it",
+    /filename="cafetrack-report-\d{4}-\d{2}-\d{2}\.pdf"/.test(
+      pdfRes.headers.get("content-disposition") ?? ""
+    ),
+    pdfRes.headers.get("content-disposition") ?? "no filename"
+  );
+  check("the PDF has content, not just a header", pdfBytes.length > 2000, `${pdfBytes.length} bytes`);
+
   /* ============ 7b. Expiry: the browser and the database must agree ===== */
   /* The one business rule implemented twice. refresh_alerts() decides
    * "expired" in SQL against current_date; the UI recomputes the same thing in

@@ -143,10 +143,12 @@ one, from `Downloads\cafetrack`.
   error. The same rule covers a tab that was in the background: it refreshes on
   return.
 - **Reports export as a real PDF** — generated on the server, with the stock
-  snapshot and the filtered movement history, paginated with repeating headers and
-  a page count. The browser's print dialog is not involved, so the file is named
-  after the report and dated rather than after whatever the browser defaults to.
-  CSV export carries the same rows.
+  snapshot, the ranked most-checked-out and soonest-expiry views, and the filtered
+  movement history, paginated with repeating headers and a page count. The
+  browser's print dialog is not involved, so the file is named after the report
+  and dated rather than after whatever the browser defaults to. CSV export carries
+  the same rows, each tagged with the record it came from, so the ranked views sit
+  beside the snapshot and the movements in one file.
 - **Email notifications** — low stock, out of stock, expiring soon, expired, a daily
   summary, rejected sign-ins, and the stock report on demand. **Off until an admin
   turns it on** in Settings → Email, which the page will not let them do until a

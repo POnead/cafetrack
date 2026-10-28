@@ -264,6 +264,27 @@ export default function ReportsPage() {
       .slice(0, 5);
   }, [filteredTransactions]);
 
+  /*
+   * The expiry work queue, ranked the way the alert is ranked: fewest days
+   * first, with already-expired rows at the top rather than hidden at the
+   * bottom. Ten is enough to act on in one pass; the full list is still in the
+   * stock table below and in the CSV. An unparseable date sorts last instead of
+   * pretending to be "0 days".
+   */
+  const soonestExpiry = useMemo(
+    () =>
+      shownItems
+        .filter((i) => i.expiration_date)
+        .map((i) => ({ ...i, days: daysUntil(i.expiration_date) }))
+        .sort(
+          (a, b) =>
+            (a.days ?? Number.POSITIVE_INFINITY) -
+            (b.days ?? Number.POSITIVE_INFINITY)
+        )
+        .slice(0, 10),
+    [shownItems]
+  );
+
   // Waste tracking: total waste quantity and top wasted items
   const wasteTotal = movement.find((m) => m.type === "waste")?.qty ?? 0;
   const wasteCount = movement.find((m) => m.type === "waste")?.count ?? 0;
@@ -362,7 +383,48 @@ export default function ReportsPage() {
     );
     const rows = [...stockRows, ...movementRows];
 
-    const csv = toCsv(rows, [
+    const topMoverRows: Record<string, unknown>[] = topMovers.map((m) => {
+      const item = itemsBySku.get(m.sku);
+      return {
+        Record: "Most checked out",
+        Date: "",
+        Staff: "",
+        Movement: "Checked out",
+        SKU: m.sku,
+        Item: m.name,
+        Category: item?.category?.name ?? "",
+        Location: item?.location?.name ?? "",
+        Quantity: Number(m.qty),
+        Unit: item?.unit ?? "",
+        Threshold: "",
+        Expiry: "",
+        Status: "",
+        "Days to expiry": "",
+        Note: "",
+      };
+    });
+
+    const expiryRows: Record<string, unknown>[] = soonestExpiry.map((i) => ({
+      Record: "Soonest expiry",
+      Date: "",
+      Staff: "",
+      Movement: "",
+      SKU: i.sku,
+      Item: i.name,
+      Category: i.category?.name ?? "",
+      Location: i.location?.name ?? "",
+      Quantity: Number(i.quantity),
+      Unit: i.unit,
+      Threshold: Number(i.low_stock_threshold),
+      Expiry: i.expiration_date ?? "",
+      Status: stockStatus(i.quantity, i.low_stock_threshold).label,
+      "Days to expiry": i.days ?? "",
+      Note: "",
+    }));
+
+    const allRows = [...rows, ...topMoverRows, ...expiryRows];
+
+    const csv = toCsv(allRows, [
       "Record",
       "Date",
       "Staff",
@@ -389,7 +451,7 @@ export default function ReportsPage() {
     URL.revokeObjectURL(url);
 
     setToast({
-      msg: `Exported ${stockRows.length} stock rows and ${movementRows.length} movement rows`,
+      msg: `Exported ${stockRows.length} stock rows and ${movementRows.length} movement rows, plus ${topMoverRows.length} ranked items and ${expiryRows.length} expiry rows`,
       tone: "success",
     });
   }
@@ -729,6 +791,73 @@ export default function ReportsPage() {
               )}
             </Card>
           </div>
+
+          {/* ---------- soonest expiries ---------- */}
+          <Card className="!p-0">
+            <div className="flex items-center justify-between border-b border-cream-200 bg-cream-50 px-4 py-2.5">
+              <h2 className="text-sm font-bold text-cocoa-800">
+                Soonest Expiries
+              </h2>
+              <span className="text-[11px] text-cocoa-400">
+                {soonestExpiry.length} shown
+              </span>
+            </div>
+            {soonestExpiry.length === 0 ? (
+              <Empty>No dated items match this report.</Empty>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="bg-cream-100/60">
+                      <th className="th">Item</th>
+                      <th className="th hidden md:table-cell">Category</th>
+                      <th className="th hidden md:table-cell">Location</th>
+                      <th className="th text-right">On hand</th>
+                      <th className="th">Expiry</th>
+                      <th className="th text-right">Days left</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {soonestExpiry.map((i) => (
+                      <tr key={i.id} className="transition-colors hover:bg-cream-50">
+                        <td className="td">
+                          <div className="font-medium text-cocoa-800">{i.name}</div>
+                          <div className="font-mono text-[11px] text-cocoa-300">
+                            {i.sku}
+                          </div>
+                        </td>
+                        <td className="td hidden text-cocoa-500 md:table-cell">
+                          {i.category?.name ?? "Uncategorized"}
+                        </td>
+                        <td className="td hidden text-cocoa-500 md:table-cell">
+                          {i.location?.name ?? "—"}
+                        </td>
+                        <td className="td text-right tabular-nums">
+                          {fmtQty(i.quantity, i.unit)}
+                        </td>
+                        <td className="td whitespace-nowrap text-xs text-cocoa-500">
+                          {i.expiration_date ? fmtDate(i.expiration_date) : "—"}
+                        </td>
+                        <td
+                          className={`td text-right font-semibold tabular-nums ${
+                            i.days !== null && i.days < 0
+                              ? "text-terracotta-700"
+                              : "text-ochre-700"
+                          }`}
+                        >
+                          {i.days === null
+                            ? "—"
+                            : i.days < 0
+                              ? "Expired"
+                              : `${i.days} days`}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
 
           <Card className="!p-0">
             <div className="flex items-center justify-between border-b border-cream-200 bg-cream-50 px-4 py-2.5">

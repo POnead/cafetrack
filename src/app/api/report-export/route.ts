@@ -85,6 +85,58 @@ export const POST = handler(async (req: Request) => {
       : true
   );
 
+  /*
+   * The two ranked views the report page shows, shaped for the PDF.
+   *
+   * They are computed from the same rows already fetched rather than from a
+   * second query: the page and the document must agree about what "most checked
+   * out" and "soonest expiry" mean, and two queries are two chances to disagree.
+   */
+  const categoryLine = (line: any) =>
+    !categoryName || itemsBySku.get(line.sku)?.category?.name === categoryName;
+
+  const topMovers = (() => {
+    const tally = new Map<string, { name: string; qty: number }>();
+    for (const t of inWindow) {
+      if (t.type !== "checkout") continue;
+      for (const line of t.transaction_items ?? []) {
+        // A transaction can mix categories; only the lines in this report count.
+        if (!categoryLine(line)) continue;
+        const cur = tally.get(line.sku) ?? { name: line.item_name, qty: 0 };
+        cur.qty += Number(line.quantity);
+        tally.set(line.sku, cur);
+      }
+    }
+    return [...tally.entries()]
+      .map(([sku, v]) => ({ sku, name: v.name, total: v.qty, qty: fmtQty(v.qty) }))
+      // Sort the number, not the formatted string: fmtQty keeps two decimals,
+      // so "12.5" and "9.75" would compare as text if this ran after the map.
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 5)
+      .map(({ sku, name, qty }) => ({ sku, name, qty }));
+  })();
+
+  const soonestExpiry = items
+    .filter((i: any) => i.expiration_date)
+    .map((i: any) => {
+      const d = daysUntil(i.expiration_date);
+      return {
+        sku: i.sku,
+        name: i.name,
+        category: i.category?.name ?? "—",
+        location: i.location?.name ?? "—",
+        quantity: fmtQty(i.quantity, i.unit),
+        expiry: fmtDate(i.expiration_date),
+        days: d,
+      };
+    })
+    .sort(
+      (a: any, b: any) =>
+        (a.days ?? Number.POSITIVE_INFINITY) -
+        (b.days ?? Number.POSITIVE_INFINITY)
+    )
+    .slice(0, 10);
+
   const MOVEMENT_LABEL: Record<string, string> = {
     checkout: "Checked out",
     restock: "Restocked",
@@ -140,6 +192,8 @@ export const POST = handler(async (req: Request) => {
         tone: status.key as "out" | "low" | "ok",
       };
     }),
+    topMovers,
+    soonestExpiry,
     movementSummary,
     waste: wasteByItem(inWindow),
     movementLines: inWindow.flatMap((m) =>
