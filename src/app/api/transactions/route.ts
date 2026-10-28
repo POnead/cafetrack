@@ -156,6 +156,31 @@ export const POST = handler(async (req: Request) => {
     return fail("Incorrect password", 401);
   }
 
+  /*
+   * Which supplier delivered this restock.
+   *
+   * Optional, because a delivery can arrive without anyone recording who sent
+   * it, but when given it is written back to every restocked item as its
+   * `supplier_id`. That is what makes "the supplier it was last received from"
+   * true rather than a field somebody has to remember to update by hand - and it
+   * is what the low-stock alert reads when it tells the owner who to call.
+   *
+   * Only a restock has a supplier. A checkout or a waste log is stock leaving,
+   * and silently rewriting the supplier from either would turn the field into
+   * "whoever touched it last".
+   */
+  const supplierId =
+    type === "restock" ? String(body.supplier_id ?? "").trim() || null : null;
+
+  if (supplierId) {
+    const { data: supplier } = await db()
+      .from("suppliers")
+      .select("id")
+      .eq("id", supplierId)
+      .maybeSingle();
+    if (!supplier) return fail("That supplier no longer exists");
+  }
+
   const { data, error } = await db().rpc("process_transaction", {
     p_type: type,
     p_actor_id: session.id,
@@ -168,12 +193,46 @@ export const POST = handler(async (req: Request) => {
   // concurrent edits — surface those as conflicts, not server errors.
   if (error) return fail(error.message.replace(/^P0001:\s*/, ""), 409);
 
+  /*
+   * Link the items to the supplier they were just received from.
+   *
+   * After the movement, not before: if process_transaction rejects the restock
+   * (short stock, a stale expiry, a concurrent edit) then nothing was received
+   * and the supplier should not change either. The movement is already committed
+   * by this point, so a failed link is logged rather than turned into a 500 that
+   * would suggest the stock was not added.
+   */
+  if (type === "restock" && supplierId) {
+    const restocked = (data?.items ?? items) as { sku?: string }[];
+    const skus = [
+      ...new Set(restocked.map((line) => line.sku).filter(Boolean)),
+    ] as string[];
+
+    if (skus.length > 0) {
+      const { error: linkError } = await db()
+        .from("items")
+        .update({ supplier_id: supplierId })
+        .in("sku", skus);
+
+      if (linkError) {
+        console.error(
+          "could not record the restock supplier on items:",
+          linkError.message
+        );
+      }
+    }
+  }
+
   await audit(
     session,
     AUDIT_ACTION[type],
     "transaction",
     data?.transaction_id ?? null,
-    { note: body.note ?? null, items: data?.items ?? items },
+    {
+      note: body.note ?? null,
+      supplier_id: supplierId,
+      items: data?.items ?? items,
+    },
     { ip: clientIp(req), outcome: "success" }
   );
 

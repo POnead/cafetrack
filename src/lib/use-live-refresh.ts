@@ -23,9 +23,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 export type LiveStatus = "connecting" | "live" | "polling";
 
-/** Poll interval while the event stream is healthy, and while it is not. */
+/**
+ * Poll interval while the event stream is healthy, and while it is not.
+ *
+ * The healthy interval is deliberately slow: the stream is already carrying
+ * every movement, so the poll only exists to notice a stream that has gone
+ * quiet without saying so. When the stream is down it becomes the only source
+ * of updates, and 30s of stale figures is exactly what this hook exists to
+ * avoid - so it comes down to a few seconds.
+ */
 const POLL_OPEN_MS = 30_000;
-const POLL_CLOSED_MS = 30_000;
+const POLL_CLOSED_MS = 5_000;
 
 export function useLiveRefresh(reload: () => Promise<void> | void) {
   const [status, setStatus] = useState<LiveStatus>("connecting");
@@ -91,8 +99,8 @@ export function useLiveRefresh(reload: () => Promise<void> | void) {
 
     /**
      * Back off, so a server that is down does not get hammered by every open tab
-     * in the cafe at once. Capped at 30s, which is also roughly how stale the
-     * poll keeps things.
+     * in the cafe at once. Capped at 30s; the poll below keeps the page honest
+     * in the meantime, which is why the reconnect can afford to wait.
      */
     const schedule = () => {
       if (closed || retryTimer) return;

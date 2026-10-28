@@ -18,6 +18,14 @@ import { Card, Spinner, Toast, Empty } from "@/components/ui";
 
 type Ref = { id: string; name: string; min_shelf_life_days?: number | null };
 type Supplier = { id: string; name: string; contact_name: string | null; phone: string | null; email: string | null };
+type SupplierItem = {
+  id: string;
+  sku: string;
+  name: string;
+  unit: string;
+  quantity: number;
+  low_stock_threshold: number;
+};
 type Tone = "info" | "error" | "success";
 
 const NUMERIC_FIELDS = [
@@ -53,6 +61,21 @@ export default function SettingsPage() {
   const [newSupplier, setNewSupplier] = useState("");
   const [adding, setAdding] = useState<"category" | "location" | "supplier" | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+
+  /* Supplier detail is edited in place, and its items are fetched only when
+     asked for. Both keep the settings page to one list rather than turning a
+     reference list into a second inventory screen. */
+  const [editingSupplierId, setEditingSupplierId] = useState<string | null>(null);
+  const [supplierForm, setSupplierForm] = useState({
+    name: "",
+    contact_name: "",
+    phone: "",
+    email: "",
+  });
+  const [savingSupplier, setSavingSupplier] = useState(false);
+  const [supplierItemsId, setSupplierItemsId] = useState<string | null>(null);
+  const [supplierItems, setSupplierItems] = useState<SupplierItem[]>([]);
+  const [supplierItemsLoading, setSupplierItemsLoading] = useState(false);
 
   const inFlight = useRef(false);
 
@@ -246,6 +269,74 @@ export default function SettingsPage() {
       setToast({ msg: e.message, tone: "error" });
     } finally {
       setBusyId(null);
+    }
+  }
+
+  function startEditSupplier(supplier: Supplier) {
+    if (editingSupplierId === supplier.id) {
+      setEditingSupplierId(null);
+      return;
+    }
+
+    setEditingSupplierId(supplier.id);
+    setSupplierForm({
+      name: supplier.name,
+      contact_name: supplier.contact_name ?? "",
+      phone: supplier.phone ?? "",
+      email: supplier.email ?? "",
+    });
+    // One expansion at a time: an edit form and an item list side by side in the
+    // same row is more noise than either is worth.
+    setSupplierItemsId(null);
+  }
+
+  async function saveSupplier(id: string) {
+    setSavingSupplier(true);
+    try {
+      const res = await fetch(`/api/refs/suppliers/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(supplierForm),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not save");
+
+      const updated: Supplier = data.item;
+      setSuppliers((prev) =>
+        prev
+          .map((s) => (s.id === updated.id ? updated : s))
+          .sort((a, b) => a.name.localeCompare(b.name))
+      );
+      setEditingSupplierId(null);
+      setToast({ msg: `Saved "${updated.name}"`, tone: "success" });
+    } catch (e: any) {
+      setToast({ msg: e.message, tone: "error" });
+    } finally {
+      setSavingSupplier(false);
+    }
+  }
+
+  async function toggleSupplierItems(supplier: Supplier) {
+    if (supplierItemsId === supplier.id) {
+      setSupplierItemsId(null);
+      return;
+    }
+
+    setSupplierItemsId(supplier.id);
+    setSupplierItems([]);
+    setSupplierItemsLoading(true);
+    setEditingSupplierId(null);
+
+    try {
+      const res = await fetch(`/api/refs/suppliers/${supplier.id}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not load items");
+      setSupplierItems(data.items ?? []);
+    } catch (e: any) {
+      setToast({ msg: e.message, tone: "error" });
+      setSupplierItemsId(null);
+    } finally {
+      setSupplierItemsLoading(false);
     }
   }
 
@@ -623,8 +714,9 @@ export default function SettingsPage() {
       <Card>
         <h2 className="text-lg font-semibold text-cocoa-800">Suppliers</h2>
         <p className="mt-1 text-sm text-cocoa-500">
-          Vendors that supply ingredients. Assign suppliers to items from the
-          inventory page.
+          Vendors that supply ingredients. Keep their contact details here, see
+          the items each one supplies, or assign a supplier to an item from the
+          inventory page. A restock can also record who delivered it.
         </p>
 
         <div className="mt-4 flex gap-2">
@@ -653,40 +745,180 @@ export default function SettingsPage() {
             <Empty>No suppliers yet.</Empty>
           ) : (
             <ul className="divide-y divide-cream-200">
-              {suppliers.map((s) => (
-                <li
-                  key={s.id}
-                  className="flex flex-wrap items-center justify-between gap-3 py-2.5"
-                >
-                  <div>
-                    <span className="text-sm font-medium text-cocoa-700">
-                      {s.name}
-                    </span>
-                    {s.contact_name && (
-                      <span className="ml-2 text-xs text-cocoa-400">
-                        {s.contact_name}
-                      </span>
+              {suppliers.map((s) => {
+                const editing = editingSupplierId === s.id;
+                const showingItems = supplierItemsId === s.id;
+
+                return (
+                  <li key={s.id} className="py-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium text-cocoa-700">
+                          {s.name}
+                        </div>
+                        <div className="text-xs text-cocoa-400">
+                          {[s.contact_name, s.phone, s.email]
+                            .filter(Boolean)
+                            .join(" · ") || "No contact details yet"}
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        <button
+                          className="btn-ghost !px-3 !py-1.5 text-xs"
+                          onClick={() => startEditSupplier(s)}
+                          disabled={busyId === s.id}
+                        >
+                          {editing ? "Close" : "Edit"}
+                        </button>
+                        <button
+                          className="btn-ghost !px-3 !py-1.5 text-xs"
+                          onClick={() => toggleSupplierItems(s)}
+                          disabled={busyId === s.id}
+                        >
+                          {showingItems ? "Hide items" : "Items"}
+                        </button>
+                        <button
+                          className="btn-danger !px-3 !py-1.5 text-xs"
+                          onClick={() => removeSupplier(s)}
+                          disabled={busyId === s.id}
+                        >
+                          {busyId === s.id ? "Removing..." : "Remove"}
+                        </button>
+                      </div>
+                    </div>
+
+                    {editing && (
+                      <div className="mt-2 grid gap-2 rounded-xl bg-cream-50 p-3 sm:grid-cols-2">
+                        <div>
+                          <label className="label" htmlFor={`sup-name-${s.id}`}>
+                            Name
+                          </label>
+                          <input
+                            id={`sup-name-${s.id}`}
+                            className="input"
+                            maxLength={120}
+                            value={supplierForm.name}
+                            onChange={(e) =>
+                              setSupplierForm((f) => ({
+                                ...f,
+                                name: e.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                        <div>
+                          <label className="label" htmlFor={`sup-contact-${s.id}`}>
+                            Contact person
+                          </label>
+                          <input
+                            id={`sup-contact-${s.id}`}
+                            className="input"
+                            maxLength={120}
+                            value={supplierForm.contact_name}
+                            onChange={(e) =>
+                              setSupplierForm((f) => ({
+                                ...f,
+                                contact_name: e.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                        <div>
+                          <label className="label" htmlFor={`sup-phone-${s.id}`}>
+                            Phone
+                          </label>
+                          <input
+                            id={`sup-phone-${s.id}`}
+                            className="input"
+                            type="tel"
+                            maxLength={40}
+                            value={supplierForm.phone}
+                            onChange={(e) =>
+                              setSupplierForm((f) => ({
+                                ...f,
+                                phone: e.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                        <div>
+                          <label className="label" htmlFor={`sup-email-${s.id}`}>
+                            Email
+                          </label>
+                          <input
+                            id={`sup-email-${s.id}`}
+                            className="input"
+                            type="email"
+                            maxLength={120}
+                            value={supplierForm.email}
+                            onChange={(e) =>
+                              setSupplierForm((f) => ({
+                                ...f,
+                                email: e.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                        <div className="flex justify-end gap-2 sm:col-span-2">
+                          <button
+                            className="btn-ghost !px-3 !py-1.5 text-xs"
+                            onClick={() => setEditingSupplierId(null)}
+                            disabled={savingSupplier}
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            className="btn-primary !px-3 !py-1.5 text-xs"
+                            onClick={() => saveSupplier(s.id)}
+                            disabled={savingSupplier || !supplierForm.name.trim()}
+                          >
+                            {savingSupplier ? "Saving..." : "Save"}
+                          </button>
+                        </div>
+                      </div>
                     )}
-                    {s.phone && (
-                      <span className="ml-2 text-xs text-cocoa-400">
-                        {s.phone}
-                      </span>
+
+                    {showingItems && (
+                      <div className="mt-2 rounded-xl bg-cream-50 p-3">
+                        {supplierItemsLoading ? (
+                          <p className="text-xs text-cocoa-400">Loading items...</p>
+                        ) : supplierItems.length === 0 ? (
+                          <p className="text-xs text-cocoa-400">
+                            No items are linked to this supplier yet. Assign one
+                            from the inventory page, or choose this supplier when
+                            restocking.
+                          </p>
+                        ) : (
+                          <ul className="space-y-1">
+                            {supplierItems.map((item) => (
+                              <li
+                                key={item.id}
+                                className="flex flex-wrap items-baseline justify-between gap-x-3 text-xs"
+                              >
+                                <span className="min-w-0 truncate text-cocoa-700">
+                                  {item.name}{" "}
+                                  <span className="font-mono text-cocoa-300">
+                                    {item.sku}
+                                  </span>
+                                </span>
+                                <span className="shrink-0 tabular-nums text-cocoa-500">
+                                  {Number(item.quantity)} {item.unit}
+                                  {Number(item.quantity) <=
+                                    Number(item.low_stock_threshold) && (
+                                    <span className="ml-1.5 text-ochre-700">
+                                      reorder
+                                    </span>
+                                  )}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
                     )}
-                    {s.email && (
-                      <span className="ml-2 text-xs text-cocoa-400">
-                        {s.email}
-                      </span>
-                    )}
-                  </div>
-                  <button
-                    className="btn-danger"
-                    onClick={() => removeSupplier(s)}
-                    disabled={busyId === s.id}
-                  >
-                    {busyId === s.id ? "Removing..." : "Remove"}
-                  </button>
-                </li>
-              ))}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>

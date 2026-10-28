@@ -4,6 +4,24 @@ import { requireUser } from "@/lib/auth";
 import { daysUntil } from "@/lib/format";
 import { stockStatus } from "@/lib/status";
 
+/**
+ * An item's `date` column, as a calendar day.
+ *
+ * The two database backends disagree about the type: Supabase's PostgREST
+ * returns "2026-10-30", while PGlite hands back a JS Date. `daysUntil` reads a
+ * leading "YYYY-MM-DD" and treats anything else as unknown, so passing a Date
+ * straight through silently produced null for every item in local mode - and
+ * then `expiryRisk` filtered every row out because it only keeps `d >= 0`.
+ *
+ * Normalising here means both backends compute the same answer.
+ */
+function dayOf(value: unknown): string | null {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  const day = String(value).slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : null;
+}
+
 export const runtime = "nodejs";
 
 /**
@@ -25,6 +43,24 @@ export const runtime = "nodejs";
  */
 export const GET = handler(async (req: Request) => {
   await requireUser();
+
+  /*
+   * Snapshot filters, read here because they change what the stock table shows
+   * rather than how the movement aggregates are computed.
+   *
+   * `from`/`to` bound the *expiry* date, not the movement history. That is the
+   * date a stock snapshot actually has: an item's on-hand quantity is current,
+   * and the only date attached to the row is when it goes off. Bounding
+   * created_at would silently drop items that have sat on the shelf longer than
+   * the window, which is the opposite of what a stock check wants.
+   */
+  const { searchParams } = new URL(req.url);
+  const categoryId = searchParams.get("category");
+  const locationId = searchParams.get("location");
+  const isoDay = (v: string | null) =>
+    v && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
+  const expiryFrom = isoDay(searchParams.get("from"));
+  const expiryTo = isoDay(searchParams.get("to"));
 
   const now = new Date();
 
@@ -49,7 +85,8 @@ export const GET = handler(async (req: Request) => {
     .from("items")
     .select(
       `id, sku, name, unit, quantity, low_stock_threshold, expiration_date,
-       category:categories(id, name)`
+       category_id, location_id, updated_at,
+       category:categories(id, name), location:locations(id, name)`
     )
     .eq("item_status", "active")
     .order("name", { ascending: true });
@@ -241,12 +278,11 @@ export const GET = handler(async (req: Request) => {
 
   const expiryRisk = allItems
     .filter((item) => {
-      if (!item.expiration_date) return false;
-      const d = daysUntil(item.expiration_date);
+      const d = daysUntil(dayOf(item.expiration_date));
       return d !== null && d >= 0 && d <= 7;
     })
     .map((item) => {
-      const d = daysUntil(item.expiration_date);
+      const d = daysUntil(dayOf(item.expiration_date));
       const qty = Number(item.quantity);
       const threshold = Number(item.low_stock_threshold);
       const highStock = qty > threshold;
@@ -271,6 +307,76 @@ export const GET = handler(async (req: Request) => {
     })
     .sort((a, b) => (a.daysUntilExpiry ?? 0) - (b.daysUntilExpiry ?? 0));
 
+  /* ---------------- soonest expiry ---------------- */
+
+  /*
+   * Every dated item, soonest first, including ones already expired.
+   *
+   * The dashboard's "Expiring Soon" card used to answer this in the browser from
+   * whatever items that page happened to fetch; this is the same question asked
+   * of the whole active inventory, so a paged item list cannot truncate it.
+   */
+  const soonestExpiry = allItems
+    .filter((item) => Boolean(item.expiration_date))
+    .map((item) => {
+      const expiry = dayOf(item.expiration_date);
+      return {
+        sku: item.sku,
+        name: item.name,
+        unit: item.unit,
+        quantity: Number(item.quantity),
+        expiration_date: expiry,
+        daysUntilExpiry: daysUntil(expiry),
+        category: item.category?.name ?? null,
+        location: item.location?.name ?? null,
+      };
+    })
+    .sort((a, b) =>
+      (a.daysUntilExpiry ?? Number.POSITIVE_INFINITY) -
+      (b.daysUntilExpiry ?? Number.POSITIVE_INFINITY)
+    )
+    .slice(0, 10);
+
+  /* ---------------- stock snapshot ---------------- */
+
+  /*
+   * The current stock list, filtered server-side by category, location and an
+   * expiry window. Kept out of the dashboard's item fetch so the same snapshot
+   * can be asked for by any client without pulling the whole inventory and
+   * filtering it in the browser.
+   *
+   * An unparseable or unknown id simply matches nothing, which is the honest
+   * answer to "show me that category" when the category has been deleted.
+   */
+  const snapshotItems = allItems
+    .filter((item) => {
+      if (categoryId && item.category_id !== categoryId) return false;
+      if (locationId && item.location_id !== locationId) return false;
+
+      // A window only makes sense for rows that have a date; undated items are
+      // not in any expiry range.
+      if (expiryFrom || expiryTo) {
+        const expiry = dayOf(item.expiration_date);
+        if (!expiry) return false;
+        if (expiryFrom && expiry < expiryFrom) return false;
+        if (expiryTo && expiry > expiryTo) return false;
+      }
+
+      return true;
+    })
+    .map((item) => ({
+      id: item.id,
+      sku: item.sku,
+      name: item.name,
+      unit: item.unit,
+      quantity: Number(item.quantity),
+      low_stock_threshold: Number(item.low_stock_threshold),
+      expiration_date: dayOf(item.expiration_date),
+      updated_at: item.updated_at,
+      category: item.category ?? null,
+      location: item.location ?? null,
+    }));
+
   /* ---------------- response ---------------- */
 
   return ok({
@@ -278,5 +384,16 @@ export const GET = handler(async (req: Request) => {
     mostWasted,
     chronicLowStock,
     expiryRisk,
+    soonestExpiry,
+    snapshot: {
+      items: snapshotItems,
+      total: snapshotItems.length,
+      filters: {
+        category: categoryId,
+        location: locationId,
+        from: expiryFrom,
+        to: expiryTo,
+      },
+    },
   });
 });

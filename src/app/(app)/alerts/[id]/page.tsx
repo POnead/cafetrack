@@ -30,6 +30,13 @@ type Item = {
   updated_at: string;
   category: { id: string; name: string } | null;
   location: { id: string; name: string } | null;
+  supplier: {
+    id: string;
+    name: string;
+    contact_name: string | null;
+    phone: string | null;
+    email: string | null;
+  } | null;
 };
 
 type HistoryRow = {
@@ -213,7 +220,39 @@ export default function AlertDetailPage() {
                 <Field label="Location" value={item.location?.name ?? "—"} />
                 <Field label="Physical form" value={item.physical_form} />
                 <Field label="Counts in" value={item.unit} />
+                <Field label="Supplier" value={item.supplier?.name ?? "—"} />
               </dl>
+
+              {item.supplier && (
+                <div className="rounded-xl bg-cream-50 px-3 py-2 text-xs text-cocoa-600">
+                  <span className="font-semibold text-cocoa-700">
+                    Restock contact:
+                  </span>{" "}
+                  {item.supplier.contact_name || item.supplier.name}
+                  {item.supplier.phone && (
+                    <>
+                      {" · "}
+                      <a
+                        href={`tel:${item.supplier.phone}`}
+                        className="font-medium text-ochre-700 underline"
+                      >
+                        {item.supplier.phone}
+                      </a>
+                    </>
+                  )}
+                  {item.supplier.email && (
+                    <>
+                      {" · "}
+                      <a
+                        href={`mailto:${item.supplier.email}`}
+                        className="font-medium text-ochre-700 underline"
+                      >
+                        {item.supplier.email}
+                      </a>
+                    </>
+                  )}
+                </div>
+              )}
 
               {isAdmin && (
                 <Link href="/items" className="btn-ghost !px-3 !py-1.5 text-xs">

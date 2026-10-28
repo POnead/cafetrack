@@ -45,7 +45,8 @@ export const GET = handler(
           .select(
             `id, sku, name, physical_form, unit, quantity, low_stock_threshold,
              expiration_date, version, updated_at,
-             category:categories(id, name), location:locations(id, name)`
+             category:categories(id, name), location:locations(id, name),
+             supplier:suppliers(id, name, contact_name, phone, email)`
           )
           .eq("id", alert.item_id)
           .maybeSingle(),

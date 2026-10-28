@@ -30,6 +30,13 @@ type AlertRow = {
     unit: string;
     quantity: number;
     low_stock_threshold: number;
+    supplier: {
+      id: string;
+      name: string;
+      contact_name: string | null;
+      phone: string | null;
+      email: string | null;
+    } | null;
   } | null;
 };
 
@@ -237,6 +244,15 @@ export default function AlertsPage() {
                     <StockBadge item={a.item} />
                   </div>
 
+                  {a.item?.supplier && (
+                    <DataField label="Supplier">
+                      <span className="text-xs text-cocoa-600">
+                        {a.item.supplier.name}
+                        {a.item.supplier.phone && ` · ${a.item.supplier.phone}`}
+                      </span>
+                    </DataField>
+                  )}
+
                   <DataField label="Message">{a.message}</DataField>
                   <DataField label="Raised">
                     <span className="text-xs text-cocoa-400">
@@ -285,6 +301,22 @@ export default function AlertsPage() {
                         <div className="font-mono text-xs text-cocoa-400">
                           {a.item?.sku ?? "—"}
                         </div>
+                        {/* Who to call. The alert is actionable only if the
+                            next step has a phone number attached to it. */}
+                        {a.item?.supplier && (
+                          <div className="mt-0.5 text-xs text-cocoa-500">
+                            {a.item.supplier.contact_name ||
+                              a.item.supplier.name}
+                            {a.item.supplier.phone && (
+                              <a
+                                href={`tel:${a.item.supplier.phone}`}
+                                className="ml-1 text-ochre-700 underline"
+                              >
+                                {a.item.supplier.phone}
+                              </a>
+                            )}
+                          </div>
+                        )}
                       </td>
                       <td className="td">
                         <StockBadge item={a.item} />

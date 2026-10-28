@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Stat, ViewPill, Badge, Spinner, Empty } from "@/components/ui";
 import { BaristaArt } from "@/components/BrandArt";
 import { LiveRegion } from "@/components/LiveRegion";
-import { fmtQty, fmtDateTime, daysUntil } from "@/lib/format";
+import { fmtQty, fmtDate, fmtDateTime, daysUntil } from "@/lib/format";
+import { stockStatus } from "@/lib/status";
 import { useLiveRefresh } from "@/lib/use-live-refresh";
 
 type Item = {
@@ -27,12 +28,137 @@ type Txn = {
   transaction_items: { sku: string; item_name: string; quantity: number }[];
 };
 
+type Ref = { id: string; name: string };
+
+type SnapshotItem = {
+  id: string;
+  sku: string;
+  name: string;
+  unit: string;
+  quantity: number;
+  low_stock_threshold: number;
+  expiration_date: string | null;
+  category: { id: string; name: string } | null;
+  location: { id: string; name: string } | null;
+};
+
+type Analytics = {
+  mostNeeded: { thisMonth: { name: string; qty: number }[] };
+  soonestExpiry: {
+    sku: string;
+    name: string;
+    unit: string;
+    quantity: number;
+    expiration_date: string;
+    daysUntilExpiry: number | null;
+  }[];
+  snapshot: { items: SnapshotItem[]; total: number };
+};
+
+/** How often a live refresh may re-run the analytics aggregation. */
+const ANALYTICS_MIN_INTERVAL_MS = 15_000;
+
+/** The filter key with every field empty, i.e. what the first load already fetches. */
+const NO_FILTERS = "|||";
+
 export default function DashboardPage() {
   const [items, setItems] = useState<Item[]>([]);
   const [txns, setTxns] = useState<Txn[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
+
+  /* Analytics: the two cards that cannot be computed from this page's own fetch.
+     The snapshot is filtered server-side, so the same query answers "everything"
+     and "just the chiller, just this week" without shipping the whole inventory
+     to the browser first. */
+  const [analytics, setAnalytics] = useState<Analytics | null>(null);
+  const [categories, setCategories] = useState<Ref[]>([]);
+  const [locations, setLocations] = useState<Ref[]>([]);
+  const [snapCategory, setSnapCategory] = useState("");
+  const [snapLocation, setSnapLocation] = useState("");
+  const [snapFrom, setSnapFrom] = useState("");
+  const [snapTo, setSnapTo] = useState("");
+
+  const filtersRef = useRef({ category: "", location: "", from: "", to: "" });
+  filtersRef.current = {
+    category: snapCategory,
+    location: snapLocation,
+    from: snapFrom,
+    to: snapTo,
+  };
+
+  const analyticsInFlight = useRef(false);
+  const lastAnalyticsAt = useRef(0);
+
+  const loadAnalytics = useCallback(async (force = false) => {
+    if (analyticsInFlight.current) return;
+
+    // A live refresh can fire every few seconds when the event stream is down.
+    // Re-running the 13-month aggregation that often would turn a disconnect
+    // into a database problem, so the snapshot refreshes on a slower clock than
+    // the stat pills. Filter changes pass force=true and always go through.
+    if (!force && Date.now() - lastAnalyticsAt.current < ANALYTICS_MIN_INTERVAL_MS)
+      return;
+
+    analyticsInFlight.current = true;
+    try {
+      const f = filtersRef.current;
+      const qs = new URLSearchParams();
+      if (f.category) qs.set("category", f.category);
+      if (f.location) qs.set("location", f.location);
+      if (f.from) qs.set("from", f.from);
+      if (f.to) qs.set("to", f.to);
+
+      const res = await fetch(`/api/analytics${qs.size ? `?${qs}` : ""}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not load analytics");
+
+      setAnalytics(data);
+      lastAnalyticsAt.current = Date.now();
+    } catch {
+      // The dashboard is still useful from items + transactions alone; a failed
+      // analytics call must not replace the page with an error.
+    } finally {
+      analyticsInFlight.current = false;
+    }
+  }, []);
+
+  // Reference lists for the snapshot filters. Fetched once; they change only
+  // when an admin edits them on the settings page.
+  useEffect(() => {
+    let alive = true;
+    Promise.all([
+      fetch("/api/refs/categories").then((r) => r.json()),
+      fetch("/api/refs/locations").then((r) => r.json()),
+    ])
+      .then(([c, l]) => {
+        if (!alive) return;
+        setCategories(c.items ?? []);
+        setLocations(l.items ?? []);
+      })
+      .catch(() => {
+        /* filters stay as text-less selects; the snapshot still loads */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  /*
+   * Filtering the snapshot is an explicit action, so it may bypass the throttle.
+   *
+   * The key comparison keeps this from firing on mount: `load()` already fetches
+   * analytics once, and a bare dependency array would spend a second aggregation
+   * answering "no filters" a moment later.
+   */
+  const appliedFilters = useRef(NO_FILTERS);
+  useEffect(() => {
+    const key = [snapCategory, snapLocation, snapFrom, snapTo].join("|");
+    if (appliedFilters.current === key) return;
+    appliedFilters.current = key;
+    void loadAnalytics(true);
+  }, [snapCategory, snapLocation, snapFrom, snapTo, loadAnalytics]);
 
   async function load(force = false) {
     // Nothing on this page is time-critical to the millisecond, and a forgotten
@@ -60,6 +186,10 @@ export default function DashboardPage() {
       setItems(i.items ?? []);
       setTxns(t.transactions ?? []);
       setError(null);
+
+      // Keep the analytics cards on the same beat as the stat pills, subject to
+      // the throttle in loadAnalytics.
+      void loadAnalytics();
     } catch (e: any) {
       setError(e.message || "Could not load the dashboard");
     } finally {
@@ -109,6 +239,16 @@ export default function DashboardPage() {
       .sort((a, b) => b.qty - a.qty)
       .slice(0, 4);
   }, [txns]);
+
+  /*
+   * Prefer the analytics endpoint's "this month" figure, which walks the whole
+   * 13-month window, and fall back to the movements this page has while that
+   * request is in flight or if it failed.
+   */
+  const demandRows =
+    analytics && analytics.mostNeeded.thisMonth.length > 0
+      ? analytics.mostNeeded.thisMonth.slice(0, 4)
+      : inDemand;
 
   /* Top 4 items by quantity on hand */
   const topStock = useMemo(
@@ -218,7 +358,7 @@ export default function DashboardPage() {
           <div className="grid gap-5 sm:grid-cols-2">
             {/* In-Demand Items */}
             <MiniCard title="In-Demand Items" href="/reports">
-              {inDemand.length === 0 ? (
+              {demandRows.length === 0 ? (
                 <Empty>No checkout activity yet.</Empty>
               ) : (
                 <table className="w-full">
@@ -229,8 +369,8 @@ export default function DashboardPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {inDemand.map((d) => (
-                      <tr key={d.sku}>
+                    {demandRows.map((d) => (
+                      <tr key={d.name}>
                         <td className="td !px-0 !py-1.5 text-cocoa-800">{d.name}</td>
                         <td className="td !px-0 !py-1.5 text-right tabular-nums">
                           {d.qty}
@@ -328,6 +468,169 @@ export default function DashboardPage() {
               )}
             </MiniCard>
           </div>
+        </div>
+
+        {/* ---- stock snapshot ---- */}
+        <div className="card space-y-4">
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-bold text-cocoa-800">
+                Stock Snapshot
+              </h2>
+              <p className="mt-0.5 text-xs text-cocoa-400">
+                Current on-hand quantities. Filter by category, location, or the
+                window an item expires in.
+              </p>
+            </div>
+            <button
+              className="btn-ghost !px-3 !py-1.5 text-xs"
+              onClick={() => {
+                setSnapCategory("");
+                setSnapLocation("");
+                setSnapFrom("");
+                setSnapTo("");
+              }}
+              disabled={!snapCategory && !snapLocation && !snapFrom && !snapTo}
+            >
+              Clear filters
+            </button>
+          </div>
+
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            <div>
+              <label className="label" htmlFor="snap-category">
+                Category
+              </label>
+              <select
+                id="snap-category"
+                className="input"
+                value={snapCategory}
+                onChange={(e) => setSnapCategory(e.target.value)}
+              >
+                <option value="">All categories</option>
+                {categories.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="label" htmlFor="snap-location">
+                Location
+              </label>
+              <select
+                id="snap-location"
+                className="input"
+                value={snapLocation}
+                onChange={(e) => setSnapLocation(e.target.value)}
+              >
+                <option value="">All locations</option>
+                {locations.map((l) => (
+                  <option key={l.id} value={l.id}>
+                    {l.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="label" htmlFor="snap-from">
+                Expiry from
+              </label>
+              <input
+                id="snap-from"
+                type="date"
+                className="input"
+                value={snapFrom}
+                max={snapTo || undefined}
+                onChange={(e) => setSnapFrom(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="label" htmlFor="snap-to">
+                Expiry to
+              </label>
+              <input
+                id="snap-to"
+                type="date"
+                className="input"
+                value={snapTo}
+                min={snapFrom || undefined}
+                onChange={(e) => setSnapTo(e.target.value)}
+              />
+            </div>
+          </div>
+
+          {!analytics ? (
+            <p className="text-xs text-cocoa-400">Loading stock snapshot…</p>
+          ) : analytics.snapshot.items.length === 0 ? (
+            <Empty>No stock matches these filters.</Empty>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr>
+                    <th className="th">Item</th>
+                    <th className="th hidden md:table-cell">Category</th>
+                    <th className="th hidden md:table-cell">Location</th>
+                    <th className="th text-right">On hand</th>
+                    <th className="th">Expiry</th>
+                    <th className="th">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {analytics.snapshot.items.map((item) => {
+                    const status = stockStatus(
+                      item.quantity,
+                      item.low_stock_threshold
+                    );
+                    return (
+                      <tr
+                        key={item.id}
+                        className="transition-colors hover:bg-cream-50"
+                      >
+                        <td className="td">
+                          <div className="font-medium text-cocoa-800">
+                            {item.name}
+                          </div>
+                          <div className="font-mono text-[11px] text-cocoa-300">
+                            {item.sku}
+                          </div>
+                        </td>
+                        <td className="td hidden text-cocoa-600 md:table-cell">
+                          {item.category?.name ?? "Uncategorized"}
+                        </td>
+                        <td className="td hidden text-cocoa-600 md:table-cell">
+                          {item.location?.name ?? "—"}
+                        </td>
+                        <td className="td text-right tabular-nums text-cocoa-800">
+                          {fmtQty(item.quantity, item.unit)}
+                        </td>
+                        <td className="td text-cocoa-600">
+                          {item.expiration_date
+                            ? fmtDate(item.expiration_date)
+                            : "—"}
+                        </td>
+                        <td className="td">
+                          <Badge tone={status.tone} variant="tag">
+                            {status.label}
+                          </Badge>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {analytics && (
+            <p className="text-[11px] text-cocoa-300">
+              {analytics.snapshot.total}{" "}
+              {analytics.snapshot.total === 1 ? "item" : "items"} shown
+              {snapFrom || snapTo ? ", limited to the expiry window" : ""}.
+            </p>
+          )}
         </div>
 
         {/* ---- shortcut strip ---- */}

@@ -54,6 +54,9 @@ type Looked = {
   location: { id: string; name: string; min_shelf_life_days: number | null } | null;
 };
 
+/** The supplier dropdown on a restock: an id and the name to show. */
+type SupplierRef = { id: string; name: string };
+
 /** An inline, dismissible message about the item that was just scanned. */
 type Notice = {
   /** sku + kind, so re-scanning the same item replaces the notice. */
@@ -122,6 +125,12 @@ export default function CheckoutPage() {
   const [notices, setNotices] = useState<Notice[]>([]);
   const [quickQtys, setQuickQtys] = useState<Record<string, number>>({});
 
+  /* Who delivered this restock. Optional, and restock-only: it is written back
+     to every item in the cart as the supplier it was last received from, which
+     is what the low-stock alert later shows as the number to call. */
+  const [suppliers, setSuppliers] = useState<SupplierRef[]>([]);
+  const [supplierId, setSupplierId] = useState("");
+
   /* ---------------- search ---------------- */
   const [searchText, setSearchText] = useState("");
   const [showDropdown, setShowDropdown] = useState(false);
@@ -163,6 +172,22 @@ export default function CheckoutPage() {
         }
       })
       .catch(() => {});
+  }, []);
+
+  // Suppliers for the restock dropdown. Failure is silent: the restock still
+  // works without a supplier, so a reference list that cannot load must not
+  // block the till or colour the screen with an error about something optional.
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/refs/suppliers")
+      .then((r) => r.json())
+      .then((data) => {
+        if (alive && Array.isArray(data.items)) setSuppliers(data.items);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
   }, []);
 
   // Filter items as the user types. `allItems` is a dependency because it
@@ -579,6 +604,9 @@ export default function CheckoutPage() {
           type: mode,
           password,
           note: note.trim() || null,
+          // Only a restock can name a supplier; the API ignores the field on any
+          // other movement.
+          supplier_id: mode === "restock" ? supplierId || null : null,
           items: lines.map((l) => ({
             sku: l.sku,
             // A by-box line sends `boxes` and no `qty`: the database converts
@@ -659,6 +687,7 @@ export default function CheckoutPage() {
       setCart([]);
       setNote("");
       setPassword("");
+      setSupplierId("");
       setConfirmOpen(false);
     } catch (e: any) {
       setSubmitError(e.message);
@@ -1254,6 +1283,32 @@ export default function CheckoutPage() {
                   onChange={(e) => setNote(e.target.value)}
                 />
               </div>
+
+              {mode === "restock" && (
+                <div>
+                  <label className="label" htmlFor="txn-supplier">
+                    Supplier (optional)
+                  </label>
+                  <select
+                    id="txn-supplier"
+                    className="input"
+                    value={supplierId}
+                    onChange={(e) => setSupplierId(e.target.value)}
+                  >
+                    <option value="">Not recorded</option>
+                    {suppliers.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="mt-1 text-[11px] text-cocoa-300">
+                    {supplierId
+                      ? "Recorded on every item in this restock as the supplier it was last received from."
+                      : "Record who delivered this batch, so the low-stock alert has a number to call."}
+                  </p>
+                </div>
+              )}
               <button
                 className="btn-primary w-full !py-3 text-base"
                 disabled={!ready}
@@ -1307,6 +1362,16 @@ export default function CheckoutPage() {
           {note.trim() && (
             <div className="rounded-xl bg-cream-100 px-3.5 py-2.5 text-xs text-cocoa-600">
               {note.trim()}
+            </div>
+          )}
+
+          {mode === "restock" && supplierId && (
+            <div className="text-xs text-cocoa-500">
+              Received from{" "}
+              <span className="font-semibold text-cocoa-700">
+                {suppliers.find((s) => s.id === supplierId)?.name ?? "supplier"}
+              </span>
+              . Every item in this restock will be linked to them.
             </div>
           )}
 
