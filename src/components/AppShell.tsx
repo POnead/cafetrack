@@ -56,6 +56,22 @@ export function AppShell({
     let last = Date.now();
     let pingedAt = 0;
 
+    /*
+     * The duty check runs out mid-shift, not at sign-in, so something has to
+     * notice. /api/auth/me already answers "is a face owed" from the database —
+     * the same read the routes enforce with — so this ping is where it gets
+     * honoured. Without it the first sign the window had closed was a 403 on a
+     * scan, which reads as a broken till rather than as a camera prompt.
+     *
+     * The pathname guard matters because replace() while already on /verify
+     * would re-run that page's own status load on every ping.
+     */
+    const honourFace = (payload: any) => {
+      if (payload?.face?.required && window.location.pathname !== "/verify") {
+        router.replace("/verify");
+      }
+    };
+
     const bump = () => {
       const now = Date.now();
       last = now;
@@ -64,11 +80,19 @@ export function AppShell({
       // Sliding session: the server re-issues the cookie once the token is past
       // half-life. Swallowed here because the next navigation re-reads the
       // session server-side and is the thing that actually redirects.
-      fetch("/api/auth/me").catch(() => {});
+      fetch("/api/auth/me")
+        .then((r) => r.json())
+        .then(honourFace)
+        .catch(() => {});
     };
 
     const events = ["mousemove", "keydown", "click", "scroll", "touchstart"];
     events.forEach((e) => window.addEventListener(e, bump, { passive: true }));
+
+    // One check on mount, so a page loaded after the window closed sends the
+    // person to the camera without waiting for a click. It also counts as
+    // activity, which is what loading a page is.
+    bump();
 
     const timer = setInterval(() => {
       if (Date.now() - last > idleLimitMs) {

@@ -12,7 +12,7 @@
  */
 import { db } from "./supabase";
 import { HttpError } from "./auth";
-import { verificationRequired, nextVerificationAt } from "./face";
+import { DUTY_REQUIRED_MESSAGE, verificationRequired, nextVerificationAt } from "./face";
 import { getFaceDutyHours, getFaceVerificationEnabled } from "./settings";
 
 export type FaceStatus = {
@@ -125,9 +125,9 @@ export async function requireDutyVerified(user: {
 }): Promise<void> {
   const status = await getFaceStatus(user.id, user.role);
   if (status.required) {
-    throw new HttpError(
-      403,
-      "Confirm your face for this duty before you start work."
-    );
+    // 403 rather than 401: the session is valid, this person just has not
+    // looked at the camera yet. The client uses the message to send them to
+    // /verify instead of showing a dead end.
+    throw new HttpError(403, DUTY_REQUIRED_MESSAGE);
   }
 }

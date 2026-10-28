@@ -201,6 +201,21 @@ against the face enrolled on that account; an ID card does not substitute for
 that check. The separate card sign-in flow stays single-frame because its face
 is compared with the portrait on the card.
 
+**Where it is enforced.** Not only on the screen that asks for the face. The
+routes that move stock or change the catalogue (`POST /api/transactions`,
+`POST /api/items`, and the item edit and delete routes) refuse a staff session
+that still owes a check with a `403`, so calling them directly is not a way
+around the camera. Reads stay open — a person who cannot see today's figures is
+worse than the thing being guarded. The signed-in frame re-reads the status on
+load and on activity pings, so a window that runs out mid-shift sends the person
+to `/verify` instead of leaving them to discover it as a failed scan.
+
+**The two numbers.** How long one check covers (`face_duty_hours`) and how close
+two faces have to be (one threshold per engine) are editable on the same card.
+The threshold field follows the engine in use and carries that engine's own
+bounds, because the two scales are not comparable — and the other engine keeps
+its own value when the model is switched.
+
 **The bands are provisional.** `FRONT_MAX_SIGNAL` and `SIDE_MIN_SIGNAL` in
 `src/lib/face.ts` bound a proxy, and no real front/left/right captures have been
 measured against them yet. Every enrolment writes the signal it actually saw into

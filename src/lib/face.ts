@@ -937,6 +937,17 @@ export function matchPresentation(
 /* ------------------------------------------------------- the duty window -- */
 
 /**
+ * The refusal a staff member sees when the duty check is still owed.
+ *
+ * Defined here, in the module that has no server imports, so the routes that
+ * enforce it and the screens that have to send the person to the camera can
+ * agree on the exact string. Two copies of this sentence would drift, and the
+ * drift would look like an unexplained error rather than a redirect.
+ */
+export const DUTY_REQUIRED_MESSAGE =
+  "Confirm your face for this duty before you start work.";
+
+/**
  * Does this staff member still owe a face check?
  *
  * Rolling rather than a fixed shift grid: the window opens when someone passes

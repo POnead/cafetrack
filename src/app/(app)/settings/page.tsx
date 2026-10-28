@@ -15,6 +15,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { Card, Spinner, Toast, Empty } from "@/components/ui";
+import { matchThresholdBand } from "@/lib/face";
 
 type Ref = { id: string; name: string; min_shelf_life_days?: number | null };
 type Supplier = { id: string; name: string; contact_name: string | null; phone: string | null; email: string | null };
@@ -79,6 +80,20 @@ export default function SettingsPage() {
 
   const inFlight = useRef(false);
 
+  /*
+   * What the database currently holds, as opposed to what the form currently
+   * shows.
+   *
+   * The edit fields are uncontrolled-ish: onChange writes into `settings` so the
+   * input can be redrawn, and onBlur decides whether to save by comparing the
+   * field against the stored value. Comparing against `settings` compared the
+   * typed value with itself, because state had already been updated by the
+   * keystroke — so no text or number field on this page ever saved. Keeping the
+   * last saved value in its own ref is what makes "did this actually change?"
+   * a real question again.
+   */
+  const saved = useRef<Record<string, string>>({});
+
   async function load() {
     if (inFlight.current) return;
     inFlight.current = true;
@@ -94,6 +109,7 @@ export default function SettingsPage() {
       if (s.error) throw new Error(s.error);
 
       setSettings(s.settings ?? {});
+      saved.current = { ...(s.settings ?? {}) };
       setCategories(c.items ?? []);
       setLocations(l.items ?? []);
       setSuppliers(sup.items ?? []);
@@ -124,6 +140,7 @@ export default function SettingsPage() {
 
       // Store the value the API actually kept, which is the rounded integer.
       setSettings((prev) => ({ ...prev, [key]: data.settings[key] }));
+      saved.current[key] = data.settings[key];
       setToast({ msg: "Saved", tone: "success" });
     } catch (e: any) {
       setToast({ msg: e.message, tone: "error" });
@@ -438,6 +455,15 @@ export default function SettingsPage() {
     );
   }
 
+  // Which threshold the form is showing, and the bounds the API enforces for it.
+  // Both come from matchThresholdBand so the form, the validator and the reader
+  // cannot disagree — a range offered here that the route rejects would be a
+  // setting the cafe never chose.
+  const thresholdBand = matchThresholdBand(
+    settings.face_engine === "sface" ? "sface" : "legacy"
+  );
+  const thresholdName = settings.face_engine === "sface" ? "SFace" : "original";
+
   return (
     <div className="space-y-5">
       <div>
@@ -498,8 +524,10 @@ export default function SettingsPage() {
                 onBlur={(e) => {
                   const v = e.target.value;
                   // Only write on a real change, so blurring an untouched
-                  // field does not fire a pointless request.
-                  if (v !== "" && v !== settings[f.key]) saveField(f.key, v);
+                  // field does not fire a pointless request. The comparison is
+                  // against what the database holds, not what the field shows —
+                  // see `saved` above.
+                  if (v !== "" && v !== saved.current[f.key]) saveField(f.key, v);
                 }}
               />
               <p className="mt-1 text-xs text-cocoa-400">
@@ -524,7 +552,7 @@ export default function SettingsPage() {
             }
             onBlur={(e) => {
               const v = e.target.value;
-              if (v !== settings.business_name) saveField("business_name", v);
+              if (v !== (saved.current.business_name ?? "")) saveField("business_name", v);
             }}
           />
           <p className="mt-1 text-xs text-cocoa-400">
@@ -557,7 +585,7 @@ export default function SettingsPage() {
               {
                 key: "face_verification_enabled",
                 title: "Duty face check",
-                on: "Staff confirm their face once per duty before they can move stock. One check covers the hours set in Alerts & sessions.",
+                on: "Staff confirm their face once per duty before they can move stock. One check covers the duty length set below.",
                 off: "Enrol everyone's photo from Staff Accounts first — this holds every member of staff at the camera screen.",
               },
               {
@@ -565,6 +593,12 @@ export default function SettingsPage() {
                 title: "Sign in with a face",
                 on: "Staff can scan their badge and confirm their face instead of typing a password. Admins still use a password.",
                 off: "Staff without a reference photo cannot use this, so enrol them from Staff Accounts first. Password sign-in keeps working either way.",
+              },
+              {
+                key: "face_require_profile_angles",
+                title: "Turned-head checks",
+                on: "A check asks for the straight-on photo and both turned-head photos. A printed portrait cannot produce the turned ones, which is what makes it fail.",
+                off: "Only the straight-on photo is required. The turned-head photos stay on file as reference photographs, and turning this back on needs no re-enrolment.",
               },
             ] as const
           ).map((t) => {
@@ -597,6 +631,81 @@ export default function SettingsPage() {
           blocks the camera. &ldquo;Take a photo instead&rdquo; still works there
           and needs no camera permission.
         </p>
+
+        {/*
+          The two numbers the check actually reads.
+
+          They belong in this card rather than in Alerts & sessions: the duty
+          length is how long one face check covers, and the threshold is how
+          close two faces have to be. Both were settable through the API before
+          this form existed, which meant an admin reading this page was told
+          about values they could not see.
+
+          The threshold field follows the engine in use, because the two engines
+          do not share a scale — one field with the other model's bounds would
+          let an admin save a number that means "accept nobody" on the model
+          actually running.
+        */}
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          <div>
+            <label className="label" htmlFor="face_duty_hours">
+              Duty length
+            </label>
+            <input
+              id="face_duty_hours"
+              type="number"
+              className="input"
+              min={1}
+              max={24}
+              value={settings.face_duty_hours ?? ""}
+              disabled={saving}
+              onChange={(e) =>
+                setSettings((prev) => ({ ...prev, face_duty_hours: e.target.value }))
+              }
+              onBlur={(e) => {
+                const v = e.target.value;
+                if (v !== "" && v !== saved.current.face_duty_hours) {
+                  saveField("face_duty_hours", v);
+                }
+              }}
+            />
+            <p className="mt-1 text-xs text-cocoa-400">
+              Hours one check covers before the next one is due (1&ndash;24).
+            </p>
+          </div>
+
+          <div>
+            <label className="label" htmlFor={thresholdBand.setting}>
+              Match threshold ({thresholdName})
+            </label>
+            <input
+              id={thresholdBand.setting}
+              type="number"
+              step="0.001"
+              className="input"
+              min={thresholdBand.min}
+              max={thresholdBand.max}
+              placeholder={String(thresholdBand.fallback)}
+              value={settings[thresholdBand.setting] ?? ""}
+              disabled={saving}
+              onChange={(e) =>
+                setSettings((prev) => ({ ...prev, [thresholdBand.setting]: e.target.value }))
+              }
+              onBlur={(e) => {
+                const v = e.target.value;
+                if (v !== "" && v !== saved.current[thresholdBand.setting]) {
+                  saveField(thresholdBand.setting, v);
+                }
+              }}
+            />
+            <p className="mt-1 text-xs text-cocoa-400">
+              How far apart two faces may read and still count as the same person
+              ({thresholdBand.min}&ndash;{thresholdBand.max}). Lower is stricter.
+              The other model keeps its own value &mdash; switching does not carry
+              this one across.
+            </p>
+          </div>
+        </div>
 
         {/*
           The face model.

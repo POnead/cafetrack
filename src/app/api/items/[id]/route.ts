@@ -4,6 +4,7 @@ import { requireUser } from "@/lib/auth";
 import { canManageItems, approvalCodeMatches } from "@/lib/permissions";
 import { audit } from "@/lib/audit";
 import { eventBus, Events } from "@/lib/events";
+import { requireDutyVerified } from "@/lib/face-gate";
 import { dispatchSoon } from "@/lib/email";
 import {
   FieldError,
@@ -47,6 +48,11 @@ export const PATCH = handler(
   async (req: Request, { params }: { params: Promise<{ id: string }> }) => {
     // FR-03: an admin, or a staff member granted item management.
     const user = await requireUser();
+
+    // An edit — approved straight through or queued as a change request — is
+    // catalogue work, so it waits for the duty check like a movement does.
+    await requireDutyVerified(user);
+
     const canEdit = await canManageItems(user);
     const { id } = await params;
 
@@ -298,6 +304,12 @@ export const DELETE = handler(
         403
       );
     }
+
+    // After the permission check, not before: a staff member who cannot delete
+    // at all should be told that, rather than being sent to the camera for an
+    // action they were never allowed to take.
+    await requireDutyVerified(user);
+
     const { id } = await params;
 
     const malformed = badId(id, "item");

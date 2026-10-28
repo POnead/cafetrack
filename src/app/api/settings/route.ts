@@ -191,10 +191,12 @@ const TEXT_SETTINGS: Record<
    * which is what the reader does. Refusing the value at the door means the
    * admin is told rather than quietly getting a different engine back.
    *
-   * There is deliberately no control for this on the Settings page yet. A cafe
-   * with existing legacy enrolments would leave its staff unable to pass a check
-   * until each was re-enrolled, and that is a migration to run deliberately, not
-   * a switch to flip. The value is stored and enforced at matching time.
+   * The control exists on the Settings page, under Face verification, and its
+   * wording says plainly that switching strands existing enrolments until each
+   * person is photographed again. That is the reason the value is stored and
+   * enforced at matching time rather than re-writing vectors: the migration is
+   * an admin's decision, made with the cost stated, not something this route
+   * can do silently.
    */
   face_engine: {
     maxLength: 10,
@@ -220,6 +222,20 @@ const TOGGLES: Record<string, string> = {
   email_enabled: "Email notifications",
   face_verification_enabled: "Duty face verification",
   face_login_enabled: "Sign in with a face",
+  /*
+   * Whether a duty check asks for the two turned-head photos as well as the
+   * straight-on one.
+   *
+   * On by default, because the side angles are what make a printed portrait
+   * held up to the camera fail. Off demotes them to reference photographs: the
+   * check asks only for the straight-on frame, which is the fallback for real
+   * staff being refused on the sides while the pose bands are still unmeasured
+   * (see FRONT_MAX_SIGNAL / SIDE_MIN_SIGNAL in lib/face.ts).
+   *
+   * Setting it to "0" does not delete the side samples — they stay on file, so
+   * turning it back on needs no re-enrolment.
+   */
+  face_require_profile_angles: "Turned-head checks",
   // Off by default, and the wording matters: this makes an *unverified* account
   // unable to sign in. It does not make an account verified — that still needs a
   // document and an admin pressing Approve. See lib/id-gate.ts.

@@ -4,6 +4,7 @@ import { requireUser } from "@/lib/auth";
 import { canManageItems, approvalCodeMatches } from "@/lib/permissions";
 import { audit } from "@/lib/audit";
 import { eventBus, Events } from "@/lib/events";
+import { requireDutyVerified } from "@/lib/face-gate";
 import { dispatchSoon } from "@/lib/email";
 import { randomBytes } from "node:crypto";
 import {
@@ -148,6 +149,13 @@ export const POST = handler(async (req: Request) => {
   //     it appears on the Approvals list, but it is not stock until an admin
   //     approves it, so it raises no alerts and cannot be moved.
   const user = await requireUser();
+
+  // Same gate as POST /api/transactions: adding an ingredient changes the
+  // catalogue, so it is work that waits for the duty check. A pending
+  // submission is not stock, but it still has to come from a verified session,
+  // or the queue becomes the way around the check.
+  await requireDutyVerified(user);
+
   const manages = await canManageItems(user);
   const body = await readBody(req);
 

@@ -5,6 +5,7 @@ import { audit } from "@/lib/audit";
 import { dispatchSoon } from "@/lib/email";
 import { FieldError, parseExpiryDate, parseBoxCount } from "@/lib/item-validation";
 import { eventBus, Events } from "@/lib/events";
+import { requireDutyVerified } from "@/lib/face-gate";
 
 export const runtime = "nodejs";
 
@@ -83,6 +84,14 @@ export const GET = handler(async (req: Request) => {
 /* ---------------- commit a movement ---------------- */
 export const POST = handler(async (req: Request) => {
   const session = await requireUser();
+
+  // The duty check is enforced here, not only on the screen that asks for it.
+  // A redirect in the browser is a convenience; this is the route that actually
+  // moves stock, so a staff member inside the app but outside a duty window is
+  // refused with a 403 whatever they call it from. Admins and staff with no
+  // reference photo are never gated — see verificationRequired.
+  await requireDutyVerified(session);
+
   const body = await readBody(req);
 
   const type = String(body.type ?? "") as TxnType;
