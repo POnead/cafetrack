@@ -54,14 +54,17 @@ export async function GET() {
       }
     );
   } catch (e: any) {
-    // The message is the database's, not a route's, and it names the connection
-    // rather than the data — safe to return to whatever is monitoring.
+    // Log the database's message, but do not return it. This endpoint answers
+    // without credentials, so its body is readable by anyone who can reach the
+    // machine: a connection string, a host name or a file path in an error
+    // message is exactly the kind of detail an unauthenticated caller has no
+    // business learning. The monitor only needs the status code.
+    console.error("health: database probe failed:", e?.message || e);
     return Response.json(
       {
         ok: false,
         database: "unreachable",
         mode: dbMode(),
-        error: e?.message || "Database probe failed",
         version: process.env.npm_package_version ?? "0.1.0",
       },
       { status: 503, headers: { "Cache-Control": "no-store" } }

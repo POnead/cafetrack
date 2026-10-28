@@ -155,9 +155,12 @@ export async function runBackup(): Promise<{ path: string; rows: number } | null
   const tarPath = join(dest, "pgdata.tar.gz");
   await writeFile(tarPath, Buffer.from(await (archive as Blob).arrayBuffer()));
 
-  // Counts taken before the copy, so the manifest describes the state it was
-  // taken from. A table added later is recorded as absent (-1) rather than as
-  // zero, because zero would read as "all rows lost" to a restore check.
+  // Counts taken right after the copy, while the database is still open. They
+  // describe the state the snapshot was taken from closely, but not atomically:
+  // a movement that lands between the dump and the count makes the manifest a
+  // sanity check for a restore rather than an exact record of the archive. A
+  // table added later is recorded as absent (-1) rather than as zero, because
+  // zero would read as "all rows lost" to a restore check.
   const counts: Record<string, number> = {};
   for (const table of TABLES) {
     try {

@@ -639,7 +639,9 @@ overwrites your change:
 `GET /api/health` needs no credentials and answers 200 when the application can
 reach its database, 503 when it cannot. Point a monitor at it and NFR-04's
 99.5% target becomes a number rather than a claim; it also reports `mode`
-(`live` or `test`), so a test database cannot be mistaken for a deployment.
+(`live` or `test`), so a test database cannot be mistaken for a deployment. The
+failure body carries only that verdict — the database's own error message goes
+to the server log, not to whoever is polling, because the endpoint is open.
 
 ### Tests
 
@@ -971,9 +973,12 @@ public/
   20 for a sign-in method as a whole) within 15 minutes are answered normally;
   the next attempt gets `429` with a `Retry-After` header. A successful sign-in
   clears the counter, so a shared till cannot lock a real person out
-  permanently. Blocked attempts are deliberately not logged, or the lockout
-  would extend itself forever. To clear a lockout early, stop the dev server
-  and run `npm run db:wipe`.
+  permanently. A blocked attempt is not written to `login_attempts`: that table
+  is the counter, and counting the refusal would keep the fifteen-minute window
+  full so the lockout could never end. The face-check route does record a
+  throttled refusal in the audit trail as a denied attempt; the audit trail is a
+  separate log and is not read by the throttle, so it cannot extend the lockout.
+  To clear a lockout early, stop the dev server and run `npm run db:wipe`.
 - **Staff codes** are never written to the sign-in log for an unrecognised code
   — only a 12-character SHA-256 prefix of it.
 - **Sessions** are `httpOnly`, `SameSite=Lax`, `secure` in production, and
