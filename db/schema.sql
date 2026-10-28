@@ -1039,14 +1039,45 @@ begin
   end if;
 
   for v_alert in
-    select a.id, a.type, a.message, a.created_at
+    select a.id, a.type, a.message, a.created_at,
+           s.name         as supplier_name,
+           s.contact_name as supplier_contact,
+           s.phone        as supplier_phone,
+           s.email        as supplier_email
       from alerts a
+      -- The alert names the item; the item names the supplier it was last
+      -- received from. Joining here is what keeps the email as actionable as
+      -- the in-app alert, which has shown the supplier since suppliers were
+      -- introduced. A left join because an item need not have a supplier.
+      left join items i on i.id = a.item_id
+      left join suppliers s on s.id = i.supplier_id
      where a.resolved = false
        -- Only alerts raised from here on. Without this a backfill would mail
        -- the owner about every open alert the day the feature was switched on.
        and a.created_at > now() - make_interval(hours => v_window_hours)
   loop
     v_body := v_alert.message || ' (' || v_alert.type || ')';
+
+    /*
+     * A low-stock email that names only the item still leaves the owner to
+     * work out who to ring. The in-app alert has carried the supplier for as
+     * long as suppliers have existed; the email is the copy that reaches the
+     * owner away from the counter, so it is the one that most needs the number.
+     * Expiry alerts are left alone: they are about a date, not a reorder.
+     */
+    if v_alert.type in ('low_stock', 'out_of_stock')
+       and v_alert.supplier_name is not null then
+      v_body := v_body || E'\n\nSupplier: ' || v_alert.supplier_name;
+      if v_alert.supplier_contact is not null and v_alert.supplier_contact <> '' then
+        v_body := v_body || E'\n  contact: ' || v_alert.supplier_contact;
+      end if;
+      if v_alert.supplier_phone is not null and v_alert.supplier_phone <> '' then
+        v_body := v_body || E'\n  phone:   ' || v_alert.supplier_phone;
+      end if;
+      if v_alert.supplier_email is not null and v_alert.supplier_email <> '' then
+        v_body := v_body || E'\n  email:   ' || v_alert.supplier_email;
+      end if;
+    end if;
 
     insert into email_notifications
       (alert_id, recipient_id, kind, subject, body, dedupe_key)

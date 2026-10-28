@@ -116,7 +116,7 @@ async function queue(cookie) {
   return r.data?.queue ?? [];
 }
 
-const created = { items: [], recipients: [] };
+const created = { items: [], recipients: [], suppliers: [] };
 
 /**
  * A clean slate, before anything else.
@@ -356,10 +356,22 @@ try {
   /* ================================================================== */
 
   await stub.reset();
+  const supplierName = `Mail Supplier ${Date.now().toString(36)}`;
+  r = await call("POST", "/api/refs/suppliers", {
+    name: supplierName,
+    contact_name: "Mail Supplier Contact",
+    phone: "09171234567",
+    email: "supplier@merrylane.test",
+  }, A);
+  const supplier = r.data?.item;
+  if (supplier?.id) created.suppliers.push(supplier.id);
+  check("a supplier is created for the probe", r.status === 201, `${r.status} ${r.data?.error ?? ""}`);
+
   r = await call("POST", "/api/items", {
     name: `Mail Probe ${Date.now().toString(36)}`,
     quantity: 1,
     low_stock_threshold: 5,
+    supplier_id: supplier?.id,
   }, A);
   const probe = r.data?.item;
   if (probe?.id) created.items.push(probe.id);
@@ -400,6 +412,19 @@ try {
       .map((m) => (m.body ?? "").split("\n")[0])
       .slice(0, 3)
       .join(" | ")
+  );
+  check(
+    "and names the supplier the item was last received from",
+    delivered.some((m) => m.body?.includes(supplierName)),
+    delivered
+      .map((m) => (m.body ?? "").split("\n").slice(-4).join(" / "))
+      .slice(0, 2)
+      .join(" | ")
+  );
+  check(
+    "the supplier's phone number is in the email, not only in the app",
+    delivered.some((m) => m.body?.includes("09171234567")),
+    delivered.some((m) => m.body?.includes("09171234567")) ? "present" : "missing"
   );
 
   /* ================================================================== */
@@ -772,6 +797,9 @@ try {
     await wipeEmailState(A);
     for (const id of created.items) {
       await call("DELETE", `/api/items/${id}`, null, A);
+    }
+    for (const id of created.suppliers) {
+      await call("DELETE", `/api/refs/suppliers/${id}`, null, A);
     }
     // Clear any injection this run set but never spent, so the next run starts
     // with a stub that will accept everything.

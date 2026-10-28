@@ -170,9 +170,12 @@ export const POST = handler(async (req: Request) => {
    *
    * Optional, because a delivery can arrive without anyone recording who sent
    * it, but when given it is written back to every restocked item as its
-   * `supplier_id`. That is what makes "the supplier it was last received from"
-   * true rather than a field somebody has to remember to update by hand - and it
-   * is what the low-stock alert reads when it tells the owner who to call.
+   * `supplier_id`. That is what turns the field into "the supplier named on the
+   * most recent restock that named one" rather than a field somebody has to
+   * remember to update by hand - and it is what the low-stock alert reads when it
+   * tells the owner who to call. Leaving it blank keeps the previous link: a
+   * delivery with no name is not evidence that the old supplier stopped
+   * supplying.
    *
    * Only a restock has a supplier. A checkout or a waste log is stock leaving,
    * and silently rewriting the supplier from either would turn the field into

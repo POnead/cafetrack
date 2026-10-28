@@ -117,7 +117,9 @@ one, from `Downloads\cafetrack`.
   same rule and dry storage can carry none. A line with no date is not its
   business, and clearing the rule lets the same delivery through.
 - **Inventory** — items with SKU, category, location, physical form, unit,
-  units per box, quantity, low-stock threshold and expiry date. Search, filter by
+  units per box, quantity, low-stock threshold, expiry date and an optional
+  supplier. A restock can name the supplier it came from, and that becomes the
+  item's supplier, so the next low-stock alert knows who to ring. Search, filter by
   category, and sort by clicking any column header. Barcode labels for the whole
   filtered list or one at a time. Paged 50 at a time, with the search, the filter
   and the sort all applied by the database — so a filtered list is the whole list
@@ -154,7 +156,9 @@ one, from `Downloads\cafetrack`.
   server never slows down the till; a failed send is retried, up to three times by
   default. The same alert is not sent twice inside a suppression window (24 hours by
   default), and the delivery log shows what went out, what is queued, and why
-  anything failed.
+  anything failed. A low-stock or out-of-stock email names the item **and its
+  supplier** — contact, telephone and address when recorded — so the message that
+  reaches the owner away from the counter is enough to make the call.
 - **ID verification at hiring** — from an account's page, an admin photographs the
   applicant's government ID and a photo of them. The app compares the portrait
   printed on the card with their face, reads the shape of the uploads, and — if a
@@ -435,7 +439,9 @@ password in cleartext. `SMTP_ALLOW_INSECURE=1` lifts that for a relay on the sam
 machine with no certificate — an explicit choice, not a silent fallback.
 - **Alerts** — low stock, out of stock, expired and expiring soon, raised by a
   database function. Every alert has a detail page with the item, its current
-  stock and its full alert history. An open alert **escalates in place** when
+  stock and its full alert history. A stock alert also names the item's supplier,
+  with click-to-call and click-to-email links when those details are recorded. An
+  open alert **escalates in place** when
   the item gets worse — low stock becomes out of stock, expiring becomes
   expired — keeping the same alert id, so the message always states the current
   severity and an item is never listed twice. Resolving an alert closes it; it
@@ -443,9 +449,11 @@ machine with no certificate — an explicit choice, not a silent fallback.
   re-open, or force a recompute** — the controls are hidden for staff and the
   API refuses them with `403`.
 - **Settings** — admins set the expiry-warning window, session timeout and
-  business name, and add or remove item categories and storage locations. Each
-  location also carries its minimum shelf life on arrival, editable in place.
-  Changes take effect immediately, not after the settings cache expires.
+  business name, and add or remove item categories, storage locations and
+  suppliers. Each supplier stores a contact name, telephone and email, and shows
+  the items currently linked to it. Each location also carries its minimum shelf
+  life on arrival, editable in place. Changes take effect immediately, not after
+  the settings cache expires.
 - **Staff accounts** — admins create staff and admin accounts, print a staff
   barcode, reset passwords, and deactivate an account **with a reason**. The
   reason is shown to that person the next time they try to sign in.

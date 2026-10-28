@@ -635,6 +635,81 @@ async function rawCall(method, path, rawBody, cookie) {
   r = await call("POST", "/api/alerts", undefined, A2);
   check("recompute after manual resolve does not crash", r.status === 200, `${r.status}`);
 
+  /* ============ 7aa. Supplier: link, restock update, alert, delete guard === */
+  /* The supplier record is only useful if the chain stays connected: a restock
+   * names a supplier, the item remembers it, the alert can read it, and an
+   * unlinked supplier can be removed. Each link in that chain is checked here
+   * because no other suite creates a supplier at all. */
+  section("supplier link survives restock and reaches the alert");
+
+  const supplierName = `Edge Supplier ${Date.now().toString(36)}`;
+  r = await call("POST", "/api/refs/suppliers", {
+    name: supplierName,
+    contact_name: "Edge Contact",
+    phone: "09170000001",
+    email: "edge-supplier@merrylane.test",
+  }, A2);
+  const supplier = r.data?.item;
+  check("a supplier can be created", r.status === 201 && Boolean(supplier?.id), `${r.status}`);
+
+  r = await call("POST", "/api/items", {
+    name: `Edge Supplier Probe ${Date.now().toString(36)}`,
+    quantity: 1,
+    low_stock_threshold: 5,
+  }, A2);
+  const supplierProbe = r.data?.item;
+  check("a probe item starts with no supplier", r.status === 201 && supplierProbe?.supplier_id == null, `${r.status}`);
+
+  r = await call("POST", "/api/transactions", {
+    type: "restock",
+    password: "admin123",
+    supplier_id: supplier?.id,
+    items: [{ sku: supplierProbe?.sku, qty: 1 }],
+  }, A2);
+  check("a restock can name the supplier", r.status === 201, `${r.status} ${r.data?.error ?? ""}`);
+
+  r = await call("GET", `/api/items/${supplierProbe?.id}`, null, A2);
+  check(
+    "the item now points at that supplier",
+    r.data?.item?.supplier?.id === supplier?.id,
+    r.data?.item?.supplier?.name ?? "none"
+  );
+
+  r = await call("POST", "/api/transactions", {
+    type: "restock",
+    password: "admin123",
+    items: [{ sku: supplierProbe?.sku, qty: 1 }],
+  }, A2);
+  check("a restock with no supplier is still accepted", r.status === 201, `${r.status}`);
+  r = await call("GET", `/api/items/${supplierProbe?.id}`, null, A2);
+  check(
+    "leaving it blank keeps the previous link rather than clearing it",
+    r.data?.item?.supplier?.id === supplier?.id,
+    r.data?.item?.supplier?.name ?? "none"
+  );
+
+  r = await call("GET", "/api/alerts?status=open", null, A2);
+  const supplierAlert = (r.data?.alerts ?? []).find((a) => a.item?.sku === supplierProbe?.sku);
+  check(
+    "the low-stock alert carries the supplier and its number",
+    supplierAlert?.item?.supplier?.name === supplierName &&
+      supplierAlert?.item?.supplier?.phone === "09170000001",
+    supplierAlert?.item?.supplier?.name ?? "no supplier on alert"
+  );
+
+  r = await call("DELETE", `/api/refs/suppliers/${supplier?.id}`, null, A2);
+  check(
+    "a supplier still assigned to an item cannot be deleted",
+    r.status === 409,
+    `${r.status} ${r.data?.error ?? ""}`
+  );
+
+  r = await call("PATCH", `/api/items/${supplierProbe?.id}`, { supplier_id: null }, A2);
+  check("the item can be unlinked", r.status === 200, `${r.status}`);
+  r = await call("DELETE", `/api/refs/suppliers/${supplier?.id}`, null, A2);
+  check("once unlinked, the supplier can be removed", r.status === 200, `${r.status}`);
+  if (supplierProbe?.id) await call("DELETE", `/api/items/${supplierProbe.id}`, null, A2);
+
   /* ============ 7b. Expiry: the browser and the database must agree ===== */
   /* The one business rule implemented twice. refresh_alerts() decides
    * "expired" in SQL against current_date; the UI recomputes the same thing in
