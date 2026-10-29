@@ -192,7 +192,7 @@ export function Nav({
                       key={item.href}
                       href={item.href}
                       onClick={onClose}
-                      className={`flex min-h-[44px] items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm transition-colors lg:min-h-0 lg:py-2 ${
+                      className={`flex min-h-[44px] items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm transition-[background-color,color,transform] duration-150 ease-out active:scale-[0.98] lg:min-h-0 lg:py-2 ${
                         active
                           ? "bg-cream-300 font-semibold text-cocoa-900"
                           : "text-cream-100/75 hover:bg-white/10 hover:text-cream-50"
@@ -212,7 +212,7 @@ export function Nav({
         <div className="border-t border-white/10 p-3">
           <button
             onClick={logout}
-            className="flex min-h-[44px] w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-sm font-medium text-cream-100/75 transition-colors hover:bg-white/10 hover:text-cream-50 lg:min-h-0 lg:py-2"
+            className="flex min-h-[44px] w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-sm font-medium text-cream-100/75 transition-[background-color,color,transform] duration-150 ease-out hover:bg-white/10 hover:text-cream-50 active:scale-[0.98] lg:min-h-0 lg:py-2"
           >
             <LogOutIcon className="h-4 w-4 shrink-0" />
             Log out

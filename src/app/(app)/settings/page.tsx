@@ -474,9 +474,6 @@ export default function SettingsPage() {
     <div className="space-y-5">
       <div>
         <h1 className="deco-title text-3xl">Settings</h1>
-        <p className="mt-1 text-sm text-cocoa-500">
-          Company-wide policy. Per-item low-stock thresholds are set on each item.
-        </p>
       </div>
 
       {error && <div className="card p-4 text-sm text-terracotta-700">{error}</div>}
@@ -490,11 +487,6 @@ export default function SettingsPage() {
       */}
       <Card>
         <h2 className="text-lg font-semibold text-cocoa-800">Email notifications</h2>
-        <p className="mt-1 text-sm text-cocoa-500">
-          Who gets told when stock runs low or expires, through which sending
-          account, and how the test and retry controls confirm it is working.
-          Everything is configured on its own page.
-        </p>
         <p className="mt-3">
           <a href="/email" className="text-sm font-medium text-ochre-700 underline">
             Set up and test email notifications
@@ -506,9 +498,6 @@ export default function SettingsPage() {
         <h2 className="text-lg font-semibold text-cocoa-800">
           Alerts &amp; sessions
         </h2>
-        <p className="mt-1 text-sm text-cocoa-500">
-          Applied across the whole system. Changes take effect immediately.
-        </p>
 
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
           {NUMERIC_FIELDS.map((f) => (
@@ -561,9 +550,6 @@ export default function SettingsPage() {
               if (v !== (saved.current.business_name ?? "")) saveField("business_name", v);
             }}
           />
-          <p className="mt-1 text-xs text-cocoa-400">
-            Shown on printed reports and labels.
-          </p>
         </div>
       </Card>
 
@@ -580,10 +566,6 @@ export default function SettingsPage() {
       */}
       <Card>
         <h2 className="text-lg font-semibold text-cocoa-800">Face verification</h2>
-        <p className="mt-1 text-sm text-cocoa-500">
-          Uses the camera on the device to confirm who someone is. Staff need a
-          reference photo added from Staff Accounts before either one can work.
-        </p>
 
         <div className="mt-4 space-y-3">
           {(
@@ -616,9 +598,6 @@ export default function SettingsPage() {
               >
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-bold text-cocoa-800">{t.title}</p>
-                  <p className="mt-1 text-xs leading-snug text-cocoa-500">
-                    {on ? t.on : t.off}
-                  </p>
                 </div>
                 <button
                   className={on ? "btn-ghost" : "btn-primary"}
@@ -675,9 +654,6 @@ export default function SettingsPage() {
                 }
               }}
             />
-            <p className="mt-1 text-xs text-cocoa-400">
-              Hours one check covers before the next one is due (1&ndash;24).
-            </p>
           </div>
 
           <div>
@@ -704,12 +680,6 @@ export default function SettingsPage() {
                 }
               }}
             />
-            <p className="mt-1 text-xs text-cocoa-400">
-              How far apart two faces may read and still count as the same person
-              ({thresholdBand.min}&ndash;{thresholdBand.max}). Lower is stricter.
-              The other model keeps its own value &mdash; switching does not carry
-              this one across.
-            </p>
           </div>
         </div>
 
@@ -725,14 +695,7 @@ export default function SettingsPage() {
         <div className="mt-4 rounded-xl border border-cream-200 bg-cream-50 px-3.5 py-3">
           <p className="text-sm font-bold text-cocoa-800">Face model</p>
           <p className="mt-1 text-xs leading-snug text-cocoa-500">
-            {settings.face_engine === "sface"
-              ? "Using the newer model (SFace). It separates people far better than the original, and recognises angled and partly covered faces."
-              : "Using the original model. Enrolments made with it cannot be checked by the newer model, or the other way round."}
-          </p>
-          <p className="mt-1.5 text-xs leading-snug text-terracotta-700">
-            Switching means everyone must have their photo taken again before they
-            can pass a face check. Until then they will be told their face needs
-            re-enrolling, and a manager can let them through with an override.
+            {settings.face_engine === "sface" ? "SFace" : "Original"}
           </p>
           <button
             type="button"
@@ -763,22 +726,12 @@ export default function SettingsPage() {
       */}
       <Card>
         <h2 className="text-lg font-semibold text-cocoa-800">ID verification</h2>
-        <p className="mt-1 text-sm text-cocoa-500">
-          Photograph a staff member&rsquo;s government ID and a photo of them from
-          Staff Accounts. The app compares the face on the card with their face
-          and shows you what it found — you still decide whether to approve it.
-        </p>
 
         <div className="mt-4 space-y-3">
           <div className="flex flex-wrap items-start justify-between gap-3 rounded-xl border border-cream-200 bg-cream-50 px-3.5 py-3">
             <div className="min-w-0 flex-1">
               <p className="text-sm font-bold text-cocoa-800">
                 Require a checked ID before sign-in
-              </p>
-              <p className="mt-1 text-xs leading-snug text-cocoa-500">
-                {settings.id_verification_required === "1"
-                  ? "A staff account whose ID has been attached but not approved cannot sign in. Accounts with no ID attached are unaffected, and admins are never held up."
-                  : "Off. You can attach and check IDs as you like, but a staff account can sign in before you have looked at its ID."}
               </p>
             </div>
             <button
@@ -833,22 +786,9 @@ export default function SettingsPage() {
                 }
               }}
             />
-            <p className="mt-1 text-xs text-cocoa-400">
-              How far apart the portrait on the card and the applicant&rsquo;s photo may
-              read and still count as the same face ({MIN_ID_MATCH_THRESHOLD}&ndash;
-              {MAX_ID_MATCH_THRESHOLD}). Lower is stricter. This check has its own
-              model, so the face-model switch above does not change it.
-            </p>
           </div>
         </div>
 
-        <p className="mt-3 text-xs leading-snug text-cocoa-400">
-          Turn this on only after you have attached IDs for the staff you already
-          have — it is a record-keeping switch, not a way to verify anyone. The
-          app can compare faces and spot an obviously doctored image; whether a
-          Philippine ID is genuine is not something any tool can answer, so the
-          approval is always yours.
-        </p>
       </Card>
 
       {refList(
@@ -1042,11 +982,7 @@ export default function SettingsPage() {
                         {supplierItemsLoading ? (
                           <p className="text-xs text-cocoa-400">Loading items...</p>
                         ) : supplierItems.length === 0 ? (
-                          <p className="text-xs text-cocoa-400">
-                            No items are linked to this supplier yet. Assign one
-                            from the inventory page, or choose this supplier when
-                            restocking.
-                          </p>
+                          <p className="text-xs text-cocoa-400">No linked items.</p>
                         ) : (
                           <ul className="space-y-1">
                             {supplierItems.map((item) => (

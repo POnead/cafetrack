@@ -179,21 +179,11 @@ export default function ApprovalsPage() {
 
       <div>
         <h1 className="deco-title text-3xl">Approvals</h1>
-        <p className="mt-1 text-sm text-cocoa-500">
-          Ingredients submitted by staff, waiting to become stock.
-        </p>
       </div>
 
       {error && (
         <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
           {error}
-        </div>
-      )}
-
-      {!isAdmin && (
-        <div className="rounded-xl bg-cream-100 px-3.5 py-2.5 text-sm text-cocoa-600">
-          Only an admin can approve or reject a submission. You can see what is
-          waiting, and add items yourself from All Items.
         </div>
       )}
 

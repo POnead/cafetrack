@@ -133,7 +133,7 @@ export function AppShell({
             onClick={() => setNavOpen(true)}
             aria-label="Open menu"
             aria-expanded={navOpen}
-            className="-ml-1.5 rounded-lg p-2 text-cocoa-600 transition-colors hover:bg-cream-100 active:bg-cream-200"
+            className="-ml-1.5 rounded-lg p-2 text-cocoa-600 transition-[background-color,color,transform] duration-150 ease-out hover:bg-cream-100 active:scale-[0.97] active:bg-cream-200"
           >
             <MenuIcon className="h-5 w-5" />
           </button>

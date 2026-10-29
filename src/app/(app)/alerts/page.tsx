@@ -160,9 +160,6 @@ export default function AlertsPage() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="deco-title text-3xl">Alerts</h1>
-          <p className="mt-1 text-sm text-cocoa-500">
-            Stock and expiry warnings raised by the inventory monitor.
-          </p>
         </div>
         <div className="flex gap-2">
           {isAdmin && (

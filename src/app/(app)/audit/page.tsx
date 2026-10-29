@@ -343,9 +343,6 @@ export default function AuditPage() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="deco-title text-3xl">Audit Trail</h1>
-          <p className="mt-1 text-sm text-cocoa-500">
-            Append-only log — every entry is hashed together with the one before it.
-          </p>
         </div>
         <div className="flex gap-2">
           <button className="btn-ghost" onClick={load}>

@@ -60,19 +60,19 @@ body {
      --------------------------------------------------------------- */
 
   .btn {
-    @apply inline-flex items-center justify-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex items-center justify-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition-[color,background-color,border-color,transform] duration-150 ease-out active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50;
   }
 
   .btn-primary {
-    @apply inline-flex items-center justify-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 bg-cream-500 text-cocoa-900 hover:bg-cream-600;
+    @apply inline-flex items-center justify-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition-[color,background-color,border-color,transform] duration-150 ease-out disabled:cursor-not-allowed disabled:opacity-50 bg-cream-500 text-cocoa-900 hover:bg-cream-600 active:scale-[0.97];
   }
 
   .btn-ghost {
-    @apply inline-flex items-center justify-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 border border-cream-300 bg-white text-cocoa-700 hover:bg-cream-100;
+    @apply inline-flex items-center justify-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition-[color,background-color,border-color,transform] duration-150 ease-out disabled:cursor-not-allowed disabled:opacity-50 border border-cream-300 bg-white text-cocoa-700 hover:bg-cream-100 active:scale-[0.97];
   }
 
   .btn-danger {
-    @apply inline-flex items-center justify-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 border border-terracotta-500/40 bg-white text-terracotta-700 hover:bg-terracotta-50;
+    @apply inline-flex items-center justify-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition-[color,background-color,border-color,transform] duration-150 ease-out disabled:cursor-not-allowed disabled:opacity-50 border border-terracotta-500/40 bg-white text-terracotta-700 hover:bg-terracotta-50 active:scale-[0.97];
   }
 
   /* ---------------------------------------------------------------
@@ -147,6 +147,35 @@ input[type="password"]::-webkit-outer-spin-button {
   display: none !important;
   -webkit-appearance: none;
   appearance: none;
+}
+
+button:not(:disabled):active {
+  transform: scale(0.97);
+}
+
+button:not(:disabled),
+a[href] {
+  transition-property: color, background-color, border-color, opacity, transform;
+  transition-duration: 150ms;
+  transition-timing-function: cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+button:focus-visible,
+a[href]:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid #d99b3f;
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 /* Custom scrollbar so the warm theme carries into scroll areas */

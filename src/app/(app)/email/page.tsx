@@ -513,10 +513,6 @@ async function removeRecipient(r: Recipient) {
 
       <div>
         <h1 className="deco-title text-3xl">Email Notifications</h1>
-        <p className="mt-1 text-sm text-cocoa-500">
-          Who hears about low stock, expiry and rejected sign-ins — and when they
-          hear about it.
-        </p>
       </div>
 
       {error && (
@@ -541,8 +537,8 @@ async function removeRecipient(r: Recipient) {
               {status?.enabled
                 ? `On — ${status.recipients} recipient${status.recipients === 1 ? "" : "s"}.`
                 : canTurnOn
-                  ? "Everything is set up. Switch this on to start sending."
-                  : "No email is sent until this is set up and switched on."}
+                  ? "Ready"
+                  : "Setup incomplete"}
             </p>
           </div>
 
@@ -635,9 +631,6 @@ async function removeRecipient(r: Recipient) {
       {/* ---- the sending account ---- */}
       <Card>
         <h2 className="text-sm font-bold text-cocoa-800">Sending account</h2>
-        <p className="mt-1 text-sm text-cocoa-500">
-          The Gmail (or other) account messages are sent from.
-        </p>
 
         {presets.length > 0 && (
           <div className="mt-3 flex flex-wrap gap-2">
@@ -868,11 +861,6 @@ async function removeRecipient(r: Recipient) {
       {/* ---- delivery settings ---- */}
       <Card>
         <h2 className="text-sm font-bold text-cocoa-800">When and how often</h2>
-        <p className="mt-1 text-sm text-cocoa-500">
-          The defaults are fine for most cafés. One summary a day, retrying a failed
-          message three times, and no repeat alert for the same item inside 24
-          hours. Adjust any of these only if one of them is getting in the way.
-        </p>
 
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
           <div>
@@ -958,9 +946,6 @@ async function removeRecipient(r: Recipient) {
       {/* ---- actions ---- */}
       <Card>
         <h2 className="text-sm font-bold text-cocoa-800">Check it works</h2>
-        <p className="mt-1 text-sm text-cocoa-500">
-          Send yourself a message before you rely on an alert going out.
-        </p>
 
         {!status?.configured && (
           <p className="mt-3 rounded-xl bg-cream-100 px-3.5 py-2.5 text-sm text-cocoa-600">
@@ -1044,7 +1029,6 @@ async function removeRecipient(r: Recipient) {
         <Card className="!p-0">
           <div className="border-b border-cream-200 px-5 py-3.5">
             <h2 className="text-sm font-bold text-cocoa-800">Delivery log</h2>
-            <p className="text-xs text-cocoa-500">The 50 most recent messages.</p>
           </div>
 
           {queue.length === 0 ? (

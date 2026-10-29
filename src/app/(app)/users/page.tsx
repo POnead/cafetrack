@@ -841,9 +841,6 @@ async function toggleItemPermission(user: StaffUser) {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="deco-title text-3xl">Staff Accounts</h1>
-          <p className="mt-1 text-sm text-cocoa-500">
-            Staff sign in by scanning the barcode printed on their ID.
-          </p>
         </div>
         <button className="btn-primary" onClick={openCreate}>
           Add account
@@ -1204,9 +1201,6 @@ async function toggleItemPermission(user: StaffUser) {
                 />
               </div>
             </div>
-            <p className="-mt-1 text-[11px] text-cocoa-400">
-              Both optional — you can fill either in later from Edit.
-            </p>
 
             <div>
               <label className="label" htmlFor="u-username">
@@ -1287,10 +1281,6 @@ async function toggleItemPermission(user: StaffUser) {
             <section className="space-y-3 rounded-2xl border border-cream-200 bg-white p-4 sm:p-5">
               <div>
                 <h4 className="text-sm font-semibold text-cocoa-800">Face verification</h4>
-                <p className="mt-1 text-xs leading-relaxed text-cocoa-500">
-                  You can enroll later, but face verification requires all three
-                  views: straight on, left turn, and right turn.
-                </p>
               </div>
               <FaceCapture disabled={saving} onCapture={(result) => setCreateShot(result)} />
             </section>
@@ -1623,12 +1613,6 @@ async function toggleItemPermission(user: StaffUser) {
             {detailsUser.face_enabled && detailsUser.face_needs_enrolment && (
               <div className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs leading-relaxed text-cocoa-800">
                 <span className="font-semibold">Photo needs retaking</span>
-                <p className="mt-0.5">
-                  This reference photo was taken with an older face reader, so it
-                  cannot be compared any more. Use <strong>Replace photo</strong>{" "}
-                  above to enrol {detailsUser.full_name || "them"} again — until
-                  then, a duty check will refuse the face.
-                </p>
               </div>
             )}
 
@@ -1719,10 +1703,6 @@ async function toggleItemPermission(user: StaffUser) {
                   width={240}
                   label={`Barcode for ${detailsUser.full_name}`}
                 />
-                <p className="text-center text-[11px] text-cocoa-400">
-                  This is the code they scan to sign in. Printing a new one
-                  makes the label they already carry stop working.
-                </p>
                 <div className="flex w-full gap-2">
                   <button
                     className="btn-ghost flex-1 text-xs"
@@ -1772,12 +1752,6 @@ async function toggleItemPermission(user: StaffUser) {
                     <span className="block font-mono text-sm">
                       {detailsUser.approval_code ?? "none issued"}
                     </span>
-                    <p className="text-[11px] text-cocoa-400">
-                      A code lets one person skip the approvals queue without
-                      granting them item-management outright. Read it out and
-                      give it to them — they type it when adding or editing an
-                      item.
-                    </p>
                     <div className="flex gap-2 pt-0.5">
                       <button
                         className="btn-ghost min-h-[40px] !px-3 !py-1.5 text-xs"
@@ -1848,11 +1822,6 @@ async function toggleItemPermission(user: StaffUser) {
             hand them the new one.
           </p>
 
-          <div className="rounded-xl bg-cream-50 px-3.5 py-2.5 text-xs text-cocoa-500">
-            Only do this if the label is lost or damaged, or if you are
-            deliberately revoking their access. Rotating is recorded in the audit
-            trail.
-          </div>
 
           {rotating?.qr_token && (
             <div className="text-xs text-cocoa-400">
@@ -2137,21 +2106,12 @@ async function toggleItemPermission(user: StaffUser) {
             <section className="space-y-3 rounded-2xl border border-cream-200 bg-white p-4 sm:p-5">
               <div>
                 <h4 className="text-sm font-semibold text-cocoa-800">Reference photos</h4>
-                <p className="mt-1 text-xs leading-relaxed text-cocoa-500">
-                  Used to confirm identity at sign-in or at the start of a duty.
-                </p>
               </div>
               <FaceCapture
                 disabled={saving}
                 currentPhotos={facePhotoUrls(editing)}
                 onCapture={(result) => setFaceShot(result)}
               />
-              {editing.face_enabled && !faceShot && (
-                <p className="rounded-xl bg-cream-50 px-3 py-2.5 text-xs leading-relaxed text-cocoa-500">
-                  Existing photos stay on file unless you replace them. A replacement
-                  requires all three views.
-                </p>
-              )}
             </section>
 
             {editError && (

@@ -656,9 +656,6 @@ export default function ItemsPage() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="deco-title text-3xl">Inventory Management</h1>
-          <p className="mt-1 text-sm text-cocoa-500">
-            Add ingredients, print barcode labels, and track quantities.
-          </p>
         </div>
         <div className="flex gap-2">
           <button
@@ -984,10 +981,6 @@ export default function ItemsPage() {
         <Card className="!p-0">
           <div className="border-b border-cream-200 bg-cream-50 p-4">
             <h2 className="text-lg font-semibold text-cocoa-800">Stock Count</h2>
-            <p className="mt-1 text-sm text-cocoa-500">
-              Enter the actual counted quantity for each item. The accuracy column shows how close the count is to the system quantity.
-              Only items where the counted quantity differs from the system will be updated when you save.
-            </p>
           </div>
           {countableItems.length > 0 && (
             <div className="hidden overflow-x-auto lg:block">

@@ -304,21 +304,18 @@ export default function LoginPage() {
                 ) : (
                   <div>
                     <label className="label" htmlFor="staff-username">
-                      Username or scan barcode
+                      Username
                     </label>
                     <input
                       id="staff-username"
                       className="input"
-                      placeholder="Type username or scan barcode"
+                      placeholder="Username"
                       value={username}
                       onChange={(e) => setUsername(e.target.value)}
                       autoComplete="username"
                       autoFocus={true}
                       required
                     />
-                    <p className="mt-1 text-[11px] text-cocoa-300">
-                      Scan your staff barcode or type your username, then enter your password.
-                    </p>
                   </div>
                 )}
 
@@ -378,12 +375,6 @@ export default function LoginPage() {
                   </button>
                 </div>
 
-                {mode === "staff" && (
-                  <p className="text-center text-[11px] text-cocoa-300">
-                    Scan your staff ID, or type the code printed on it.
-                  </p>
-                )}
-
                 {deactivated ? (
                   <div className="rounded-xl bg-ochre-50 px-3.5 py-3 text-center text-sm text-ochre-700">
                     <div className="font-bold">This account is deactivated</div>
@@ -440,10 +431,6 @@ export default function LoginPage() {
               )}
             </div>
           </div>
-
-          <p className="mt-5 text-center text-[11px] text-cocoa-300">
-            Sessions expire after a period of inactivity set by your administrator.
-          </p>
         </div>
       </div>
 

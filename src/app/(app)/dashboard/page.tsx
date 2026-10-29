@@ -28,7 +28,6 @@ type Txn = {
   transaction_items: { sku: string; item_name: string; quantity: number }[];
 };
 
-type Ref = { id: string; name: string };
 
 type SnapshotItem = {
   id: string;
@@ -59,7 +58,6 @@ type Analytics = {
 const ANALYTICS_MIN_INTERVAL_MS = 15_000;
 
 /** The filter key with every field empty, i.e. what the first load already fetches. */
-const NO_FILTERS = "|||";
 
 export default function DashboardPage() {
   const [items, setItems] = useState<Item[]>([]);
@@ -68,25 +66,7 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
 
-  /* Analytics: the two cards that cannot be computed from this page's own fetch.
-     The snapshot is filtered server-side, so the same query answers "everything"
-     and "just the chiller, just this week" without shipping the whole inventory
-     to the browser first. */
   const [analytics, setAnalytics] = useState<Analytics | null>(null);
-  const [categories, setCategories] = useState<Ref[]>([]);
-  const [locations, setLocations] = useState<Ref[]>([]);
-  const [snapCategory, setSnapCategory] = useState("");
-  const [snapLocation, setSnapLocation] = useState("");
-  const [snapFrom, setSnapFrom] = useState("");
-  const [snapTo, setSnapTo] = useState("");
-
-  const filtersRef = useRef({ category: "", location: "", from: "", to: "" });
-  filtersRef.current = {
-    category: snapCategory,
-    location: snapLocation,
-    from: snapFrom,
-    to: snapTo,
-  };
 
   const analyticsInFlight = useRef(false);
   const lastAnalyticsAt = useRef(0);
@@ -103,14 +83,7 @@ export default function DashboardPage() {
 
     analyticsInFlight.current = true;
     try {
-      const f = filtersRef.current;
-      const qs = new URLSearchParams();
-      if (f.category) qs.set("category", f.category);
-      if (f.location) qs.set("location", f.location);
-      if (f.from) qs.set("from", f.from);
-      if (f.to) qs.set("to", f.to);
-
-      const res = await fetch(`/api/analytics${qs.size ? `?${qs}` : ""}`);
+      const res = await fetch("/api/analytics");
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not load analytics");
 
@@ -123,42 +96,6 @@ export default function DashboardPage() {
       analyticsInFlight.current = false;
     }
   }, []);
-
-  // Reference lists for the snapshot filters. Fetched once; they change only
-  // when an admin edits them on the settings page.
-  useEffect(() => {
-    let alive = true;
-    Promise.all([
-      fetch("/api/refs/categories").then((r) => r.json()),
-      fetch("/api/refs/locations").then((r) => r.json()),
-    ])
-      .then(([c, l]) => {
-        if (!alive) return;
-        setCategories(c.items ?? []);
-        setLocations(l.items ?? []);
-      })
-      .catch(() => {
-        /* filters stay as text-less selects; the snapshot still loads */
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  /*
-   * Filtering the snapshot is an explicit action, so it may bypass the throttle.
-   *
-   * The key comparison keeps this from firing on mount: `load()` already fetches
-   * analytics once, and a bare dependency array would spend a second aggregation
-   * answering "no filters" a moment later.
-   */
-  const appliedFilters = useRef(NO_FILTERS);
-  useEffect(() => {
-    const key = [snapCategory, snapLocation, snapFrom, snapTo].join("|");
-    if (appliedFilters.current === key) return;
-    appliedFilters.current = key;
-    void loadAnalytics(true);
-  }, [snapCategory, snapLocation, snapFrom, snapTo, loadAnalytics]);
 
   async function load(force = false) {
     // Nothing on this page is time-critical to the millisecond, and a forgotten
@@ -277,22 +214,18 @@ export default function DashboardPage() {
   if (loading) return <Spinner />;
 
   return (
-    <div className="relative">
-      {/* ---- decorative peach wave ---- */}
-      <svg
-        className="pointer-events-none absolute -top-7 left-1/2 h-[440px] w-screen -translate-x-1/2"
-        viewBox="0 0 1200 440"
-        preserveAspectRatio="none"
-        aria-hidden="true"
-      >
-        <path
-          d="M0 0 L1200 0 L1200 150 C980 330 760 400 520 400 C300 400 120 280 0 160 Z"
-          fill="#F5D5A8"
-        />
-      </svg>
-
-      <div className="relative space-y-6">
-        <h1 className="deco-title text-4xl">Inventory Dashboard</h1>
+    <div>
+      <div className="space-y-6">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight text-cocoa-900 sm:text-3xl">
+              Inventory Dashboard
+            </h1>
+            <p className="mt-1 text-sm text-cocoa-400">
+              Merrylane Cafe Foodhub
+            </p>
+          </div>
+        </div>
 
         {/*
           Announced, never shown as an alert. When the event stream is down the
@@ -348,7 +281,11 @@ export default function DashboardPage() {
             <div className="script-logo-dark text-4xl">CafeTrack</div>
             {/* White card, so the illustration's own white background is
                 invisible. No white panel needed here. */}
-            <BaristaArt className="max-w-[260px]" sizes="260px" />
+            <BaristaArt
+              className="max-w-[260px]"
+              sizes="260px"
+              preload
+            />
             <p className="text-center text-xs text-cocoa-400">
               Live stock monitoring for Merrylane Cafe Foodhub
             </p>
@@ -468,173 +405,6 @@ export default function DashboardPage() {
               )}
             </MiniCard>
           </div>
-        </div>
-
-        {/* ---- stock snapshot ---- */}
-        <div className="card space-y-4">
-          <div className="flex flex-wrap items-end justify-between gap-3">
-            <div>
-              <h2 className="text-sm font-bold text-cocoa-800">
-                Stock Snapshot
-              </h2>
-              <p className="mt-0.5 text-xs text-cocoa-400">
-                Current on-hand quantities. Filter by category, location, or the
-                window an item expires in.
-              </p>
-            </div>
-            <button
-              className="btn-ghost !px-3 !py-1.5 text-xs"
-              onClick={() => {
-                setSnapCategory("");
-                setSnapLocation("");
-                setSnapFrom("");
-                setSnapTo("");
-              }}
-              disabled={!snapCategory && !snapLocation && !snapFrom && !snapTo}
-            >
-              Clear filters
-            </button>
-          </div>
-
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-            <div>
-              <label className="label" htmlFor="snap-category">
-                Category
-              </label>
-              <select
-                id="snap-category"
-                className="input"
-                value={snapCategory}
-                onChange={(e) => setSnapCategory(e.target.value)}
-              >
-                <option value="">All categories</option>
-                {categories.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="label" htmlFor="snap-location">
-                Location
-              </label>
-              <select
-                id="snap-location"
-                className="input"
-                value={snapLocation}
-                onChange={(e) => setSnapLocation(e.target.value)}
-              >
-                <option value="">All locations</option>
-                {locations.map((l) => (
-                  <option key={l.id} value={l.id}>
-                    {l.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="label" htmlFor="snap-from">
-                Expiry from
-              </label>
-              <input
-                id="snap-from"
-                type="date"
-                className="input"
-                value={snapFrom}
-                max={snapTo || undefined}
-                onChange={(e) => setSnapFrom(e.target.value)}
-              />
-            </div>
-            <div>
-              <label className="label" htmlFor="snap-to">
-                Expiry to
-              </label>
-              <input
-                id="snap-to"
-                type="date"
-                className="input"
-                value={snapTo}
-                min={snapFrom || undefined}
-                onChange={(e) => setSnapTo(e.target.value)}
-              />
-            </div>
-          </div>
-
-          {!analytics ? (
-            <p className="text-xs text-cocoa-400">Loading stock snapshot…</p>
-          ) : analytics.snapshot.items.length === 0 ? (
-            <Empty>No stock matches these filters.</Empty>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr>
-                    <th className="th">Item</th>
-                    <th className="th hidden md:table-cell">Category</th>
-                    <th className="th hidden md:table-cell">Location</th>
-                    <th className="th text-right">On hand</th>
-                    <th className="th text-right">Threshold</th>
-                    <th className="th">Expiry</th>
-                    <th className="th">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {analytics.snapshot.items.map((item) => {
-                    const status = stockStatus(
-                      item.quantity,
-                      item.low_stock_threshold
-                    );
-                    return (
-                      <tr
-                        key={item.id}
-                        className="transition-colors hover:bg-cream-50"
-                      >
-                        <td className="td">
-                          <div className="font-medium text-cocoa-800">
-                            {item.name}
-                          </div>
-                          <div className="font-mono text-[11px] text-cocoa-300">
-                            {item.sku}
-                          </div>
-                        </td>
-                        <td className="td hidden text-cocoa-600 md:table-cell">
-                          {item.category?.name ?? "Uncategorized"}
-                        </td>
-                        <td className="td hidden text-cocoa-600 md:table-cell">
-                          {item.location?.name ?? "—"}
-                        </td>
-                        <td className="td text-right tabular-nums text-cocoa-800">
-                          {fmtQty(item.quantity, item.unit)}
-                        </td>
-                        <td className="td text-right tabular-nums text-cocoa-500">
-                          {fmtQty(item.low_stock_threshold, item.unit)}
-                        </td>
-                        <td className="td text-cocoa-600">
-                          {item.expiration_date
-                            ? fmtDate(item.expiration_date)
-                            : "—"}
-                        </td>
-                        <td className="td">
-                          <Badge tone={status.tone} variant="tag">
-                            {status.label}
-                          </Badge>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          {analytics && (
-            <p className="text-[11px] text-cocoa-300">
-              {analytics.snapshot.total}{" "}
-              {analytics.snapshot.total === 1 ? "item" : "items"} shown
-              {snapFrom || snapTo ? ", limited to the expiry window" : ""}.
-            </p>
-          )}
         </div>
 
         {/* ---- shortcut strip ---- */}

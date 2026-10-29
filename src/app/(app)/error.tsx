@@ -24,10 +24,6 @@ export default function AppError({
     <div className="flex min-h-[60vh] items-center justify-center">
       <div className="card max-w-md space-y-3 p-8 text-center">
         <div className="deco-title text-3xl">Something went wrong</div>
-        <p className="text-sm text-cocoa-500">
-          This page hit an unexpected error. Try again — and if it keeps
-          happening, check the audit trail for what was recorded.
-        </p>
         {error.digest && (
           <p className="font-mono text-[11px] text-cocoa-300">
             Reference: {error.digest}

@@ -848,19 +848,7 @@ export default function CheckoutPage() {
     <div className="space-y-5">
       <div>
         <h1 className="deco-title text-3xl">Checkout &amp; Restock</h1>
-        <p className="mt-1 text-sm text-cocoa-500">
-          Scan an item label, set the quantity, then confirm with your password.
-        </p>
       </div>
-
-      {/* ---------- waste warning ---------- */}
-      {mode === "waste" && (
-        <div className="rounded-2xl border border-ochre-500/40 bg-ochre-50 px-4 py-3 text-sm text-ochre-700">
-          <span className="font-bold">Logging waste.</span> Everything added
-          here is deducted from stock as spoilage, spills or expired goods, and
-          is recorded separately from a normal checkout in the audit trail.
-        </div>
-      )}
 
       {/* ---------- movement type ---------- */}
       <div className="grid gap-2 sm:grid-cols-3">

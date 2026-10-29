@@ -541,9 +541,6 @@ export default function ReportsPage() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="deco-title text-3xl">Stock Report</h1>
-          <p className="mt-1 text-sm text-cocoa-500">
-            Current stock and all matching movement history.
-          </p>
         </div>
         <div className="flex gap-2">
           <button className="btn-ghost" onClick={load}>

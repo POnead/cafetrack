@@ -512,10 +512,6 @@ export default function VerifyPage() {
               }}
             />
           </div>
-          <p className="mt-1.5 text-center text-xs text-cocoa-500">
-            About 7MB, once. It is kept afterwards, so this only happens the first
-            time.
-          </p>
         </div>
       )}
 
@@ -531,17 +527,6 @@ export default function VerifyPage() {
         Only while the camera is off. Once it is open the live guide carries the
         angle, the nudge and the count on the preview itself.
       */}
-      {!cameraOn && (
-        <div className="mb-5 rounded-xl border border-cream-200 bg-white px-4 py-3.5">
-          <p className="text-sm font-semibold text-cocoa-700">For the clearest check</p>
-          <p className="mt-1 text-xs leading-relaxed text-cocoa-500">
-            Fill the frame with your face, but keep room around it — your whole
-            head, from the top of your hair down to your chin, with a little to
-            spare. If it does not match, try again with a little more light or
-            with the camera a little further away.
-          </p>
-        </div>
-      )}
 
       {/*
         Always available. On an address that cannot use getUserMedia this is the
@@ -564,9 +549,6 @@ export default function VerifyPage() {
             }}
           />
         </label>
-        <p className="text-center text-xs leading-relaxed text-cocoa-400">
-          Use the camera app on your device or choose an existing image.
-        </p>
       </div>
 
       {message && (
