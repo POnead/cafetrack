@@ -631,23 +631,54 @@ export default function CheckoutPage() {
         tone: "success",
       });
 
+      const result = data.result as
+        | {
+            items?: {
+              sku: string;
+              name: string;
+              unit: string;
+              before: number;
+              after: number;
+              expiration?: string | null;
+            }[];
+          }
+        | undefined;
+      const stockChanges = new Map(
+        (result?.items ?? []).map((line) => [line.sku, line])
+      );
+
+      if (stockChanges.size > 0) {
+        setAllItems((items) =>
+          items.map((item) => {
+            const changed = stockChanges.get(item.sku);
+            return changed
+              ? {
+                  ...item,
+                  quantity: Number(changed.after),
+                  expiration_date: changed.expiration ?? item.expiration_date,
+                }
+              : item;
+          })
+        );
+        setSearchResults((items) =>
+          items.map((item) => {
+            const changed = stockChanges.get(item.sku);
+            return changed
+              ? {
+                  ...item,
+                  quantity: Number(changed.after),
+                  expiration_date: changed.expiration ?? item.expiration_date,
+                }
+              : item;
+          })
+        );
+      }
+
       // The API echoes before/after per line, so we can say when the movement
       // the operator just recorded pushed something under its threshold. Only
       // genuine crossings are reported — anything already low was warned about
       // at scan time.
       if (deducting) {
-        const result = data.result as
-          | {
-              items?: {
-                sku: string;
-                name: string;
-                unit: string;
-                before: number;
-                after: number;
-              }[];
-            }
-          | undefined;
-
         const crossed = (result?.items ?? [])
           .map((line): Notice | null => {
             const threshold = lines.find((l) => l.sku === line.sku)?.threshold ?? 0;
