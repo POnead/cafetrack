@@ -1,8 +1,9 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail } from "@/lib/api";
+import { handler, ok } from "@/lib/api";
 import { requireUser } from "@/lib/auth";
 import { daysUntil } from "@/lib/format";
 import { stockStatus } from "@/lib/status";
+import { memoize } from "@/lib/ttl-cache";
 
 /**
  * An item's `date` column, as a calendar day.
@@ -81,46 +82,69 @@ export const GET = handler(async (req: Request) => {
 
   /* ---------------- fetch ---------------- */
 
-  const { data: items, error: itemsError } = await db()
-    .from("items")
-    .select(
-      `id, sku, name, unit, quantity, low_stock_threshold, expiration_date,
-       category_id, location_id, updated_at,
-       category:categories(id, name), location:locations(id, name)`
-    )
-    .eq("item_status", "active")
-    .order("name", { ascending: true });
+  /*
+   * The raw snapshot is cached, not the derived answer.
+   *
+   * Two costs dominate this endpoint: the item join, and walking up to 20,000
+   * transactions to tally four time windows. The dashboard refreshes on a
+   * timer, so without a cache every open tab re-runs the full scan. Fifteen
+   * seconds is short enough that a just-recorded movement still shows up while
+   * the person is looking at the screen, and long enough that a burst of tabs
+   * collapses onto one scan.
+   *
+   * Caching the raw rows rather than the response keeps the category/location/
+   * expiry filters live: those are applied below, against the cached arrays, so
+   * changing a filter never waits for the TTL.
+   *
+   * Errors are thrown rather than returned so a failed load is never cached --
+   * `memoize` only stores fulfilled values.
+   */
+  const { allItems, allTxns } = await memoize(
+    "analytics:raw",
+    15_000,
+    async () => {
+      const { data: items, error: itemsError } = await db()
+        .from("items")
+        .select(
+          `id, sku, name, unit, quantity, low_stock_threshold, expiration_date,
+           category_id, location_id, updated_at,
+           category:categories(id, name), location:locations(id, name)`
+        )
+        .eq("item_status", "active")
+        .order("name", { ascending: true });
 
-  if (itemsError) return fail(itemsError.message, 500);
+      if (itemsError) throw new Error(itemsError.message);
 
-  // Paginate through all transactions in the 13-month window. The loop is
-  // here so a full year of data cannot silently truncate the analytics.
-  const allTxns: any[] = [];
-  const PAGE = 500;
-  const CAP = 20000;
-  let offset = 0;
+      // Paginate through all transactions in the 13-month window. The loop is
+      // here so a full year of data cannot silently truncate the analytics.
+      const txns: any[] = [];
+      const PAGE = 500;
+      const CAP = 20000;
+      let offset = 0;
 
-  while (allTxns.length < CAP) {
-    const { data, error } = await db()
-      .from("transactions")
-      .select(
-        `id, type, created_at,
-         transaction_items(sku, item_name, quantity)`
-      )
-      .gte("created_at", thirteenMonthsAgo.toISOString())
-      .order("created_at", { ascending: false })
-      .order("id", { ascending: true })
-      .range(offset, offset + PAGE - 1);
+      while (txns.length < CAP) {
+        const { data, error } = await db()
+          .from("transactions")
+          .select(
+            `id, type, created_at,
+             transaction_items(sku, item_name, quantity)`
+          )
+          .gte("created_at", thirteenMonthsAgo.toISOString())
+          .order("created_at", { ascending: false })
+          .order("id", { ascending: true })
+          .range(offset, offset + PAGE - 1);
 
-    if (error) return fail(error.message, 500);
+        if (error) throw new Error(error.message);
 
-    const page = (data ?? []) as any[];
-    allTxns.push(...page);
-    if (page.length < PAGE) break;
-    offset += page.length;
-  }
+        const page = (data ?? []) as any[];
+        txns.push(...page);
+        if (page.length < PAGE) break;
+        offset += page.length;
+      }
 
-  const allItems = (items ?? []) as any[];
+      return { allItems: (items ?? []) as any[], allTxns: txns };
+    }
+  );
 
   /* ---------------- aggregate transactions ---------------- */
 

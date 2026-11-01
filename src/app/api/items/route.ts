@@ -4,6 +4,7 @@ import { requireUser } from "@/lib/auth";
 import { canManageItems, approvalCodeMatches } from "@/lib/permissions";
 import { audit } from "@/lib/audit";
 import { eventBus, Events } from "@/lib/events";
+import { memoClear } from "@/lib/ttl-cache";
 import { requireDutyVerified } from "@/lib/face-gate";
 import { dispatchSoon } from "@/lib/email";
 import { randomBytes } from "node:crypto";
@@ -306,6 +307,7 @@ export const POST = handler(async (req: Request) => {
   // The item list and the approvals list both care that the catalogue changed.
   // Fire-and-forget, like the transaction route: a slow subscriber must not hold
   // up the person who is trying to save an ingredient.
+  memoClear("analytics:");
   eventBus.emit(Events.ITEMS_CHANGED, {
     action: "create",
     sku,

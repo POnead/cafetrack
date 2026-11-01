@@ -44,7 +44,21 @@ export const POST = handler(async (req: Request) => {
 
   const transactionRows: ReportTransaction[] = [];
   const transactionPageSize = 500;
-  for (let offset = 0; ; offset += transactionPageSize) {
+  /*
+   * Bounded, unlike the original `for (;;)`.
+   *
+   * The report only needs recent movement to summarise it, and an unbounded
+   * walk turns one admin click into a full-table scan that grows with every day
+   * the cafe trades. The cap matches the analytics endpoint's (20,000 rows); a
+   * busy cafe at ~100 movements a day reaches it after about seven months, and
+   * the summary below is a "recent activity" digest rather than an accounting
+   * statement, so stopping is honest. If the cap is hit, the subject says so
+   * rather than silently reporting incomplete totals.
+   */
+  const MAX_TRANSACTION_ROWS = 20_000;
+  let truncated = false;
+
+  for (let offset = 0; offset < MAX_TRANSACTION_ROWS; offset += transactionPageSize) {
     const { data, error } = await db()
       .from("transactions")
       .select(
@@ -59,6 +73,7 @@ export const POST = handler(async (req: Request) => {
     const page: ReportTransaction[] = data ?? [];
     transactionRows.push(...page);
     if (page.length < transactionPageSize) break;
+    if (transactionRows.length >= MAX_TRANSACTION_ROWS) truncated = true;
   }
 
   // Build movement summary
@@ -96,6 +111,11 @@ export const POST = handler(async (req: Request) => {
   lines.push("");
 
   lines.push("Movement Summary:");
+  if (truncated) {
+    lines.push(
+      `  (covering the most recent ${MAX_TRANSACTION_ROWS.toLocaleString()} movements — older activity is not included)`
+    );
+  }
   for (const m of movement) {
     const label =
       m.type === "checkout"

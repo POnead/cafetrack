@@ -83,7 +83,7 @@ export const POST = handler(async (req: Request) => {
 
   if (lookupError) {
     console.error("staff confirm lookup failed:", lookupError.message);
-    return fail(`Cannot query the database (${lookupError.message}). Check .env.local.`, 503);
+    return fail("Cannot reach the database. Try again in a moment.", 503);
   }
 
   // A ticket for an account that has since been deleted, or a forged user id.

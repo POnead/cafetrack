@@ -236,9 +236,10 @@ function pruneAuto(): void {
     .slice(KEEP);
 
   for (const name of stale) {
-    // The comment goes on the path argument, not the options — that is the
-    // expression Turbopack is complaining about.
-    rmSync(/* turbopackIgnore: true */ join(BACKUP_ROOT, name), {
+    // The ignore comment has to sit on the *argument* of `join`, not on the
+    // argument of `rmSync`: Turbopack looks for it at the expression it cannot
+    // resolve (BACKUP_ROOT), and a comment on the enclosing call is not seen.
+    rmSync(join(/* turbopackIgnore: true */ BACKUP_ROOT, name), {
       recursive: true,
       force: true,
     });

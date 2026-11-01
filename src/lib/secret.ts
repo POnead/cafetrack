@@ -13,14 +13,27 @@ const DEV_FALLBACK = "dev-only-secret-change-me-please-32-chars-min";
 /** Comfortably longer than an HMAC key needs, and catches obvious mistakes. */
 const MIN_LENGTH = 32;
 
+/*
+ * Values that are long enough but are still templates, not secrets. The copy
+ * in .env.example and this repo's .env.local is 48+ characters — so a plain
+ * length check happily accepts it, and a deployment that copied the example
+ * verbatim would sign every session with a key published in the repository.
+ * Placeholders are recognised by words no random hex/base64 key contains.
+ */
+const PLACEHOLDER = /change[-_ ]?me|replace[-_ ]?me|your[-_ ]?(?:own|secret|key)|example|dev[-_ ]?secret|test[-_ ]?secret|placeholder/i;
+
 const HOW_TO_GENERATE =
   "Generate one with: openssl rand -hex 32 " +
   '(or on Windows: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))")';
 
-/** True when AUTH_SECRET is set, long enough, and not the published fallback. */
+function isPlaceholderSecret(value: string): boolean {
+  return value === DEV_FALLBACK || PLACEHOLDER.test(value);
+}
+
+/** True when AUTH_SECRET is set, long enough, and not a published placeholder. */
 export function isAuthSecretConfigured(value = process.env.AUTH_SECRET): boolean {
   const secret = (value ?? "").trim();
-  return secret.length >= MIN_LENGTH && secret !== DEV_FALLBACK;
+  return secret.length >= MIN_LENGTH && !isPlaceholderSecret(secret);
 }
 
 /**
@@ -31,11 +44,11 @@ export function isAuthSecretConfigured(value = process.env.AUTH_SECRET): boolean
 export function resolveAuthSecret(): string {
   const secret = (process.env.AUTH_SECRET ?? "").trim();
 
-  if (secret.length >= MIN_LENGTH && secret !== DEV_FALLBACK) return secret;
+  if (secret.length >= MIN_LENGTH && !isPlaceholderSecret(secret)) return secret;
 
   if (process.env.NODE_ENV === "production") {
     throw new Error(
-      `AUTH_SECRET must be set to at least ${MIN_LENGTH} characters in production. ` +
+      `AUTH_SECRET must be set to a real random value of at least ${MIN_LENGTH} characters in production. ` +
         HOW_TO_GENERATE
     );
   }

@@ -303,8 +303,41 @@ async function seedIfEmpty(pg: PGlite) {
    * the moment it starts, and keeps "why can I not sign in" from ever being an
    * answer about a seed script.
    */
-  const adminPw = process.env.SEED_ADMIN_PASSWORD || "admin123";
-  const staffPw = process.env.SEED_STAFF_PASSWORD || "staff123";
+
+  /*
+   * Passwords come from the environment, and in production they are required.
+   *
+   * This used to fall back to `admin123` / `staff123` unconditionally, which
+   * means a production deployment that happened to start against an empty
+   * database came up with a working admin account whose password is in the
+   * README — arguably the worst possible default, because it is only reachable
+   * exactly once and then looks like a normal install. A missing password is now
+   * a configuration error rather than a quiet default.
+   *
+   * The minimum length is deliberately not the security policy for the app (that
+   * is enforced where passwords are set); it just stops "1" or the old default
+   * from being typed into the variable and considered configured.
+   */
+  const isProduction = process.env.NODE_ENV === "production";
+  const adminPw = process.env.SEED_ADMIN_PASSWORD?.trim() ?? "";
+  const staffPw = process.env.SEED_STAFF_PASSWORD?.trim() ?? "";
+
+  if (isProduction) {
+    const problems: string[] = [];
+    if (adminPw.length < 12) problems.push("SEED_ADMIN_PASSWORD (min 12 characters)");
+    if (staffPw.length < 12) problems.push("SEED_STAFF_PASSWORD (min 12 characters)");
+    if (adminPw && adminPw === staffPw) problems.push("the two seed passwords must differ");
+    if (problems.length > 0) {
+      // Fail closed. Creating accounts with a guessable password would be worse
+      // than refusing to boot, and the message is the fix.
+      throw new Error(
+        `CafeTrack: refusing to seed default accounts in production. Set ${problems.join(", ")}.`
+      );
+    }
+  }
+
+  const resolvedAdminPw = adminPw || "admin123";
+  const resolvedStaffPw = staffPw || "staff123";
   const barista1Token = newStaffToken();
 
   await pg.query(
@@ -312,7 +345,7 @@ async function seedIfEmpty(pg: PGlite) {
      values ('admin',    $1, 'Cafe Owner',     'admin', null,   'verified'),
             ('barista1', $2, 'Juan Dela Cruz', 'staff', $3, 'verified'),
             ('barista2', $2, 'Maria Santos',   'staff', $4, 'verified')`,
-    [hashPassword(adminPw), hashPassword(staffPw), barista1Token, newStaffToken()]
+    [hashPassword(resolvedAdminPw), hashPassword(resolvedStaffPw), barista1Token, newStaffToken()]
   );
 
   await pg.exec(`
@@ -369,9 +402,15 @@ async function seedIfEmpty(pg: PGlite) {
   ]);
 
   console.log("CafeTrack: seeded the local database");
-  console.log(`    admin    / ${adminPw}   (username + password)`);
-  console.log(`    barista1 / ${staffPw}   (barcode code + password)`);
-  console.log(`    barista1 barcode code: ${barista1Token}`);
+
+  // Credentials are only echoed outside production. In a deployed instance the
+  // operator supplied these variables, so there is nothing to learn from the log
+  // — and a password in a platform log is a password in a support bundle.
+  if (!isProduction) {
+    console.log(`    admin    / ${resolvedAdminPw}   (username + password)`);
+    console.log(`    barista1 / ${resolvedStaffPw}   (barcode code + password)`);
+    console.log(`    barista1 barcode code: ${barista1Token}`);
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -476,6 +515,24 @@ class LocalQuery implements PromiseLike<DbResult> {
   }
 
   eq(column: string, value: unknown) {
+    this.filters.push({ kind: "eq", column, value });
+    return this;
+  }
+
+  /**
+   * PostgREST's `is` filter — `is.null`, `is.true`, `is.false`.
+   *
+   * Added because `.eq(column, null)` does the right thing *here* (it compiles
+   * to `is null`, see buildWhere) but serialises as `eq.null` against Supabase,
+   * which compares against NULL and therefore matches nothing. A caller that
+   * needs "this column is unset" has to use the spelling that means the same
+   * thing on both backends, or the query silently behaves differently depending
+   * on which database the deployment uses.
+   *
+   * `is true` / `is false` map onto an ordinary equality comparison, which
+   * Postgres accepts for booleans.
+   */
+  is(column: string, value: null | boolean) {
     this.filters.push({ kind: "eq", column, value });
     return this;
   }

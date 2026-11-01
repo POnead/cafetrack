@@ -216,7 +216,7 @@ export const POST = handler(async (req: Request) => {
 
   if (rowsError) {
     console.error("id sign-in lookup failed:", rowsError.message);
-    return fail(`Cannot query the database (${rowsError.message}). Check .env.local.`, 503);
+    return fail("Cannot reach the database. Try again in a moment.", 503);
   }
 
   const lookup = findAccountByScannedId({

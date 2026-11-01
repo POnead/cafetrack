@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { HttpError } from "./auth";
 
 /**
@@ -70,6 +71,25 @@ export function badId(id: string, what = "id") {
 }
 
 /**
+ * Refuse a body larger than this before buffering it.
+ *
+ * App Router route handlers have no body size limit the way the old Pages
+ * `bodyParser` did, and `readBody` reads the whole stream into a string. On the
+ * unauthenticated sign-in routes that is a free way to make the server allocate
+ * an arbitrary amount of memory, one request at a time. One megabyte is far
+ * larger than any JSON body this API actually accepts (the ID uploads take
+ * multipart and go through readBoundedFormData instead).
+ */
+const MAX_BODY_BYTES = 1_000_000;
+
+function tooLarge(maxBytes: number) {
+  return new HttpError(
+    413,
+    `Request body must be ${Math.floor(maxBytes / 1024)} KB or smaller`
+  );
+}
+
+/**
  * Reads and parses a JSON request body, answering 400 rather than throwing when
  * the body is absent or malformed.
  *
@@ -82,13 +102,23 @@ export function badId(id: string, what = "id") {
  * Returns `{}` for an empty body so a route's own required-field checks produce
  * the useful message ("Item name is required") instead of a generic one.
  */
-export async function readBody(req: Request): Promise<any> {
+export async function readBody(
+  req: Request,
+  maxBytes: number = MAX_BODY_BYTES
+): Promise<any> {
+  const declared = Number(req.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > maxBytes) throw tooLarge(maxBytes);
+
   let text: string;
   try {
     text = await req.text();
   } catch {
     throw new HttpError(400, "Could not read the request body");
   }
+
+  // A missing or lying Content-Length is common, so the actual size is checked
+  // too — the header is an optimisation, not the control.
+  if (Buffer.byteLength(text, "utf8") > maxBytes) throw tooLarge(maxBytes);
 
   // An empty body is treated as `{}` so the route's own required-field check
   // produces the useful message ("Item name is required") rather than a generic
@@ -146,13 +176,28 @@ export function clientIp(req: Request): string | null {
   return null;
 }
 
-/** Wraps a route handler so thrown HttpErrors become clean JSON responses. */
+/**
+ * Wraps a route handler so thrown HttpErrors become clean JSON responses.
+ *
+ * Unexpected failures are logged in full, keyed by a request id, but the caller
+ * gets only that id. The previous version returned `e.message` on a 500, which
+ * handed database hostnames, file paths and SQL detail to whoever made the
+ * request — the health endpoint already refuses to do that for the same reason.
+ * The id is what lets an owner match a user's screenshot to the server log.
+ */
 export function handler(fn: (...args: any[]) => Promise<Response>) {
   return async (...args: any[]) => {
+    const requestId = randomUUID();
+
+    const tag = (res: Response) => {
+      res.headers.set("x-request-id", requestId);
+      return withDbMode(res);
+    };
+
     try {
       // Stamped here as well as in ok/fail, so a route that returns a
       // NextResponse of its own still declares which database answered.
-      return withDbMode(await fn(...args));
+      return tag(await fn(...args));
     } catch (e: any) {
       // Framework control-flow signal (route read cookies during prerender) —
       // re-throw so Next.js can mark the route dynamic instead of us
@@ -160,9 +205,11 @@ export function handler(fn: (...args: any[]) => Promise<Response>) {
       if (e?.digest === "DYNAMIC_SERVER_USAGE" || e?.name === "DynamicServerError") {
         throw e;
       }
-      if (e instanceof HttpError) return fail(e.message, e.status);
-      console.error("Unhandled API error:", e);
-      return fail(e?.message || "Internal server error", 500);
+      if (e instanceof HttpError) return tag(fail(e.message, e.status));
+      console.error(`[api ${requestId}] unhandled error:`, e);
+      return tag(
+        fail("Internal server error", 500, { request_id: requestId })
+      );
     }
   };
 }

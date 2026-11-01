@@ -3,6 +3,7 @@ import { handler, ok, fail, badId, readBody, clientIp } from "@/lib/api";
 import { requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { eventBus, Events } from "@/lib/events";
+import { memoClear } from "@/lib/ttl-cache";
 import { dispatchSoon } from "@/lib/email";
 
 export const runtime = "nodejs";
@@ -70,6 +71,7 @@ export const POST = handler(async (req: Request) => {
     sku: (data as any)?.sku,
   });
   eventBus.emit(Events.ALERTS_CHANGED, { type: "recomputed", count: 0 });
+  memoClear("analytics:");
 
   // A freshly approved item may deserve an email if it is already low or
   // near-expiry; this is the moment those alerts get raised.

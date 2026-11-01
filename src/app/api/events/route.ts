@@ -1,4 +1,4 @@
-import { handler, ok } from "@/lib/api";
+import { handler } from "@/lib/api";
 import { requireUser } from "@/lib/auth";
 import { eventBus, Events } from "@/lib/events";
 
@@ -16,6 +16,20 @@ export const runtime = "nodejs";
  *
  * The connection is kept alive with a heartbeat comment every 15s.
  * Clients should reconnect on disconnect (EventSource does this automatically).
+ *
+ * ## Scope: this instance only
+ *
+ * `eventBus` is an in-process emitter, so a movement written by instance A is
+ * broadcast only to browsers connected to A. Instance B's subscribers hear
+ * nothing. That is not a correctness hole, because the client
+ * (`use-live-refresh.ts`) also polls — every 30s while the stream is open,
+ * every 5s while it is down — so the worst case across instances is a stale
+ * number for half a minute, not a number that never updates.
+ *
+ * If sub-30-second cross-instance updates are ever required, the fix belongs in
+ * `lib/events.ts` (publish to Redis or a Postgres LISTEN/NOTIFY channel, and
+ * bridge that into `eventBus`), not here: polling the database from every
+ * instance would multiply load to shorten a delay the client already bounds.
  */
 export const GET = handler(async (req: Request) => {
   await requireUser();
@@ -31,55 +45,61 @@ export const GET = handler(async (req: Request) => {
 
   const stream = new ReadableStream({
     start(controller) {
-      // Send initial connection event
-      controller.enqueue(
-        encoder.encode(`event: open\ndata: {}\n\n`)
-      );
+      /**
+       * Write one frame, tolerating a dead connection.
+       *
+       * `controller.enqueue` throws once the stream is closed or errored, and
+       * the heartbeat calls it from a timer — where a throw is an uncaught
+       * exception and, in Node, takes the process with it. A browser that walks
+       * out of Wi-Fi without a clean FIN is exactly the case that produces it.
+       * So a failed write closes the stream instead of escaping.
+       */
+      const send = (text: string): void => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(text));
+        } catch {
+          shutdown();
+        }
+      };
 
-      // Subscribe to all event types
+      const frame = (event: string, data: unknown) =>
+        send(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+
       const unsubs = [
-        eventBus.on(Events.STOCK_CHANGED, (data) => {
-          if (closed) return;
-          controller.enqueue(
-            encoder.encode(
-              `event: ${Events.STOCK_CHANGED}\ndata: ${JSON.stringify(data)}\n\n`
-            )
-          );
-        }),
-        eventBus.on(Events.ALERTS_CHANGED, (data) => {
-          if (closed) return;
-          controller.enqueue(
-            encoder.encode(
-              `event: ${Events.ALERTS_CHANGED}\ndata: ${JSON.stringify(data)}\n\n`
-            )
-          );
-        }),
-        eventBus.on(Events.ITEMS_CHANGED, (data) => {
-          if (closed) return;
-          controller.enqueue(
-            encoder.encode(
-              `event: ${Events.ITEMS_CHANGED}\ndata: ${JSON.stringify(data)}\n\n`
-            )
-          );
-        }),
+        eventBus.on(Events.STOCK_CHANGED, (data) => frame(Events.STOCK_CHANGED, data)),
+        eventBus.on(Events.ALERTS_CHANGED, (data) => frame(Events.ALERTS_CHANGED, data)),
+        eventBus.on(Events.ITEMS_CHANGED, (data) => frame(Events.ITEMS_CHANGED, data)),
       ];
 
-      // Heartbeat to keep the connection alive through proxies
-      const heartbeat = setInterval(() => {
-        if (closed) {
-          clearInterval(heartbeat);
-          return;
-        }
-        controller.enqueue(encoder.encode(`: heartbeat\n\n`));
-      }, 15_000);
+      const heartbeat = setInterval(
+        () => send(`: heartbeat\n\n`),
+        15_000
+      );
 
-      // Cleanup on close
-      req.signal.addEventListener("abort", () => {
+      /**
+       * One teardown path, so a dead socket and a deliberate navigate away do
+       * the same thing: stop the timer, drop the bus subscriptions (otherwise
+       * every reconnection leaks one subscriber for the life of the process),
+       * and close the stream once.
+       */
+      function shutdown(): void {
+        if (closed) return;
         closed = true;
         clearInterval(heartbeat);
         for (const u of unsubs) u();
-        controller.close();
-      });
+        try {
+          controller.close();
+        } catch {
+          // Already closed by the runtime; nothing to do.
+        }
+      }
+
+      req.signal.addEventListener("abort", shutdown, { once: true });
+
+      // Acknowledge the connection so the client can tell "open" from "silently
+      // refused" without waiting for the first movement.
+      frame("open", {});
     },
   });
 
@@ -88,6 +108,8 @@ export const GET = handler(async (req: Request) => {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
+      // Stops nginx and friends from buffering the stream into uselessness.
+      "X-Accel-Buffering": "no",
     },
   });
 });

@@ -1,10 +1,32 @@
 import { SignJWT, jwtVerify } from "jose";
 import { cookies } from "next/headers";
-import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import {
+  createHash,
+  randomBytes,
+  scryptSync,
+  timingSafeEqual,
+} from "node:crypto";
 import { resolveAuthSecret } from "./secret";
 
-// Fails fast at startup in production; see src/lib/secret.ts.
-const SECRET = new TextEncoder().encode(resolveAuthSecret());
+/*
+ * The signing key, resolved on first use rather than at import time.
+ *
+ * It used to be a module-level `const`, which meant `next build` failed while
+ * collecting route data on any machine that had not been given the runtime
+ * secret — a build artifact should not need a production secret to compile, and
+ * the error it produced ("Failed to collect page data for /api/analytics") did
+ * not name the variable. Resolving lazily keeps the fail-fast behaviour where it
+ * belongs: in production, the first sign-in attempt refuses to mint a session
+ * with an unset or placeholder key.
+ */
+let secretBytes: Uint8Array | null = null;
+
+function secret(): Uint8Array {
+  if (!secretBytes) {
+    secretBytes = new TextEncoder().encode(resolveAuthSecret());
+  }
+  return secretBytes;
+}
 
 export const COOKIE_NAME = "cafetrack_session";
 
@@ -57,12 +79,12 @@ export async function signSession(
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setExpirationTime(`${minutes}m`)
-    .sign(SECRET);
+    .sign(secret());
 }
 
 export async function readSessionToken(token: string): Promise<SessionUser | null> {
   try {
-    const { payload } = await jwtVerify(token, SECRET);
+    const { payload } = await jwtVerify(token, secret());
     return {
       id: String(payload.id),
       username: String(payload.username),
@@ -82,39 +104,94 @@ export async function getSessionToken(): Promise<string | null> {
   return jar.get(COOKIE_NAME)?.value ?? null;
 }
 
+/*
+ * Short-lived memo for the revocation check below.
+ *
+ * `getSession()` runs on every navigation and every API call, and the only
+ * reason it touches the database is to answer "has this token been superseded
+ * or the account switched off?". A cafe re-reads the same row a dozen times a
+ * minute per tab, so the answer is cached for a few seconds. Five seconds is
+ * deliberately short: it is long enough to collapse a burst of requests, and
+ * short enough that a logout or deactivation is felt almost immediately. The
+ * cache is per process, which is fine because it only ever caches a *stricter*
+ * answer (invalid), never an authorisation decision.
+ */
+const SESSION_CHECK_TTL_MS = 5_000;
+const SESSION_CACHE_MAX = 5_000;
+const sessionChecks = new Map<string, { at: number; ok: boolean }>();
+
+function sessionCacheKey(token: string): string {
+  return createHash("sha256").update(token).digest("base64url");
+}
+
+/** Drop memoised revocation answers — call after any login, logout or rotation. */
+export function clearSessionCache(): void {
+  sessionChecks.clear();
+}
+
+function rememberSessionCheck(key: string, ok: boolean): void {
+  if (sessionChecks.size >= SESSION_CACHE_MAX) sessionChecks.clear();
+  sessionChecks.set(key, { at: Date.now(), ok });
+}
+
 export async function getSession(): Promise<SessionUser | null> {
   const token = await getSessionToken();
   if (!token) return null;
   const user = await readSessionToken(token);
   if (!user) return null;
 
-  // FR-16: Verify this token is still the active session for the user.
-  // If the user logged in elsewhere, the session_token column was overwritten
-  // with the new token, so this old one is no longer valid.
+  /*
+   * FR-16: a token is only live while it is still the token recorded on the
+   * account. Signing in elsewhere overwrites `session_token`; signing out clears
+   * it. Both must invalidate the old JWT even though its signature is still
+   * valid — a signed cookie is not a revocation list.
+   *
+   * This previously only rejected a token when the column held a *different*
+   * non-null value, so a cleared column (logout) left every already-issued copy
+   * usable until expiry. It now requires equality: no recorded token, no session.
+   */
+  const key = sessionCacheKey(token);
+  const cached = sessionChecks.get(key);
+  if (cached && Date.now() - cached.at < SESSION_CHECK_TTL_MS) {
+    return cached.ok ? user : null;
+  }
+
   try {
     const { db } = await import("@/lib/supabase");
     const { data: row, error } = await db()
       .from("users")
-      .select("session_token")
+      .select("session_token, is_active")
       .eq("id", user.id)
       .maybeSingle();
-    if (error) {
-      return user; // Don't block if the DB check fails — let the JWT expiry handle it.
-    }
-    if (row?.session_token && row.session_token !== token) {
-      return null; // Session was superseded by a login elsewhere.
-    }
-  } catch {
-    return user; // Network error — fall back to JWT validation only.
-  }
 
-  return user;
+    if (error) {
+      // Infrastructure failure, not an authentication decision. Log it so the
+      // failure is visible, then fall back to the JWT's own expiry rather than
+      // turning a transient database blip into a cafe-wide logout.
+      console.error("session revocation check failed:", error.message);
+      return user;
+    }
+
+    const ok =
+      Boolean(row) &&
+      row.is_active !== false &&
+      row.session_token === token;
+
+    rememberSessionCheck(key, ok);
+    return ok ? user : null;
+  } catch (e) {
+    console.error(
+      "session revocation check threw:",
+      e instanceof Error ? e.message : String(e)
+    );
+    return user;
+  }
 }
 
 /** Seconds of life left on a token; 0 when it is invalid or already expired. */
 export async function sessionSecondsLeft(token: string): Promise<number> {
   try {
-    const { payload } = await jwtVerify(token, SECRET);
+    const { payload } = await jwtVerify(token, secret());
     if (!payload.exp) return 0;
     return Math.max(0, payload.exp - Math.floor(Date.now() / 1000));
   } catch {
@@ -179,7 +256,10 @@ export async function setSessionCookie(
     maxAge: minutes * 60,
   });
   // Track the active session token on the user record so we can detect
-  // when the same account is logged in elsewhere (FR-16).
+  // when the same account is logged in elsewhere (FR-16) — and so a sliding
+  // refresh does not invalidate itself, because the new token becomes the
+  // recorded one. The memoised revocation answer must go with it.
+  clearSessionCache();
   if (userId && dbClient) {
     try {
       await dbClient
@@ -198,10 +278,14 @@ export async function clearSessionCookie(userId?: string, dbClient?: any) {
     name: COOKIE_NAME,
     value: "",
     httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
     path: "/",
     maxAge: 0,
   });
-  // Clear the active session token on the user record (FR-16).
+  clearSessionCache();
+  // Clear the active session token on the user record (FR-16). Doing this is
+  // what makes logout revoke the token rather than merely forget the cookie.
   if (userId && dbClient) {
     try {
       await dbClient

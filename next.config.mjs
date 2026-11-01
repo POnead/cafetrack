@@ -114,6 +114,58 @@ const nextConfig = {
   // A package-lock.json exists above this folder, so Next would otherwise infer
   // the parent as the workspace root and warn on every start. Pin it here.
   outputFileTracingRoot: here,
+  /*
+   * Security headers.
+   *
+   * The app had none: a browser would happily render it in a frame (clickjacking
+   * a signed-in till), sniff a JSON error as HTML, and send the full URL — which
+   * on this app contains nothing sensitive today, but is one query parameter
+   * away from doing so. These are one-line fixes that cost nothing at runtime.
+   *
+   * CSP is deliberately a baseline rather than a nonce-based policy. Next needs
+   * `'unsafe-inline'` for its own bootstrap script unless the proxy mints a
+   * nonce per request, and the face engine needs `'wasm-unsafe-eval'` plus blob
+   * workers. Tightening this is a separate change, with a browser pass over
+   * login, enrolment and duty check — the three screens that load WASM.
+   */
+  async headers() {
+    const dev = process.env.NODE_ENV !== "production";
+
+    const csp = [
+      "default-src 'self'",
+      `script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'${dev ? " 'unsafe-eval'" : ""}`,
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: blob:",
+      "media-src 'self' blob:",
+      "font-src 'self' data:",
+      "connect-src 'self'",
+      "worker-src 'self' blob:",
+      "object-src 'none'",
+      "base-uri 'self'",
+      "form-action 'self'",
+      "frame-ancestors 'none'",
+    ].join("; ");
+
+    const headers = [
+      { key: "Content-Security-Policy", value: csp },
+      { key: "X-Content-Type-Options", value: "nosniff" },
+      { key: "X-Frame-Options", value: "DENY" },
+      { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+      { key: "Permissions-Policy", value: "camera=(self), microphone=(), geolocation=()" },
+      { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
+    ];
+
+    // Only meaningful over HTTPS, and a LAN install on plain http would be
+    // stuck with a browser that remembers the HSTS header for a year.
+    if (!dev) {
+      headers.push({
+        key: "Strict-Transport-Security",
+        value: "max-age=31536000; includeSubDomains",
+      });
+    }
+
+    return [{ source: "/(.*)", headers }];
+  },
   // Development only — `next build` ignores it. See the note above.
   allowedDevOrigins,
   // A second dev server cannot share `.next`: Next takes a lock at

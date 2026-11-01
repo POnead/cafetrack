@@ -1,5 +1,6 @@
 import { db } from "@/lib/supabase";
 import { dbMode } from "@/lib/api";
+import { isAuthSecretConfigured } from "@/lib/secret";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,6 +25,29 @@ export const dynamic = "force-dynamic";
  */
 export async function GET() {
   const startedAt = Date.now();
+
+  /*
+   * A deployment with no usable AUTH_SECRET cannot sign anyone in: the session
+   * code refuses to mint a token rather than fall back to a published key (see
+   * lib/secret.ts). That check is lazy now, so the process starts and the
+   * failure only appears on the first sign-in attempt — which is a bad place to
+   * discover it. Reporting it here means a deploy pipeline that polls this
+   * endpoint sees the misconfiguration immediately.
+   *
+   * Development keeps the documented fallback, so this only bites in production.
+   */
+  if (process.env.NODE_ENV === "production" && !isAuthSecretConfigured()) {
+    return Response.json(
+      {
+        ok: false,
+        configuration: "incomplete",
+        detail: "AUTH_SECRET is missing, too short, or still the example value",
+        mode: dbMode(),
+        version: process.env.npm_package_version ?? "0.1.0",
+      },
+      { status: 503, headers: { "Cache-Control": "no-store" } }
+    );
+  }
 
   try {
     // `settings` is the smallest table in the schema and is read with `head`,

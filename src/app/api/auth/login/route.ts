@@ -10,9 +10,20 @@ import {
 import { audit } from "@/lib/audit";
 import { dispatchSoon } from "@/lib/email";
 import { getSessionMinutes } from "@/lib/settings";
-import { checkLoginThrottle, tooManyAttempts, userKey } from "@/lib/rate-limit";
+import { checkLoginThrottle, tooManyAttempts, userKey, recordLoginAttempt } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
+
+/**
+ * Columns sign-in actually needs.
+ *
+ * `select("*")` pulled `face_embedding`, `face_image` and the ID document
+ * images — hundreds of kilobytes of biometrics and base64 per password check,
+ * to compare one hash. Data the route does not need is data it should not load.
+ */
+const LOGIN_COLUMNS =
+  "id, username, password_hash, full_name, role, is_active, " +
+  "deactivation_reason, deactivated_at, session_token";
 
 /**
  * Record a rejected admin sign-in and queue the email, without ever changing
@@ -70,28 +81,23 @@ export const POST = handler(async (req: Request) => {
 
   const { data: user, error: lookupError } = await db()
     .from("users")
-    .select("*")
+    .select(LOGIN_COLUMNS)
     .eq("username", username)
     .eq("role", "admin")
     .maybeSingle();
 
   // A bad URL / key / network failure returns data=null exactly like "no such
-  // user" does, so surface it instead of a misleading "Invalid credentials".
+  // user" does. Log the detail; do not hand the caller a connection string or a
+  // host name, which is what putting `lookupError.message` in the response did.
   if (lookupError) {
     console.error("admin login lookup failed:", lookupError.message);
-    return fail(
-      `Cannot query the database (${lookupError.message}). Check .env.local.`,
-      503
-    );
+    return fail("Cannot reach the database. Check the server configuration.", 503);
   }
 
   const logAttempt = async (success: boolean) => {
-    await db().from("login_attempts").insert({
-      // The same key the throttle counts, so a success clears the failures.
-      username: key,
-      method: "admin_password",
-      success,
-    });
+    // recordLoginAttempt is the same writer the throttle reads, and it swallows
+    // its own failure: a broken counter must not turn a wrong password into a 500.
+    await recordLoginAttempt(key, "admin_password", success);
   };
 
   if (!user) {

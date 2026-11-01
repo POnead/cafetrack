@@ -196,19 +196,6 @@ export const STEP2_METHOD = "staff_step2";
  */
 
 /**
- * Record a duty-check attempt, so the throttle above can count it.
- *
- * The success row matters as much as the failure row. `checkLoginThrottle` walks
- * back from the newest row and stops at the first success, so a counter that only
- * ever sees failures keeps climbing — a barista who passed the check cleanly would
- * be locked out for failing to fail, and five good verifications in one shift
- * would do exactly that.
- *
- * Written to login_attempts rather than a table of its own: it is the same
- * ephemeral security counter with the same shape, and both database backends
- * already know how to read and write it.
- */
-/**
  * Record one attempt against a throttle key, so `checkLoginThrottle` can count
  * it.
  *

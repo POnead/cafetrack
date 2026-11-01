@@ -33,15 +33,31 @@ import { resolveAuthSecret } from "../secret";
  * processes, which an in-memory "used" set would not.
  */
 
-const AUTH_SECRET = resolveAuthSecret();
+/*
+ * Derived once, on first use.
+ *
+ * The secret is read here rather than at import time for the same reason
+ * ../auth.ts does: `next build` evaluates route modules, and a missing runtime
+ * secret must not be a build failure. A production deployment with an unset or
+ * placeholder AUTH_SECRET still cannot mint a ticket — the first sign-in raises
+ * the configuration error.
+ */
+let ticketSecret: Uint8Array | null = null;
 
 /**
  * Derived, not random: a restart must not invalidate every ticket in flight,
  * and this must never be the same value the session code signs with.
  */
-const TICKET_SECRET = new TextEncoder().encode(
-  createHmac("sha256", AUTH_SECRET).update("cafetrack.step2.v1").digest("hex")
-);
+function ticketKey(): Uint8Array {
+  if (!ticketSecret) {
+    ticketSecret = new TextEncoder().encode(
+      createHmac("sha256", resolveAuthSecret())
+        .update("cafetrack.step2.v1")
+        .digest("hex")
+    );
+  }
+  return ticketSecret;
+}
 
 /**
  * Five minutes.
@@ -76,7 +92,7 @@ export async function signStep2Ticket(
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setExpirationTime(`${seconds}s`)
-    .sign(TICKET_SECRET);
+    .sign(ticketKey());
 }
 
 /**
@@ -90,7 +106,7 @@ export async function signStep2Ticket(
  */
 export async function readStep2Ticket(token: string): Promise<Step2Ticket | null> {
   try {
-    const { payload } = await jwtVerify(token, TICKET_SECRET);
+    const { payload } = await jwtVerify(token, ticketKey());
 
     if (payload.purpose !== "step2") return null;
 

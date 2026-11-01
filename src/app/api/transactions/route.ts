@@ -5,6 +5,7 @@ import { audit } from "@/lib/audit";
 import { dispatchSoon } from "@/lib/email";
 import { FieldError, parseExpiryDate, parseBoxCount } from "@/lib/item-validation";
 import { eventBus, Events } from "@/lib/events";
+import { memoClear } from "@/lib/ttl-cache";
 import { requireDutyVerified } from "@/lib/face-gate";
 
 export const runtime = "nodejs";
@@ -247,6 +248,11 @@ export const POST = handler(async (req: Request) => {
     },
     { ip: clientIp(req), outcome: "success" }
   );
+
+  // The movement is committed, so the cached analytics snapshot is stale. Drop
+  // it before telling clients to refresh; otherwise the dashboard would refetch
+  // and be handed the pre-movement numbers for up to the cache TTL.
+  memoClear("analytics:");
 
   // Fire-and-forget: emit real-time event so connected clients update instantly.
   // We don't await this — a slow connection must not hold up the till.

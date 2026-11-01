@@ -3,6 +3,7 @@ import { handler, ok, fail, badId, readBody, clientIp } from "@/lib/api";
 import { requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { eventBus, Events } from "@/lib/events";
+import { memoClear } from "@/lib/ttl-cache";
 
 export const runtime = "nodejs";
 
@@ -50,6 +51,7 @@ export const POST = handler(async (req: Request) => {
     item_id: (data as any)?.item_id ?? null,
   });
   eventBus.emit(Events.ALERTS_CHANGED, { type: "recomputed", count: 0 });
+  memoClear("analytics:");
 
   return ok({
     request: data,

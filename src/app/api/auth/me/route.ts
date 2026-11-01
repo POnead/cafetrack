@@ -6,6 +6,7 @@ import {
   signSession,
   setSessionCookie,
 } from "@/lib/auth";
+import { db } from "@/lib/supabase";
 import { getSessionMinutes } from "@/lib/settings";
 import { getFaceStatus } from "@/lib/face-gate";
 
@@ -22,9 +23,20 @@ export const GET = handler(async () => {
   // Sliding session: re-issue the cookie only once the token is past
   // half-life. Re-signing on every call would rewrite the cookie on each
   // dashboard poll and activity ping for no benefit.
+  //
+  // The new token is deliberately passed with the user id and client: rotating
+  // the cookie without updating `users.session_token` made the server's own
+  // revocation check reject the fresh token on the very next request (the row
+  // still named the old one), so every session died at half its configured
+  // lifetime. Writing both together keeps the sliding window working.
   const token = await getSessionToken();
   if (token && (await needsRefresh(token, minutes))) {
-    await setSessionCookie(await signSession(session, minutes), minutes);
+    await setSessionCookie(
+      await signSession(session, minutes),
+      minutes,
+      session.id,
+      db()
+    );
   }
 
   /*

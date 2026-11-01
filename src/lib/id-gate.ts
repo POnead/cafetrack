@@ -42,7 +42,9 @@ export async function getIdGate(user: {
   role: string;
   is_active?: boolean;
   verification_status?: string | null;
+  /** Either the document itself, or a boolean computed by the caller's select. */
   id_doc_front?: string | null;
+  has_id_doc?: boolean;
 }): Promise<IdGate> {
   const status = String(user.verification_status ?? "unverified");
 
@@ -58,8 +60,16 @@ export async function getIdGate(user: {
     return { required: true, cleared: true, status };
   }
 
+  // Has a document been attached at all? Callers that must not transfer the
+  // base64 document select `id_doc_front is not null as has_id_doc` instead;
+  // prefer that answer when it is present.
+  const hasDoc =
+    typeof user.has_id_doc === "boolean"
+      ? user.has_id_doc
+      : Boolean(user.id_doc_front);
+
   // Nothing was ever attached — see the note above.
-  if (!user.id_doc_front) {
+  if (!hasDoc) {
     return { required: true, cleared: true, status };
   }
 
@@ -85,7 +95,9 @@ export async function getIdGate(user: {
 export async function getIdGateFor(userId: string): Promise<IdGate | null> {
   const { data } = await db()
     .from("users")
-    .select("id, role, is_active, verification_status, id_doc_front")
+    .select(
+      "id, role, is_active, verification_status, id_doc_front is not null as has_id_doc"
+    )
     .eq("id", userId)
     .maybeSingle();
 

@@ -4,6 +4,7 @@ import { requireUser } from "@/lib/auth";
 import { canManageItems, approvalCodeMatches } from "@/lib/permissions";
 import { audit } from "@/lib/audit";
 import { eventBus, Events } from "@/lib/events";
+import { memoClear } from "@/lib/ttl-cache";
 import { requireDutyVerified } from "@/lib/face-gate";
 import { dispatchSoon } from "@/lib/email";
 import {
@@ -286,6 +287,7 @@ export const PATCH = handler(
     // refresh_alerts has just run and may have opened or closed something.
     eventBus.emit(Events.ITEMS_CHANGED, { action: "update", sku: data.sku });
     eventBus.emit(Events.ALERTS_CHANGED, { type: "recomputed", count: 0 });
+    memoClear("analytics:");
 
     return ok({ item: data });
   }
@@ -336,6 +338,7 @@ export const DELETE = handler(
     // about it too — otherwise it keeps offering a row that can no longer open.
     eventBus.emit(Events.ITEMS_CHANGED, { action: "delete", sku: item.sku });
     eventBus.emit(Events.ALERTS_CHANGED, { type: "recomputed", count: 0 });
+    memoClear("analytics:");
 
     return ok({ ok: true });
   }

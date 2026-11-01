@@ -196,10 +196,7 @@ export const POST = handler(async (req: Request) => {
 
   if (lookupError) {
     console.error("face login lookup failed:", lookupError.message);
-    return fail(
-      `Cannot query the database (${lookupError.message}). Check .env.local.`,
-      503
-    );
+    return fail("Cannot reach the database. Try again in a moment.", 503);
   }
 
   // Same generic refusal as a bad face, and the same wording as /api/auth/staff.

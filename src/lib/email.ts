@@ -248,6 +248,36 @@ export async function dispatchQueued(limit = 25): Promise<DispatchResult> {
   const config = await readSmtpConfig();
   if (!config) return result;
 
+  /*
+   * Reclaim abandoned claims.
+   *
+   * A row is moved to `sending` before the SMTP handshake, so two dispatchers
+   * cannot send the same message. The cost is that a process which dies between
+   * the claim and the write-back leaves that row in `sending` forever — a queue
+   * that silently stops delivering after one crash. Anything claimed more than
+   * five minutes ago is presumed dead and returned to the queue.
+   *
+   * Rows with no `claimed_at` at all predate the column (or were claimed by an
+   * older build); they are reclaimed too, because a null claim can never be
+   * proven live.
+   */
+  const staleBefore = new Date(Date.now() - 5 * 60_000).toISOString();
+  try {
+    await db()
+      .from("email_notifications")
+      .update({ status: "queued", claimed_at: null })
+      .eq("status", "sending")
+      .is("claimed_at", null);
+    await db()
+      .from("email_notifications")
+      .update({ status: "queued", claimed_at: null })
+      .eq("status", "sending")
+      .lt("claimed_at", staleBefore);
+  } catch (e: any) {
+    // A failed reclaim must not stop this dispatch from sending what is queued.
+    console.error("email reclaim failed:", e?.message || e);
+  }
+
   const maxAttempts = Number(await getSetting("email_max_attempts", "3")) || 3;
 
   const { data: pending, error } = await db()
@@ -263,7 +293,11 @@ export async function dispatchQueued(limit = 25): Promise<DispatchResult> {
     if (row.attempts >= maxAttempts) {
       await db()
         .from("email_notifications")
-        .update({ status: "failed", last_error: `Gave up after ${maxAttempts} attempts` })
+        .update({
+          status: "failed",
+          last_error: `Gave up after ${maxAttempts} attempts`,
+          claimed_at: null,
+        })
         .eq("id", row.id);
       result.skipped++;
       continue;
@@ -273,7 +307,11 @@ export async function dispatchQueued(limit = 25): Promise<DispatchResult> {
     // back empty and is skipped rather than sent twice.
     const { data: claimed } = await db()
       .from("email_notifications")
-      .update({ status: "sending", attempts: row.attempts + 1 })
+      .update({
+        status: "sending",
+        attempts: row.attempts + 1,
+        claimed_at: new Date().toISOString(),
+      })
       .eq("id", row.id)
       .eq("status", "queued")
       .select("id")
@@ -302,7 +340,12 @@ export async function dispatchQueued(limit = 25): Promise<DispatchResult> {
 
       await db()
         .from("email_notifications")
-        .update({ status: "sent", sent_at: new Date().toISOString(), last_error: null })
+        .update({
+          status: "sent",
+          sent_at: new Date().toISOString(),
+          last_error: null,
+          claimed_at: null,
+        })
         .eq("id", row.id);
       result.sent++;
     } catch (e: any) {
@@ -311,7 +354,7 @@ export async function dispatchQueued(limit = 25): Promise<DispatchResult> {
       const message = String(e?.message || e).slice(0, 500);
       await db()
         .from("email_notifications")
-        .update({ status: "queued", last_error: message })
+        .update({ status: "queued", last_error: message, claimed_at: null })
         .eq("id", row.id);
       result.failed++;
       result.errors.push(`${to}: ${message}`);
@@ -324,7 +367,7 @@ export async function dispatchQueued(limit = 25): Promise<DispatchResult> {
 async function failRow(id: string, message: string) {
   await db()
     .from("email_notifications")
-    .update({ status: "failed", last_error: message })
+    .update({ status: "failed", last_error: message, claimed_at: null })
     .eq("id", id);
 }
 

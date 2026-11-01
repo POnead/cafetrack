@@ -11,6 +11,7 @@ import {
   tooManyAttempts,
   tokenKey,
   userKey,
+  recordLoginAttempt,
 } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
@@ -42,12 +43,17 @@ function bypassStepTwo(): boolean {
  * code, wrong password, deactivated account) and the notification should read
  * the same for all of them. Never allowed to change the response: a person who
  * typed the wrong code must get the same 401 whether or not mail is configured.
+ *
+ * `presented` is the credential the caller typed or scanned. It is reduced to a
+ * short, non-reversible reference before it reaches the audit log: the log is
+ * append-only and admin-readable, so a mistyped barcode must not be recoverable
+ * from it as a cleartext staff code. The throttle already hashes the same value.
  */
 async function recordRejection(
   req: Request,
   actor: Parameters<typeof audit>[0],
   reason: string,
-  token: string | null
+  presented: string | null
 ) {
   await audit(
     actor,
@@ -57,10 +63,7 @@ async function recordRejection(
     {
       method: "staff",
       reason,
-      // The raw code never goes into the email. An unrecognised one is hashed in
-      // login_attempts precisely so it cannot be recovered, and repeating it in
-      // cleartext mail would undo that.
-      ...(token ? { token } : {}),
+      ...(presented ? { credential_ref: tokenKey(presented) } : {}),
     },
     { critical: false, ip: clientIp(req), outcome: "failed" }
   );
@@ -77,34 +80,96 @@ async function recordRejection(
   }
 }
 
+/**
+ * Columns sign-in needs. `select("*")` also pulled `face_embedding`,
+ * `face_image` and both ID document images — megabytes of biometrics and
+ * base64 per password check. `has_id_doc` is computed in the query so the ID
+ * gate can answer without transferring the document itself.
+ */
+const LOGIN_COLUMNS =
+  "id, username, password_hash, full_name, role, qr_token, is_active, " +
+  "deactivation_reason, deactivated_at, session_token, verification_status, " +
+  "face_enabled, id_card_hash, face_embedding, " +
+  "id_doc_front is not null as has_id_doc";
+
+/**
+ * What `LOGIN_COLUMNS` returns. Spelled out so `getIdGate` and the session
+ * minting get a checked shape instead of `Record<string, any>` — the computed
+ * `has_id_doc` in particular is easy to forget when the select changes.
+ */
+type LoginUser = {
+  id: string;
+  username: string;
+  password_hash: string;
+  full_name: string;
+  role: string;
+  qr_token: string | null;
+  is_active: boolean;
+  deactivation_reason: string | null;
+  deactivated_at: string | null;
+  session_token: string | null;
+  verification_status: string | null;
+  face_enabled: boolean | null;
+  id_card_hash: string | null;
+  face_embedding: unknown;
+  has_id_doc: boolean;
+};
+
 export const POST = handler(async (req: Request) => {
   const body = await readBody(req);
   const { username, token, password } = body;
 
   // Accept either a scanned barcode token OR a typed username — never both.
   const input = String(username ?? token ?? "").trim();
-  const pwd = String(password ?? "").trim();
+  // Passwords are not trimmed. Whitespace is a legal character in a password,
+  // and silently trimming it made a correct password fail for anyone who chose
+  // a leading or trailing space.
+  const pwd = String(password ?? "");
 
   if (!input || !pwd) {
     return fail("Username or barcode and password are required");
   }
 
-  // Look up by qr_token first (barcode scan), then by username (manual entry).
-  // A scan always starts with "CT-STF-", so there is no ambiguity between
-  // the two fields even though both are accepted here.
-  const { data: user, error: lookupError } = await db()
+  // The identifier is compared as a value, never interpolated into a PostgREST
+  // filter grammar. It used to be spliced into `.or(qr_token.eq.${input},...)`,
+  // where a comma or dot in the input becomes query syntax and can match a
+  // different account than the one presented. Two exact lookups are also easier
+  // to reason about: a barcode either matches a barcode or it does not.
+  if (input.length > 64) {
+    await recordLoginAttempt(tokenKey(input), "staff", false);
+    return fail("Unrecognized username or barcode", 401);
+  }
+
+  let user: LoginUser | null = null;
+  let lookupError: { message: string } | null = null;
+
+  const byToken = await db()
     .from("users")
-    .select("*")
+    .select(LOGIN_COLUMNS)
     .eq("role", "staff")
-    .or(`qr_token.eq.${input},username.eq.${input}`)
+    .eq("qr_token", input)
     .maybeSingle();
 
+  if (byToken.error) {
+    lookupError = byToken.error;
+  } else if (byToken.data) {
+    user = byToken.data;
+  } else {
+    const byName = await db()
+      .from("users")
+      .select(LOGIN_COLUMNS)
+      .eq("role", "staff")
+      .eq("username", input)
+      .maybeSingle();
+    if (byName.error) lookupError = byName.error;
+    else user = byName.data;
+  }
+
+  // Log the database's own message; never return it. It can contain the host,
+  // the project ref or a file path, and this is an unauthenticated route.
   if (lookupError) {
     console.error("staff login lookup failed:", lookupError.message);
-    return fail(
-      `Cannot query the database (${lookupError.message}). Check .env.local.`,
-      503
-    );
+    return fail("Cannot reach the database. Check the server configuration.", 503);
   }
 
   const method = user?.qr_token === input ? "staff_qr" : "staff";
@@ -113,11 +178,7 @@ export const POST = handler(async (req: Request) => {
   if (throttle.blocked) return tooManyAttempts(throttle.retryAfterSeconds);
 
   const logAttempt = async (success: boolean) => {
-    await db().from("login_attempts").insert({
-      username: key,
-      method,
-      success,
-    });
+    await recordLoginAttempt(key, method, success);
   };
 
   if (!user) {
@@ -256,7 +317,7 @@ export const POST = handler(async (req: Request) => {
 
   if (nonceError) {
     console.error("staff login nonce write failed:", nonceError.message);
-    return fail(`Cannot query the database (${nonceError.message}). Check .env.local.`, 503);
+    return fail("Cannot reach the database. Try again in a moment.", 503);
   }
 
   const ticket = await signStep2Ticket({

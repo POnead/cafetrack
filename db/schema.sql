@@ -672,6 +672,10 @@ create table if not exists email_notifications (
   -- Identifies the trigger so a repeat within the suppression window is dropped.
   -- Alerts use 'alert:<alert_id>', the daily summary uses the date.
   dedupe_key   text,
+  -- Set when a dispatcher claims the row, so a process that dies mid-send can
+  -- have its claim reclaimed rather than leaving the message in `sending`
+  -- forever. See dispatchQueued() in src/lib/email.ts.
+  claimed_at   timestamptz,
   queued_at    timestamptz not null default now(),
   sent_at      timestamptz,
   -- Set when a row was created but not sent because the same dedupe_key had
@@ -679,8 +683,14 @@ create table if not exists email_notifications (
   suppressed   boolean not null default false
 );
 
+alter table email_notifications add column if not exists claimed_at timestamptz;
+
 create index if not exists idx_email_notif_status on email_notifications(status);
 create index if not exists idx_email_notif_dedupe on email_notifications(dedupe_key);
+-- The sign-in throttle reads the newest rows for one method on every attempt.
+-- Without this it is a sequential scan and a sort of an append-only table.
+create index if not exists idx_login_attempts_method
+  on login_attempts(method, created_at desc);
 create index if not exists idx_items_status      on items(item_status);
 create index if not exists idx_items_submitted   on items(submitted_at desc);
 
