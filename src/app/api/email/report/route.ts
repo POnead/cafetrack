@@ -1,27 +1,16 @@
-import { db } from "@/lib/supabase";
 import { handler, ok, fail, readBody } from "@/lib/api";
 import { requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { queueDirectEmail, dispatchSoon } from "@/lib/email";
+import { buildStockReportPdf } from "@/lib/report-pdf";
+import { buildStockReportData, parseStockReportFilters } from "@/lib/stock-report-data";
 
 export const runtime = "nodejs";
 
-type ReportTransaction = {
-  type: string;
-  transaction_items: {
-    sku: string;
-    item_name: string;
-    quantity: number | string;
-  }[] | null;
-};
-
 /**
- * Email a stock report to a specified address (FR-11: "send any report by email").
- *
- * The report body is built from the same data the Reports page shows: current
- * stock levels, movement summary, and top movers. The message goes through the
- * same email queue as alerts, so it is retried on the same terms and appears
- * in the delivery log.
+ * Email the same filtered stock report PDF as the Reports page export. The
+ * attachment is persisted with the queued message, so retries deliver the
+ * original snapshot rather than regenerating it from newer inventory.
  */
 export const POST = handler(async (req: Request) => {
   const session = await requireAdmin();
@@ -29,138 +18,39 @@ export const POST = handler(async (req: Request) => {
 
   const to = String(body.to ?? "").trim();
   if (!to) return fail("Enter an email address");
-
-  // Build the report body from current data
-  const { data: items, error: itemsErr } = await db()
-    .from("items")
-    .select(
-      `sku, name, quantity, unit, low_stock_threshold, expiration_date,
-       category(name), location(name)`
-    )
-    .eq("item_status", "active")
-    .order("name", { ascending: true });
-
-  if (itemsErr) return fail(itemsErr.message, 500);
-
-  const transactionRows: ReportTransaction[] = [];
-  const transactionPageSize = 500;
-  /*
-   * Bounded, unlike the original `for (;;)`.
-   *
-   * The report only needs recent movement to summarise it, and an unbounded
-   * walk turns one admin click into a full-table scan that grows with every day
-   * the cafe trades. The cap matches the analytics endpoint's (20,000 rows); a
-   * busy cafe at ~100 movements a day reaches it after about seven months, and
-   * the summary below is a "recent activity" digest rather than an accounting
-   * statement, so stopping is honest. If the cap is hit, the subject says so
-   * rather than silently reporting incomplete totals.
-   */
-  const MAX_TRANSACTION_ROWS = 20_000;
-  let truncated = false;
-
-  for (let offset = 0; offset < MAX_TRANSACTION_ROWS; offset += transactionPageSize) {
-    const { data, error } = await db()
-      .from("transactions")
-      .select(
-        `id, type, actor_name, created_at,
-         transaction_items(sku, item_name, quantity)`
-      )
-      .order("created_at", { ascending: false })
-      .order("id", { ascending: true })
-      .range(offset, offset + transactionPageSize - 1);
-
-    if (error) return fail(error.message, 500);
-    const page: ReportTransaction[] = data ?? [];
-    transactionRows.push(...page);
-    if (page.length < transactionPageSize) break;
-    if (transactionRows.length >= MAX_TRANSACTION_ROWS) truncated = true;
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) {
+    return fail("That does not look like an email address");
   }
 
-  // Build movement summary
-  const movement = (["checkout", "restock", "waste"] as const).map((type) => {
-    const rows = transactionRows.filter((t) => t.type === type);
-    const qty = rows.reduce(
-      (n, t) =>
-        n + (t.transaction_items ?? []).reduce((m, li) => m + Number(li.quantity), 0),
-      0
-    );
-    return { type, count: rows.length, qty };
-  });
-
-  // Build top movers
-  const tally = new Map<string, { name: string; qty: number }>();
-  for (const t of transactionRows) {
-    if (t.type !== "checkout") continue;
-    for (const li of t.transaction_items ?? []) {
-      const cur = tally.get(li.sku) ?? { name: li.item_name, qty: 0 };
-      cur.qty += Number(li.quantity);
-      tally.set(li.sku, cur);
-    }
-  }
-  const topMovers = [...tally.entries()]
-    .map(([sku, v]) => ({ sku, ...v }))
-    .sort((a, b) => b.qty - a.qty)
-    .slice(0, 5);
-
-  // Build the email body
-  const lines: string[] = [];
-  lines.push("CafeTrack Stock Report");
-  lines.push(`Generated: ${new Date().toLocaleString()}`);
-  lines.push("");
-  lines.push(`Total items: ${items?.length ?? 0}`);
-  lines.push("");
-
-  lines.push("Movement Summary:");
-  if (truncated) {
-    lines.push(
-      `  (covering the most recent ${MAX_TRANSACTION_ROWS.toLocaleString()} movements — older activity is not included)`
-    );
-  }
-  for (const m of movement) {
-    const label =
-      m.type === "checkout"
-        ? "Checked out"
-        : m.type === "restock"
-          ? "Restocked"
-          : "Waste";
-    lines.push(`  ${label}: ${m.count} transactions, ${m.qty} units`);
-  }
-  lines.push("");
-
-  if (topMovers.length > 0) {
-    lines.push("Most Checked Out:");
-    for (const m of topMovers) {
-      lines.push(`  ${m.name} (${m.sku}): ${m.qty}`);
-    }
-    lines.push("");
-  }
-
-  lines.push("Current Stock:");
-  for (const i of items ?? []) {
-    const qty = Number(i.quantity);
-    const threshold = Number(i.low_stock_threshold);
-    const status = qty <= 0 ? "OUT" : qty <= threshold ? "LOW" : "OK";
-    lines.push(
-      `  [${status}] ${i.name} (${i.sku}): ${qty} ${i.unit} (threshold: ${threshold})`
-    );
-  }
-
-  const emailBody = lines.join("\n");
-  const subject = `CafeTrack Stock Report — ${new Date().toLocaleDateString()}`;
+  const report = await buildStockReportData(parseStockReportFilters(body));
+  const pdf = await buildStockReportPdf(report);
+  const date = new Date();
+  const filename = `cafetrack-report-${date.toISOString().slice(0, 10)}.pdf`;
+  const subject = `CafeTrack Stock Report — ${date.toLocaleDateString()}`;
+  const emailBody = [
+    `${report.businessName} Stock Report`,
+    `Generated: ${report.generated}`,
+    `Items included: ${report.items.length}`,
+    `Movement summary: ${report.movementSummary
+      .map(({ label, count, qty }) => `${label}: ${count} transactions, ${qty} units`)
+      .join("; ")}`,
+    `Filters: ${report.filterDescription}`,
+    "",
+    "The complete inventory and movement report is attached as a PDF.",
+  ].join("\n");
 
   try {
-    await queueDirectEmail(to, subject, emailBody);
+    await queueDirectEmail(to, subject, emailBody, [
+      {
+        filename,
+        contentType: "application/pdf",
+        contentBase64: pdf.toString("base64"),
+      },
+    ]);
   } catch (e: any) {
     return fail(e.message || "Could not queue the report email", 400);
   }
 
-  // Queueing is not sending. Without this the report sat in the queue until
-  // something else happened to dispatch it — up to ten minutes later on the
-  // scheduler, or not at all if the scheduler was disabled — so pressing "Email
-  // this report" and then waiting at the inbox was the only way to tell whether
-  // it had worked. Fired without awaiting: a slow mail server must not hold the
-  // response open, and a failure to send is reported in the delivery log either
-  // way.
   dispatchSoon();
 
   await audit(
@@ -168,7 +58,7 @@ export const POST = handler(async (req: Request) => {
     "EMAIL_REPORT_SENT",
     "report",
     null,
-    { to, subject, itemCount: items?.length ?? 0 },
+    { to, subject, itemCount: report.items.length, filters: report.filterDescription },
     { ip: null, outcome: "success" }
   );
 

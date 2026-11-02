@@ -33,6 +33,12 @@ export type DispatchResult = {
   errors: string[];
 };
 
+export type QueuedEmailAttachment = {
+  filename: string;
+  contentType: string;
+  contentBase64: string;
+};
+
 /* ------------------------------------------------------------------ */
 /* configuration                                                       */
 /* ------------------------------------------------------------------ */
@@ -282,12 +288,20 @@ export async function dispatchQueued(limit = 25): Promise<DispatchResult> {
 
   const { data: pending, error } = await db()
     .from("email_notifications")
-    .select("id, recipient_id, kind, subject, body, attempts, email_recipients(email_address)")
+    .select(
+      "id, recipient_id, kind, subject, body, attachments, attempts, email_recipients(email_address)"
+    )
     .eq("status", "queued")
     .order("queued_at", { ascending: true })
     .limit(limit);
 
-  if (error || !pending?.length) return result;
+  if (error) {
+    console.error("email queue read failed:", error.message);
+    result.failed++;
+    result.errors.push(`Email queue could not be read: ${error.message}`);
+    return result;
+  }
+  if (!pending?.length) return result;
 
   for (const row of pending as any[]) {
     if (row.attempts >= maxAttempts) {
@@ -330,12 +344,29 @@ export async function dispatchQueued(limit = 25): Promise<DispatchResult> {
       continue;
     }
 
+    const attachments = decodeQueuedAttachments(row.attachments);
+    if (!attachments) {
+      await failRow(row.id, "Queued email attachment data is invalid");
+      result.failed++;
+      result.errors.push(`Queued email ${row.id} has invalid attachment data`);
+      continue;
+    }
+
     try {
       await transport(config).sendMail({
         from: config.from,
         to,
         subject: row.subject,
         text: String(row.body ?? "").slice(0, MAX_BODY),
+        ...(attachments.length > 0
+          ? {
+              attachments: attachments.map((attachment) => ({
+                filename: attachment.filename,
+                contentType: attachment.contentType,
+                content: Buffer.from(attachment.contentBase64, "base64"),
+              })),
+            }
+          : {}),
       });
 
       await db()
@@ -362,6 +393,30 @@ export async function dispatchQueued(limit = 25): Promise<DispatchResult> {
   }
 
   return result;
+}
+
+function decodeQueuedAttachments(value: unknown): QueuedEmailAttachment[] | null {
+  if (!Array.isArray(value)) return null;
+
+  const attachments: QueuedEmailAttachment[] = [];
+  for (const entry of value) {
+    if (
+      !entry ||
+      typeof entry.filename !== "string" ||
+      !entry.filename.trim() ||
+      typeof entry.contentType !== "string" ||
+      !entry.contentType.trim() ||
+      typeof entry.contentBase64 !== "string" ||
+      entry.contentBase64.length === 0 ||
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+        entry.contentBase64
+      )
+    ) {
+      return null;
+    }
+    attachments.push(entry as QueuedEmailAttachment);
+  }
+  return attachments;
 }
 
 async function failRow(id: string, message: string) {
@@ -534,7 +589,12 @@ export async function verifySmtpAccount(to: string): Promise<VerifyResult> {
  * button. Goes through the same queue as everything else rather than sending
  * directly, so it is retried on the same terms and shows up in the log.
  */
-export async function queueDirectEmail(to: string, subject: string, body: string) {
+export async function queueDirectEmail(
+  to: string,
+  subject: string,
+  body: string,
+  attachments: QueuedEmailAttachment[] = []
+) {
   const address = String(to).trim();
 
   // A real address, or the queue holds something that can only ever fail.
@@ -581,13 +641,15 @@ export async function queueDirectEmail(to: string, subject: string, body: string
     recipientId = inserted?.id ?? null;
   }
 
-  await db().from("email_notifications").insert({
+  const { error } = await db().from("email_notifications").insert({
     recipient_id: recipientId,
     kind: "report",
     subject,
     body,
+    attachments,
     // No dedupe key: each request is a deliberate action by a person, so two
     // clicks should send two emails rather than one being silently swallowed.
     dedupe_key: null,
   });
+  if (error) throw new Error(`Could not queue the report email: ${error.message}`);
 }

@@ -712,20 +712,68 @@ try {
 
   await stub.reset();
   const stranger = "bookkeeper@merrylane.test";
-  r = await call("POST", "/api/email/report", { to: stranger }, A);
+  const categories = await call("GET", "/api/refs/categories", null, A);
+  const categoryId = categories.data?.items?.[0]?.id;
+  const reportFilters = {
+    from: "2025-01-03",
+    to: "2025-01-04",
+    staff: "Juan Dela Cruz",
+    type: "waste",
+    category_id: categoryId,
+  };
+  await stub.reset();
+  await stub.failNext(1);
+  r = await call("POST", "/api/email/report", { to: stranger, filters: reportFilters }, A);
   check("a report can be emailed to an arbitrary address", r.status === 200, `${r.status} ${r.data?.error ?? ""}`);
 
-  await stub.reset();
+  const reportRetried = await waitFor(async () => {
+    const queued = await queue(A);
+    const report = queued.find((entry) => entry.kind === "report");
+    return report?.status === "queued" && Boolean(report.last_error);
+  });
+  check("a failed PDF delivery stays queued with its retry reason", reportRetried);
+
+  r = await call("PATCH", "/api/email", { action: "send_now" }, A);
+  check(
+    "the queued PDF is delivered on retry",
+    r.status === 200 && r.data?.sent === 1,
+    `${r.status} sent=${r.data?.sent ?? 0}`
+  );
   const reportArrived = await waitFor(async () =>
     (await stub.messages()).messages.some((m) => m.to.includes(stranger))
   );
   got = await stub.messages();
   const reports = got.messages.filter((m) => m.to.includes(stranger));
   check("the report was delivered to that address", reportArrived, `${reports.length} delivered`);
+  const reportMime = `${reports[0]?.headers?.["Content-Type"] ?? ""}\n${reports[0]?.body ?? ""}`;
   check(
-    "it carries the stock table",
-    /Current Stock:/i.test(reports[0]?.body ?? "") && /threshold/i.test(reports[0]?.body ?? ""),
-    "includes current stock with thresholds"
+    "it carries the exported PDF design as an attachment",
+    /Content-Type:\s*application\/pdf/i.test(reportMime) &&
+      /Content-Disposition:\s*attachment/i.test(reportMime) &&
+      /filename="?cafetrack-report-\d{4}-\d{2}-\d{2}\.pdf"?/i.test(reportMime) &&
+      /Content-Transfer-Encoding:\s*base64[\s\S]{0,300}JVBERi0x/i.test(reportMime),
+    "PDF content and a dated attachment filename are present"
+  );
+  const queuedReport = (await queue(A)).find((entry) => entry.kind === "report");
+  check(
+    "the emailed PDF records the active report filters",
+    reportFilters.from &&
+      reportFilters.to &&
+      reportFilters.staff &&
+      reportFilters.type &&
+      reportFilters.category_id &&
+      queuedReport?.body?.includes("Dates: 2025-01-03 to 2025-01-04") &&
+      queuedReport?.body?.includes("Staff: Juan Dela Cruz") &&
+      queuedReport?.body?.includes("Movement: waste") &&
+      queuedReport?.body?.includes(`Category: ${categories.data.items[0].name}`) &&
+      queuedReport?.body?.includes("Items included: 1") &&
+      queuedReport?.body?.includes("Movement summary: Checked out: 0 transactions"),
+    queuedReport?.body ?? "filters not reflected in the queued message"
+  );
+  check(
+    "the email body points to the attached report instead of duplicating a plain-text stock table",
+    /complete inventory and movement report is attached as a PDF/i.test(queuedReport?.body ?? ""),
+    "concise body with PDF attachment"
   );
 
   r = await call("POST", "/api/email/report", { to: "nope" }, A);

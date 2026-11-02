@@ -664,6 +664,7 @@ create table if not exists email_notifications (
   kind         text not null,
   subject      text not null,
   body         text not null,
+  attachments  jsonb not null default '[]'::jsonb,
   -- queued | sending | sent | failed
   status       text not null default 'queued'
     check (status in ('queued','sending','sent','failed')),
@@ -684,6 +685,7 @@ create table if not exists email_notifications (
 );
 
 alter table email_notifications add column if not exists claimed_at timestamptz;
+alter table email_notifications add column if not exists attachments jsonb not null default '[]'::jsonb;
 
 create index if not exists idx_email_notif_status on email_notifications(status);
 create index if not exists idx_email_notif_dedupe on email_notifications(dedupe_key);

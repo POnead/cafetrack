@@ -522,11 +522,20 @@ export default function ReportsPage() {
       const res = await fetch("/api/email/report", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ to: emailTo.trim() }),
+        body: JSON.stringify({
+          to: emailTo.trim(),
+          filters: {
+            from: rangeParams.from,
+            to: rangeParams.to,
+            staff,
+            type: typeFilter,
+            category_id: catFilter,
+          },
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not send the report");
-      setToast({ msg: `Report emailed to ${emailTo.trim()}`, tone: "success" });
+      setToast({ msg: `PDF report queued for ${emailTo.trim()}`, tone: "success" });
       setEmailModalOpen(false);
       setEmailTo("");
     } catch (e: any) {
@@ -1078,7 +1087,8 @@ export default function ReportsPage() {
               Email this report
             </h2>
             <p className="text-sm text-cocoa-500">
-              Sends the current stock report to the email address below.
+              Sends the current filtered stock report as a PDF attachment to the
+              email address below.
             </p>
             <div>
               <label className="label" htmlFor="email-to">
@@ -1115,7 +1125,7 @@ export default function ReportsPage() {
                 onClick={sendEmailReport}
                 disabled={emailSending || !emailTo.trim()}
               >
-                {emailSending ? "Sending..." : "Send report"}
+                {emailSending ? "Sending..." : "Send PDF report"}
               </button>
             </div>
           </div>
