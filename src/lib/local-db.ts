@@ -421,7 +421,7 @@ type Filter =
   | { kind: "eq"; column: string; value: unknown }
   | { kind: "in"; column: string; values: unknown[] }
   | { kind: "lt" | "lte" | "gt" | "gte"; column: string; value: unknown }
-  | { kind: "or"; clauses: { column: string; op: string; value: string }[] };
+  | { kind: "or"; clauses: { column: string; op: string; value: string | null }[] };
 
 type Mode = "select" | "insert" | "update" | "delete";
 
@@ -437,6 +437,7 @@ const OPS: Record<string, string> = {
 };
 
 class LocalQuery implements PromiseLike<DbResult> {
+  private table: string;
   private mode: Mode = "select";
   private selectStr: string | null = null;
   private payload: Row | Row[] | null = null;
@@ -452,7 +453,9 @@ class LocalQuery implements PromiseLike<DbResult> {
   private upsertConflict: string[] | null = null;
   private run: Promise<DbResult> | null = null;
 
-  constructor(private table: string) {}
+  constructor(table: string) {
+    this.table = table;
+  }
 
   /* ---- chainable surface ---- */
 
@@ -570,10 +573,16 @@ class LocalQuery implements PromiseLike<DbResult> {
   gt = this.compare("gt");
   gte = this.compare("gte");
 
-  /** Supports the PostgREST form `col.op.value,col.op.value` (treated as OR). */
+  /** Supports the PostgREST OR form, including `not.is.null` and `is.null`. */
   or(expression: string) {
     const clauses = splitTopLevel(expression).map((raw) => {
       const [column, op = "eq", ...rest] = raw.trim().split(".");
+      if (op === "not" && rest[0] === "is" && rest[1] === "null") {
+        return { column: column.trim(), op: "is not", value: null };
+      }
+      if (op === "is" && rest[0] === "null") {
+        return { column: column.trim(), op: "is", value: null };
+      }
       return {
         column: column.trim(),
         op: OPS[op] ?? "=",
@@ -875,6 +884,9 @@ class LocalQuery implements PromiseLike<DbResult> {
       }
 
       const clauses = filter.clauses.map((clause) => {
+        if (clause.value === null) {
+          return `${alias}.${quoteId(clause.column)} ${clause.op} null`;
+        }
         values.push(clause.value);
         return `${alias}.${quoteId(clause.column)} ${clause.op} $${
           offset + values.length

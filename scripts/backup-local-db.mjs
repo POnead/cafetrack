@@ -36,6 +36,20 @@ const here = dirname(fileURLToPath(import.meta.url));
 const dir = process.env.CAFETRACK_DB_DIR || join(process.cwd(), ".pglite");
 const backupRoot = process.env.CAFETRACK_BACKUP_DIR || join(here, "..", "backups");
 
+if (process.argv.includes("--list")) {
+  if (!existsSync(backupRoot)) {
+    console.log(`No backups directory at ${backupRoot}.`);
+    process.exit(0);
+  }
+  const all = readdirSync(backupRoot)
+    .filter((name) => name.startsWith("cafetrack-"))
+    .sort()
+    .reverse();
+  if (all.length === 0) console.log("No backups found.");
+  for (const name of all) console.log("  " + join(backupRoot, name));
+  process.exit(0);
+}
+
 if (!existsSync(dir)) {
   console.error(`Nothing to back up — ${dir} does not exist yet.`);
   process.exit(1);
@@ -55,7 +69,7 @@ const TABLES = [
 ];
 
 /**
- * Best-effort check for a dev server holding the database open. PGlite has no
+ * Best-effort check for a Next server holding the database open. PGlite has no
  * lock file we can rely on across platforms, so this is advisory: we look for
  * a node process with our own dev command line rather than guessing from a
  * port, which could belong to something unrelated.
@@ -66,7 +80,7 @@ const TABLES = [
  * command line. PowerShell is used rather than the old `wmic`, which is
  * removed from recent Windows builds.
  */
-function devServerRunning() {
+function appServerRunning() {
   // No -Filter and no inner quotes: cmd.exe -> powershell.exe mangles nested
   // quotes, and selecting every process then matching in JS is simpler and
   // portable than getting the quoting right twice.
@@ -74,16 +88,16 @@ function devServerRunning() {
     'powershell.exe -NoProfile -NonInteractive -Command ' +
     '"Get-CimInstance Win32_Process | Select-Object -ExpandProperty CommandLine"';
   try {
-    return /next[\s\\/-]*dev/i.test(execSync(cmd, { encoding: "utf8" }));
+    return /next[\s\\/-]*(dev|start)/i.test(execSync(cmd, { encoding: "utf8" }));
   } catch {
     return false; // Could not determine — do not block a legitimate run.
   }
 }
 
 function warnIfServerRunning() {
-  if (devServerRunning()) {
+  if (appServerRunning()) {
     console.error(
-      "A Next.js dev server appears to be running.\n" +
+      "A Next.js server appears to be running.\n" +
         "PGlite is single-process, so copying the database while it is open\n" +
         "can capture an inconsistent state. Stop `npm run dev` and try again."
     );

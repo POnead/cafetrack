@@ -179,14 +179,10 @@ export async function runBackup(): Promise<{ path: string; rows: number } | null
         kind: "auto",
         // An automatic backup is a tar of the data directory, not a copy of the
         // .pglite folder the way `npm run db:backup` makes. Restoring it means
-        // extracting pgdata.tar.gz over a fresh database directory, so the
-        // existing restore script — which expects a plain copy — is not the
-        // right tool here. Stated plainly rather than left for someone to
-        // discover at the worst moment.
+        // passing the backup directory to the same staged restore command.
         archive: "pgdata.tar.gz",
         restoreHint:
-          "Stop the dev server, then extract pgdata.tar.gz into the database " +
-          "directory named by CAFETRACK_DB_DIR (default ./.pglite).",
+          "Stop the server, then run npm run db:restore -- <this backup directory>.",
         tables: counts,
       },
       null,

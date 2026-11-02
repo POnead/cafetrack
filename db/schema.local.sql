@@ -265,10 +265,8 @@ alter table users add column if not exists id_doc_front  text;
 alter table users add column if not exists id_doc_back   text;
 alter table users add column if not exists id_photo      text;
 
--- What kind of ID it is, and the number printed on it. The number is kept because
--- an admin re-checking a hire months later needs to know which card was seen, and
--- a cafe verifying its staff is not a regulated KYC process with a retention
--- schedule — it is a small business keeping a record of who works there.
+-- What kind of ID it is, and the number printed on it. The number lets an admin
+-- re-check a hire and is used by ID-card sign-in.
 alter table users add column if not exists id_doc_type   text;
 alter table users add column if not exists id_doc_number text;
 

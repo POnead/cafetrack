@@ -931,12 +931,17 @@ export default function CheckoutPage() {
                 tips.push(exp.days < 0 ? `Expired ${Math.abs(exp.days)} days ago` : `Expires in ${exp.days} days`);
               }
               const tip = tips.join("\n");
-              let badge = "";
-              let tone = "green";
-              if (status.key === "out") { badge = "Out"; tone = "red"; }
-              else if (exp.key === "expired") { badge = "Expired"; tone = "red"; }
-              else if (exp.key === "soon") { badge = "Expiring"; tone = "amber"; }
-              else if (status.key === "low") { badge = "Low"; tone = "amber"; }
+              const badge =
+                status.key === "out"
+                  ? { label: "Out", tone: status.tone }
+                  : exp.key === "expired"
+                    ? { label: "Expired", tone: exp.tone }
+                    : exp.key === "soon"
+                      ? { label: "Expiring", tone: exp.tone }
+                      : status.key === "low"
+                        ? { label: "Low", tone: status.tone }
+                        : null;
+              if (!badge) return null;
               return (
                 <div
                   key={item.sku}
@@ -945,17 +950,12 @@ export default function CheckoutPage() {
                 >
                   <div className="flex items-center justify-between gap-1.5">
                     <span className="min-w-0 truncate font-medium text-cocoa-800">{item.name}</span>
-                    <span
-                      className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide ${
-                        tone === "red"
-                          ? "bg-red-100 text-red-700"
-                          : tone === "amber"
-                          ? "bg-amber-100 text-amber-700"
-                          : "bg-green-100 text-green-700"
-                      }`}
+                    <Badge
+                      tone={badge.tone}
+                      className="!shrink-0 !px-1.5 !py-0.5 !text-[9px] !font-bold !uppercase !tracking-wide"
                     >
-                      {badge}
-                    </span>
+                      {badge.label}
+                    </Badge>
                   </div>
                   <div className="mt-0.5 text-[10px] text-cocoa-400">
                     {fmtQty(Number(item.quantity), item.unit)} · {item.sku}
@@ -1119,12 +1119,20 @@ export default function CheckoutPage() {
                                 {fmtQty(Number(item.quantity), item.unit)}
                               </div>
                               {exp.key === "expired" && (
-                                <div className="text-[10px] font-semibold text-terracotta-600">Expired</div>
+                                <Badge
+                                  tone={exp.tone}
+                                  className="!px-1.5 !py-0 !text-[9px] !font-bold !uppercase !tracking-wide"
+                                >
+                                  Expired
+                                </Badge>
                               )}
                               {exp.key === "soon" && (
-                                <div className="text-[10px] font-semibold text-ochre-600">
+                                <Badge
+                                  tone={exp.tone}
+                                  className="!px-1.5 !py-0 !text-[9px] !font-bold !uppercase !tracking-wide"
+                                >
                                   {exp.days}d left
-                                </div>
+                                </Badge>
                               )}
                             </div>
                           </button>

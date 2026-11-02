@@ -521,10 +521,12 @@ The server takes one on its own, once a day, so nothing has to be remembered:
 - **Turning it off** — set `CAFETRACK_DISABLE_AUTO_BACKUP=1`.
 
 Each snapshot is a `pgdata.tar.gz` plus a `manifest.json` of per-table row counts.
-**The two backup types are not interchangeable:** `npm run db:restore` expects the
-directory-copy layout that `npm run db:backup` makes, so restoring an automatic
-one means stopping the server and extracting the tar over the database directory.
-The manifest says which it is and spells this out.
+Automatic and manual backups can both be listed and restored with the same
+commands. The restore tool extracts or stages the backup, opens it with PGlite,
+and checks its manifest before swapping it into place. Automatic snapshots and
+their row counts are captured separately while the server is running, so a
+concurrent write can cause a warning in the count check; the restored database
+must still open successfully.
 
 Under Supabase this does nothing — that platform takes its own backups.
 
@@ -536,20 +538,21 @@ mode the database *is* the `.pglite` directory, so a backup is a copy of it:
 ```bash
 npm run db:backup                          # -> backups/cafetrack-<timestamp>/
 npm run db:restore -- backups/cafetrack-<timestamp>
+npm run db:restore -- --list               # list automatic and manual backups
+npm run db:restore -- backups/cafetrack-auto-<timestamp>
 ```
 
-Both refuse to run while `npm run dev` is up, because PGlite is single-process
-and copying or swapping the database underneath a running server is not safe.
-A backup records a row count per table in `manifest.json`, and a restore compares
-those counts against the live database afterwards, so restoring the wrong backup
-is reported rather than silently accepted. The previous database is kept as
-`.pglite.replaced` unless you pass `--force`.
+Manual backup and restore refuse to run while a Next.js dev or start process is
+running, because PGlite is single-process and copying or swapping its directory
+under a live server is unsafe. Automatic backups use PGlite's live snapshot API.
+A restore validates the staged database before replacing the current one; by
+default the old database is kept as `.pglite.replaced-<timestamp>`. `--force`
+removes that old copy only after the staged restore is ready.
 
-Old backups are pruned after each successful run, keeping the newest **3** — set
-`CAFETRACK_BACKUP_KEEP` to change it. Each one is a full copy of the database
-directory, so without a limit repeated runs quietly fill the disk. Pruning runs
-*after* the new backup is written, never before, so a failure cannot leave you
-with nothing. `backups/` is gitignored.
+Automatic backups are pruned to the configured number of copies. Manual backups
+remain until an operator removes them. Staff ID and face data is not
+automatically purged; it remains in managed backups until those copies are
+pruned or manually removed. `backups/` is gitignored.
 
 Under Supabase there is nothing to copy — that platform handles its own backups.
 
@@ -649,6 +652,7 @@ There is no unit-test runner. The scripts drive a running server, so start
 `npm run dev` first:
 
 ```bash
+npm run test:restore # isolated backup/restore validation; no running server
 npm run test:smoke    # full API walk-through; makes and cleans up its own data
 npm run test:edge     # hostile and edge-case inputs
 npm run test:pages    # every page renders, for an admin and a staff session
@@ -662,7 +666,8 @@ npm run test:all      # every suite in order, stopping at the first failure
 ```
 
 The pure suites need no server and no camera, and are the fast ones to run while
-working: `test:face` (descriptor parsing, cosine matching, the duty window),
+working: `test:restore` (isolated backup recovery), `test:face` (descriptor
+parsing, cosine matching, the duty window),
 `test:face-image` (upload sniffing), `test:face-diagnostics` (camera failures),
 `test:id-name`, `test:ocr`, `test:ocr-philsys`, `test:id-forgery`,
 `test:id-lookup` and `test:step2-ticket`. `test:all` runs those first, then the
@@ -987,6 +992,36 @@ public/
   shown to the account holder at sign-in, so it must not contain anything
   sensitive.
 
+## Before an owner or panel presentation
+
+CafeTrack is built for a **single café server**. In local mode, the server
+machine must remain powered on and reachable; if it is unavailable, the other
+devices cannot use the app. It is not a multi-site or high-availability setup.
+For a live pilot, use a production build (`npm run build`, then `npm start`),
+restrict access to the café's network, and use an operating-system account with
+access limited to the app and its data. Do not present the development server as
+a production deployment.
+
+Before saying the system is ready for operational use:
+
+1. Replace the example session secret and seed passwords, sign in as the owner,
+   review how staff identity data will be handled, and enable full-disk
+   encryption on the server and backup drive.
+2. Make a backup and rehearse restoring it to a separate test directory. Keep a
+   backup copy on a separate protected drive if the café needs recovery after a
+   machine failure.
+3. Configure the café's SMTP account and use **Settings → Email** to send a
+   real test message. The automated test suite uses a local SMTP stub and does
+   not prove the café's provider accepts mail.
+4. Print representative barcode labels at the intended printer settings and
+   scan them with the actual scanner. Typing an SKU remains the fallback.
+5. Treat face and ID results as review signals. Local checks do not prove an ID
+   is genuine; a human must approve it. Do not rely on turned-head checks until
+   they have been calibrated with consented captures from the café's own staff.
+6. Point an external monitor at `/api/health` and collect uptime evidence before
+   claiming an availability target. The health endpoint is a check, not an
+   uptime guarantee.
+
 ---
 
 ## Known limitations
@@ -1031,6 +1066,10 @@ public/
   (`items.category`, `items.location`, `alerts.item`,
   `transactions.transaction_items`). A new embed has to be added there or the
   query fails at runtime.
+- **Local mode is single-process and single-machine.** There is no offline queue
+  or high-availability replica; if the host is off, other devices cannot reach
+  the data. Use the hosted database option or a separate architecture before
+  promising multi-site access or uninterrupted availability.
 - **No password self-service.** Staff can only be given a new password by an
   admin, so anyone who forgets theirs is stuck until an admin acts.
 - **Categories and locations are managed from the Settings page**, not by editing
@@ -1079,11 +1118,16 @@ public/
   `x-forwarded-for`, which is client-controlled. That is safe *because* the column
   sits outside the hash chain: a forged address cannot make a forged entry look
   authentic, since the digest covers the action and its details instead.
-- **Two kinds of backup, not interchangeable.** `npm run db:backup` makes a
-  directory copy that `npm run db:restore` understands. The automatic daily one
-  writes `pgdata.tar.gz` because it has to run while the server is up, so
-  restoring it means stopping the server and extracting the tar by hand. Both
-  manifests say which kind they are.
+- **Automatic backup counts are a sanity check, not an atomic snapshot record.**
+  PGlite's live snapshot and per-table counts are collected separately; a write
+  between them can produce a mismatch warning. Restore opens and validates a
+  staged backup before swapping it in, but a restore drill is still required
+  before relying on recovery.
+- **Deletion is logical, not forensic secure erase.** Retention purges live
+  records and replaces managed local backups, but deleted pages may remain
+  recoverable from the filesystem, and copies outside the managed backup folder
+  are not controlled. Full-disk encryption and a documented external-copy policy
+  are required for sensitive staff images.
 - **A rejected item cannot be re-submitted.** It stays as `rejected` with the
   admin's reason. Correcting it means adding a new item; there is no "edit and
   resubmit", because a submission that could edit itself into stock would skip

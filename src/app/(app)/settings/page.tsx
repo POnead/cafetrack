@@ -58,6 +58,7 @@ export default function SettingsPage() {
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
 
   const [loading, setLoading] = useState(true);
+  const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<{ msg: string; tone: Tone } | null>(null);
@@ -104,6 +105,14 @@ export default function SettingsPage() {
     inFlight.current = true;
 
     try {
+      const meRes = await fetch("/api/auth/me");
+      const meData = await meRes.json();
+      if (!meRes.ok) throw new Error(meData.error || "Could not check your access");
+
+      const admin = meData.user?.role === "admin";
+      setIsAdmin(admin);
+      if (!admin) return;
+
       const [s, c, l, sup] = await Promise.all([
         fetch("/api/settings").then((r) => r.json()),
         fetch("/api/refs/categories").then((r) => r.json()),
@@ -364,6 +373,17 @@ export default function SettingsPage() {
   }
 
   if (loading) return <Spinner label="Loading settings..." />;
+
+  if (isAdmin !== true) {
+    return (
+      <Card className="space-y-2">
+        <h1 className="deco-title text-3xl">Settings</h1>
+        <p className="text-sm text-cocoa-500" role={error ? "alert" : undefined}>
+          {error ?? "Admin access required"}
+        </p>
+      </Card>
+    );
+  }
 
   /* One list plus its add-box, reused for categories and locations. */
   function refList(

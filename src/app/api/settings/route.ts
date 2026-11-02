@@ -21,6 +21,7 @@ export const runtime = "nodejs";
  * closed instead of publishing it.
  */
 const SECRET_KEYS = new Set(["smtp_pass_enc"]);
+const INTERNAL_KEYS = new Set(["staff_data_backup_rotation_pending"]);
 
 /**
  * Read the tunable company settings.
@@ -39,7 +40,7 @@ export const GET = handler(async () => {
 
   const values: Record<string, string> = {};
   for (const row of (data ?? []) as { key: string; value: string }[]) {
-    if (SECRET_KEYS.has(row.key)) continue;
+    if (SECRET_KEYS.has(row.key) || INTERNAL_KEYS.has(row.key)) continue;
     values[row.key] = row.value;
   }
 
