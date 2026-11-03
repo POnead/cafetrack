@@ -1,7 +1,6 @@
 import { db } from "@/lib/supabase";
 import { handler, ok, fail, badId, readBody } from "@/lib/api";
 import { hashPassword, verifyPassword, newStaffToken, requireAdmin } from "@/lib/auth";
-import { randomBytes } from "node:crypto";
 import { audit } from "@/lib/audit";
 
 export const runtime = "nodejs";
@@ -12,7 +11,7 @@ export const runtime = "nodejs";
  * this route has no reason to read it.
  */
 const USER_COLUMNS =
-  "id, username, full_name, first_name, last_name, role, qr_token, can_manage_items, approval_code, is_active, deactivation_reason, deactivated_at, created_at, position, start_date, face_enabled, face_enrolled_at, last_face_verified_at";
+  "id, username, full_name, first_name, last_name, role, qr_token, can_manage_items, is_active, deactivation_reason, deactivated_at, created_at, position, start_date, face_enabled, face_enrolled_at, last_face_verified_at";
 
 /** Update a staff/admin account: name, password, status, staff code. */
 export const PATCH = handler(
@@ -25,17 +24,13 @@ export const PATCH = handler(
 
     const body = await readBody(req);
 
-    // `can_manage_items` and `approval_code` have to be read here, not just
-    // written. The audit records below need the *previous* value to tell a real
-    // grant or revocation from a no-op — and when this select omitted them, the
-    // comparison was `Boolean(undefined) !== false`, which is always false, so
-    // ITEM_PERMISSION_REVOKE could never fire. Taking away someone's ability to
-    // edit the catalogue left no specific trace at all, which is the single
-    // change on this route most worth being able to find afterwards.
+    // `can_manage_items` needs to be read here, not just written. The audit
+    // records below need the previous value to tell a real grant or revocation
+    // from a no-op — when omitted, ITEM_PERMISSION_REVOKE could never fire.
     const { data: before } = await db()
       .from("users")
       .select(
-        "id, username, full_name, first_name, last_name, role, is_active, can_manage_items, approval_code"
+        "id, username, full_name, first_name, last_name, role, is_active, can_manage_items"
       )
       .eq("id", id)
       .maybeSingle();
@@ -257,43 +252,6 @@ export const PATCH = handler(
     ) {
       patch.deactivation_reason = reason;
       changed.push("deactivation_reason");
-    }
-
-    // FR-03: per-person code for skipping the approval queue. Auto-generated
-    // so the admin does not invent a weak one; clearing is explicit.
-    if (body.regenerate_approval_code === true) {
-      patch.approval_code = "CT-" + randomBytes(3).toString("hex").toUpperCase();
-      changed.push("approval_code");
-      // An approval code is the same kind of thing as the item-management grant
-      // and it was the same gap: it lets one person bypass admin review, and the
-      // only trace was a field name inside a generic USER_UPDATE. "Who was given
-      // a standing pass on the approval queue" is exactly the question an owner
-      // asks. The code value is deliberately not recorded — see the rotation
-      // above for why.
-      specific.push({
-        action: "APPROVAL_CODE_ISSUED",
-        details: {
-          username: before.username,
-          full_name: before.full_name,
-          replaced: Boolean(before.approval_code),
-        },
-      });
-    }
-    if (body.approval_code === null || body.approval_code === "") {
-      // Only a real revocation is worth recording — in the update or in the
-      // trail. Nulling a field that was already null would otherwise append a
-      // USER_UPDATE asserting that approval_code had changed, which is the same
-      // class of lie as logging a change that then failed: it teaches you not to
-      // trust the trail. With this, clearing a code that was never issued is a
-      // no-op and answers "Nothing to update", exactly like an empty body.
-      if (before.approval_code) {
-        patch.approval_code = null;
-        changed.push("approval_code");
-        specific.push({
-          action: "APPROVAL_CODE_REVOKED",
-          details: { username: before.username, full_name: before.full_name },
-        });
-      }
     }
 
     // FR-03: grant or revoke the right to add, edit and delete items directly.

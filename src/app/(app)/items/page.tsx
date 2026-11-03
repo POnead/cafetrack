@@ -214,7 +214,6 @@ export default function ItemsPage() {
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({ ...EMPTY_FORM });
   const [correctionReason, setCorrectionReason] = useState("");
-  const [approvalCode, setApprovalCode] = useState("");
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -406,7 +405,6 @@ export default function ItemsPage() {
     setCreating(false);
     setEditing(null);
     setCorrectionReason("");
-    setApprovalCode("");
     setFormError(null);
   }
 
@@ -494,7 +492,6 @@ export default function ItemsPage() {
         target_days: targetDays,
         unit_price: unitPrice,
         ...(quantityChanged ? { correction_reason: correctionReason.trim() } : {}),
-        ...(approvalCode.trim() ? { approval_code: approvalCode.trim() } : {}),
       };
 
       const res = await fetch(editing ? `/api/items/${editing.id}` : "/api/items", {
@@ -516,9 +513,7 @@ export default function ItemsPage() {
             : "Item updated"
           : data.pending_approval
             ? `Submitted for approval — SKU ${data.item.sku}. An admin approves it before it can be used.`
-            : data.message?.includes("via your code")
-              ? data.message
-              : `Item created — SKU ${data.item.sku}`,
+            : `Item created — SKU ${data.item.sku}`,
         tone: data.pending_approval || data.pending_change ? "info" : "success",
       });
       closeForm();
@@ -1488,24 +1483,6 @@ export default function ItemsPage() {
               encoded in the printed barcode label.
             </p>
           )}
-
-          <div>
-            <label className="label" htmlFor="item-approval-code">
-              Approval code (optional)
-            </label>
-            <input
-              id="item-approval-code"
-              className="input font-mono"
-              value={approvalCode}
-              onChange={(e) => setApprovalCode(e.target.value)}
-              placeholder="Enter your code to skip admin review"
-              maxLength={32}
-            />
-            <p className="mt-1 text-[11px] text-cocoa-400">
-              If an admin gave you a code, enter it here — your item or edit is
-              approved immediately. Without it, it goes to the admin for review.
-            </p>
-          </div>
 
           {formError && (
             <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">

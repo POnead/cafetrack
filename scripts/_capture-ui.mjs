@@ -423,7 +423,13 @@ async function captureIdEnrollment(browser, adminState, size) {
   await context.close();
 }
 
-async function captureActiveIdEnrollment(browser, adminState, size, facing = "rear") {
+async function captureActiveIdEnrollment(
+  browser,
+  adminState,
+  size,
+  facing = "rear",
+  replacingExistingId = false
+) {
   const context = await browser.newContext({
     viewport: size === "desktop" ? DESKTOP : PHONE,
     storageState: adminState,
@@ -431,11 +437,30 @@ async function captureActiveIdEnrollment(browser, adminState, size, facing = "re
   await installFakeCamera(context, { idCard: true, facing });
   const page = await context.newPage();
   observe(page, `admin-id-enrollment-active-${size}`);
+  if (replacingExistingId) {
+    await page.route("**/api/users", async (route) => {
+      const response = await route.fetch();
+      const data = await response.json();
+      const staff = (data.users ?? []).find((user) => user.username === "barista1");
+      if (staff) {
+        staff.id_doc_type = "philsys";
+        staff.verification_status = "verified";
+      }
+      await route.fulfill({ response, body: JSON.stringify(data) });
+    });
+  }
   if (!(await openStaffDetails(page))) {
     await context.close();
     return;
   }
-  await page.getByRole("button", { name: /^(verify|replace) id$/i }).click();
+  const openIdForm = page.getByRole("button", {
+    name: replacingExistingId ? "Replace ID" : /^(verify|replace) id$/i,
+  });
+  check(
+    `ID enrollment opens the expected ${replacingExistingId ? "replacement" : "verification"} flow (${size})`,
+    await openIdForm.isVisible()
+  );
+  await openIdForm.click();
   await page.getByRole("heading", { name: /Verify ID —/i }).waitFor({ state: "visible" });
   const front = page.locator('section[aria-labelledby="id-front-label"]');
   await front.getByRole("button", { name: "Use camera" }).click();
@@ -458,7 +483,7 @@ async function captureActiveIdEnrollment(browser, adminState, size, facing = "re
     timeout: 30000,
   });
   check(
-    `ID auto-scans a ${facing} camera and pauses for confirmation (${size})`,
+    `ID ${replacingExistingId ? "replacement" : "enrollment"} auto-scans a ${facing} camera and pauses for confirmation (${size})`,
     await front.getByRole("button", { name: "Use this ID", exact: true }).isVisible()
   );
   await screenshot(page, `${size}/admin/id-enrollment-${facing}-capture-review`);
@@ -857,6 +882,7 @@ try {
   await captureIdEnrollment(browser, adminState, "mobile");
   await captureActiveIdEnrollment(browser, adminState, "desktop");
   await captureActiveIdEnrollment(browser, adminState, "mobile");
+  await captureActiveIdEnrollment(browser, adminState, "desktop", "rear", true);
   await captureActiveIdEnrollment(browser, adminState, "desktop", "user");
   await captureActiveIdEnrollment(browser, adminState, "mobile", "unknown");
   await captureFrontCameraIdEnrollment(browser, adminState, "desktop");

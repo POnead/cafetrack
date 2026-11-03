@@ -3,8 +3,14 @@ import { handler, ok, fail, clientIp } from "@/lib/api";
 import { signSession, setSessionCookie, deactivatedMessage } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { getFaceEngine, getSessionMinutes, getFaceMatchThreshold } from "@/lib/settings";
-import { PRIMARY_POSE, parseEmbedding, parseFaceFrames } from "@/lib/face";
+import {
+  PRIMARY_POSE,
+  parseEmbedding,
+  parseFaceEvidence,
+  parseFaceFrames,
+} from "@/lib/face";
 import { evaluatePresentation } from "@/lib/face-samples";
+import { verifyFacePresentation } from "@/lib/face-liveness";
 import { recordFaceVerification } from "@/lib/face-gate";
 import { getIdGate } from "@/lib/id-gate";
 import { isValidFingerprint } from "@/lib/id-verification/card-hash";
@@ -136,10 +142,11 @@ export const POST = handler(async (req: Request) => {
       parsedFrames = { ok: false, error: "That face check could not be read." };
     }
   }
-  const frames = parsedFrames.ok
+  const singleEvidence = parseFaceEvidence(form.get("face_evidence"));
+  const candidateFrames = parsedFrames.ok
     ? parsedFrames.frames
-    : legacyFace
-      ? [{ pose: PRIMARY_POSE, embedding: legacyFace }]
+    : legacyFace && singleEvidence
+      ? [{ pose: PRIMARY_POSE, embedding: legacyFace, evidence: singleEvidence }]
       : null;
 
   /*
@@ -150,7 +157,7 @@ export const POST = handler(async (req: Request) => {
   if (!cardHash) {
     return fail(UNRECOGNISED, 401);
   }
-  if (!frames) {
+  if (!candidateFrames) {
     return fail(UNRECOGNISED, 401);
   }
 
@@ -248,11 +255,30 @@ export const POST = handler(async (req: Request) => {
   // the same engine the gallery is filtered to below.
   const engine = await getFaceEngine();
   const threshold = await getFaceMatchThreshold(engine);
+  const liveness = await verifyFacePresentation(candidateFrames, engine);
+  if (!liveness.ok) {
+    if (liveness.reason === "unavailable") {
+      return fail(
+        "Face liveness is not available on this server. Use your badge and password instead.",
+        503
+      );
+    }
+    await recordLoginAttempt(key, ID_LOGIN_METHOD, false);
+    await audit(
+      null,
+      "LOGIN_FAILED",
+      "user",
+      null,
+      { method: ID_LOGIN_METHOD, reason: "liveness_failed" },
+      { critical: false, ip: clientIp(req), outcome: "failed" }
+    );
+    return fail(UNRECOGNISED, 401);
+  }
 
   const presentation = await evaluatePresentation({
     userId: user.id,
     legacyEmbedding: user.face_embedding ?? null,
-    frames,
+    frames: liveness.frames,
     threshold,
     /*
      * Straight-on only on this route — see the same note in staff/confirm.
@@ -445,4 +471,3 @@ const UNRECOGNISED = "Unrecognised ID, or that ID is not on file for any account
 const NO_MODEL =
   "This server cannot read ID cards yet — its text model has not been downloaded. " +
   "Sign in with your badge and password instead, or ask an administrator to finish setup.";
-

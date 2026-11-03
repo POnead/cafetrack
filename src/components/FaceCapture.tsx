@@ -235,7 +235,7 @@ export default function FaceCapture({ onCapture, currentPhotos, disabled }: Prop
    * one reads a still and needs no loop, and the two must not share frame state
    * or a cancelled camera would leak into an upload.
    */
-  const cameraPoses = useFacePoses(session ?? FACE_POSES);
+  const cameraPoses = useFacePoses(session ?? FACE_POSES, { includeEvidence: false });
 
   /*
    * Automatic capture. Once the camera is live the loop watches for a face, waits

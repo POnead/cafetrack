@@ -12,6 +12,7 @@
     "seed": "node --env-file=.env.local scripts/seed.mjs",
     "setup:face": "node scripts/setup-face-models.mjs",
     "setup:face:sface": "node scripts/setup-face-sface.mjs",
+    "setup:face:liveness": "node scripts/setup-face-liveness.mjs",
     "db:reset": "node scripts/reset-local-db.mjs",
     "db:wipe": "node scripts/wipe-local-data.mjs",
     "db:schema": "node scripts/build-local-schema.mjs",

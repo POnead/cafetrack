@@ -226,6 +226,8 @@ async function rawCall(method, path, rawBody, cookie) {
     baristaNow?.can_manage_items === false,
     hadGrant ? "revoked an inherited grant" : "already unprivileged"
   );
+  check("staff account responses do not expose legacy approval codes",
+    !Object.hasOwn(baristaNow ?? {}, "approval_code"));
   const s = await fetch(BASE + "/api/auth/staff", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ token: barista.qr_token, password: "staff123" }),
@@ -300,97 +302,110 @@ async function rawCall(method, path, rawBody, cookie) {
     await call("DELETE", `/api/items/${pendingId}`, null, A);
   }
 
-  /* ============ 4b. FR-03: the two ways a submission skips the queue ============ */
-  section("FR-03 — approval code and item-management grant");
-
-  // Two independent routes past the approvals queue: a per-person code that is
-  // typed when submitting, and a standing grant on the account. Neither had any
-  // automated coverage, which is why both could sit unreachable on a desktop
-  // without anything failing — the API worked, only the door to it was missing.
-  //
-  // Every check below arranges its own precondition rather than inheriting one.
-  // These are suppression properties: "a submission with no code is held" only
-  // means something if the code really is absent.
+  /* ============ 4b. FR-03: only an explicit grant skips approval ============ */
+  section("FR-03 — admin approval and item-management grant");
 
   const stamp = Date.now().toString(36);
-  const withCode = async (approval_code) => {
-    const res = await call("POST", "/api/items", {
-      name: `Coded ${stamp} ${Math.random().toString(36).slice(2, 7)}`,
-      quantity: 2,
-      unit: "pcs",
-      low_stock_threshold: 1,
-      ...(approval_code ? { approval_code } : {}),
-    }, sc);
-    return res;
-  };
-
-  // --- issuing the code itself ---
-  r = await call("PATCH", `/api/users/${barista.id}`, { regenerate_approval_code: true }, A);
-  check("an approval code can be issued", r.status === 200, `${r.status} ${r.data?.error ?? ""}`);
-  const code1 = r.data?.user?.approval_code;
-  check("it is generated, not invented by the admin", /^CT-[0-9A-F]{6}$/.test(code1 ?? ""), code1 ?? "none");
-
-  r = await call("PATCH", `/api/users/${barista.id}`, { regenerate_approval_code: true }, A);
-  const code2 = r.data?.user?.approval_code;
-  check("reissuing rotates it", Boolean(code2) && code2 !== code1, `${code1} -> ${code2}`);
-
-  // --- a valid code skips the queue ---
-  let coded = await withCode(code2);
-  check("a submission with a valid code is accepted", coded.status === 201, `${coded.status} ${coded.data?.error ?? ""}`);
+  const legacyCode = `CT-LEGACY-${stamp}`;
+  const supplierResult = await call(
+    "POST",
+    "/api/refs/suppliers",
+    { name: `Approval Supplier ${stamp}` },
+    A
+  );
+  const supplierForApproval = supplierResult.data?.item;
   check(
-    "and is active immediately rather than pending",
-    coded.data?.item?.item_status === "active",
-    coded.data?.item?.item_status ?? ""
+    "supplier is available for the queued edit",
+    supplierResult.status === 201 && Boolean(supplierForApproval?.id),
+    `${supplierResult.status} ${supplierResult.data?.error ?? ""}`
+  );
+  const withLegacyCode = () => call("POST", "/api/items", {
+    name: `Legacy Code ${stamp}`,
+    quantity: 2,
+    unit: "pcs",
+    low_stock_threshold: 1,
+    approval_code: legacyCode,
+  }, sc);
+
+  r = await call(
+    "PATCH",
+    `/api/users/${barista.id}`,
+    { regenerate_approval_code: true },
+    A
+  );
+  check(
+    "approval-code management is no longer available",
+    r.status === 400 && r.data?.error === "Nothing to update",
+    `${r.status} ${r.data?.error ?? ""}`
+  );
+
+  // A legacy or caller-supplied code must not let an ungranted staff member
+  // bypass review on either creation or edits.
+  const coded = await withLegacyCode();
+  check(
+    "a legacy code cannot bypass review for a new item",
+    coded.status === 201 && coded.data?.item?.item_status === "pending",
+    `${coded.status} ${coded.data?.item?.item_status ?? coded.data?.error ?? ""}`
   );
   const codedId = coded.data?.item?.id;
   if (codedId) {
-    const listed = await call("GET", "/api/items", null, sc);
-    check("so it is real stock straight away",
-      (listed.data?.items ?? []).some((i) => i.id === codedId));
+    const approved = await call(
+      "POST",
+      "/api/items/review",
+      { id: codedId, decision: "approve" },
+      A
+    );
+    check("admin can approve the legacy-code submission", approved.status === 200);
+
+    const edit = await call(
+      "PATCH",
+      `/api/items/${codedId}`,
+      {
+        name: `Legacy Edit ${stamp}`,
+        supplier_id: supplierForApproval?.id,
+        approval_code: legacyCode,
+      },
+      sc
+    );
+    check(
+      "a legacy code cannot bypass review for an edit",
+      edit.status === 201 && edit.data?.pending_change === true,
+      `${edit.status} ${edit.data?.message ?? edit.data?.error ?? ""}`
+    );
+    const unchanged = await call("GET", `/api/items/${codedId}`, null, sc);
+    check(
+      "the unapproved edit does not alter the item",
+      unchanged.data?.item?.name === `Legacy Code ${stamp}`,
+      unchanged.data?.item?.name ?? ""
+    );
+    if (edit.data?.request?.id && supplierForApproval?.id) {
+      const queue = await call("GET", "/api/change-requests?status=pending", null, A);
+      const queuedRequest = queue.data?.requests?.find(
+        (request) => request.id === edit.data.request.id
+      );
+      check(
+        "the queued supplier is shown in the admin review request",
+        queuedRequest?.supplier_id === supplierForApproval.id &&
+          queuedRequest?.supplier?.name === supplierForApproval.name
+      );
+      const decision = await call(
+        "POST",
+        "/api/change-requests/review",
+        { id: edit.data.request.id, decision: "approve" },
+        A
+      );
+      check("admin can approve the supplier change", decision.status === 200);
+      const supplierApplied = await call("GET", `/api/items/${codedId}`, null, A);
+      check(
+        "approval applies the requested supplier to the item",
+        supplierApplied.data?.item?.supplier_id === supplierForApproval.id,
+        supplierApplied.data?.item?.supplier_id ?? "no supplier"
+      );
+    }
     await call("DELETE", `/api/items/${codedId}`, null, A);
   }
-
-  // --- a wrong code does not skip it ---
-  coded = await withCode("CT-DEADBE");
-  check(
-    "a wrong code falls back to the queue rather than failing",
-    coded.status === 201 && coded.data?.item?.item_status === "pending",
-    `${coded.status} ${coded.data?.item?.item_status ?? coded.data?.error ?? ""}`
-  );
-  if (coded.data?.item?.id) await call("DELETE", `/api/items/${coded.data.item.id}`, null, A);
-
-  // --- a malformed code is still just a code ---
-  coded = await withCode("not-a-code");
-  check(
-    "a malformed code is treated as no code, not as an error",
-    coded.status === 201 && coded.data?.item?.item_status === "pending",
-    `${coded.status} ${coded.data?.item?.item_status ?? coded.data?.error ?? ""}`
-  );
-  if (coded.data?.item?.id) await call("DELETE", `/api/items/${coded.data.item.id}`, null, A);
-
-  // --- the code is per-person ---
-  const other = await call("POST", "/api/users", {
-    username: `codeonly${stamp}`, full_name: "Code Only", password: "password1",
-  }, A);
-  const otherId = other.data?.user?.id;
-  const otherToken = other.data?.user?.qr_token;
-  if (otherId && otherToken) {
-    await call("PATCH", `/api/users/${otherId}`, { approval_code: code2 }, A);
-    const otherSession = await fetch(BASE + "/api/auth/staff", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token: otherToken, password: "password1" }),
-    });
-    const osc = (otherSession.headers.getSetCookie?.() ?? []).map((c) => c.split(";")[0]).join("; ");
-    const theirs = await call("POST", "/api/items", {
-      name: `Borrowed ${stamp}`, quantity: 1, unit: "pcs", low_stock_threshold: 1,
-      approval_code: code2,
-    }, osc);
-    check(
-      "one person's code does not work for another",
-      theirs.status === 201 && theirs.data?.item?.item_status === "pending",
-      `${theirs.data?.item?.item_status ?? theirs.data?.error ?? theirs.status}`
-    );
-    if (theirs.data?.item?.id) await call("DELETE", `/api/items/${theirs.data.item.id}`, null, A);
+  if (supplierForApproval?.id) {
+    await call("DELETE", `/api/refs/suppliers/${supplierForApproval.id}`, null, A);
   }
 
   // --- the standing grant ---
@@ -398,15 +413,19 @@ async function rawCall(method, path, rawBody, cookie) {
   check("item-management can be granted", r.status === 200 && r.data?.user?.can_manage_items === true,
     `${r.status} ${r.data?.error ?? ""}`);
 
-  const granted = await withCode(null);
+  const granted = await call("POST", "/api/items", {
+    name: `Granted ${stamp}`,
+    quantity: 2,
+    unit: "pcs",
+    low_stock_threshold: 1,
+  }, sc);
   check("a granted submission is accepted", granted.status === 201, `${granted.status} ${granted.data?.error ?? ""}`);
-  check("and needs no code at all",
+  check("and is immediately active",
     granted.data?.item?.item_status === "active", granted.data?.item?.item_status ?? "");
   const grantedId = granted.data?.item?.id;
   if (grantedId) {
-    // An edit by a granted user must apply rather than queue — that is the
-    // difference between the grant and the code, and it is easy to get wrong by
-    // only fixing the create path.
+    // An edit by a granted user must apply rather than queue, and it is easy to
+    // get wrong by only fixing the create path.
     const edited = await call("PATCH", `/api/items/${grantedId}`, { name: `Granted Edit ${stamp}` }, sc);
     check("a granted edit applies immediately",
       edited.status === 200 && edited.data?.pending_change !== true,
@@ -420,48 +439,14 @@ async function rawCall(method, path, rawBody, cookie) {
   // --- revoking the grant puts them back in the queue ---
   r = await call("PATCH", `/api/users/${barista.id}`, { can_manage_items: false }, A);
   check("the grant can be revoked", r.status === 200 && r.data?.user?.can_manage_items === false, `${r.status}`);
-  const regranted = await withCode(null);
+  const requeued = await withLegacyCode();
   check("a revoked grant queues submissions again",
-    regranted.status === 201 && regranted.data?.item?.item_status === "pending",
-    regranted.data?.item?.item_status ?? "");
-  if (regranted.data?.item?.id) await call("DELETE", `/api/items/${regranted.data.item.id}`, null, A);
-
-  // --- revoking the code ---
-  r = await call("PATCH", `/api/users/${barista.id}`, { approval_code: null }, A);
-  check("the approval code can be revoked", r.status === 200 && !r.data?.user?.approval_code, `${r.status}`);
-  const recoded = await withCode(code2);
-  check("a revoked code no longer skips the queue",
-    recoded.status === 201 && recoded.data?.item?.item_status === "pending",
-    recoded.data?.item?.item_status ?? "");
-  if (recoded.data?.item?.id) await call("DELETE", `/api/items/${recoded.data.item.id}`, null, A);
-
-  // --- a deactivated account's code is dead ---
-  if (otherId) {
-    // Re-activation carries the admin's password; the route refuses without it.
-    const revived = await call(
-      "PATCH",
-      `/api/users/${otherId}`,
-      { is_active: true, confirm_password: "admin123" },
-      A
-    );
-    check("the second account is active again", revived.status === 200, `${revived.status} ${revived.data?.error ?? ""}`);
-    await call(
-        "PATCH",
-        `/api/users/${otherId}`,
-        { is_active: false, deactivation_reason: "Edge test: parked" },
-        A
-      );
-    const deadSession = await fetch(BASE + "/api/auth/staff", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token: otherToken, password: "password1" }),
-    });
-    check("a deactivated account cannot sign in to use its code anyway",
-      deadSession.status === 401 || deadSession.status === 403, `${deadSession.status}`);
-    await call("DELETE", `/api/users/${otherId}`, null, A);
-  }
+    requeued.status === 201 && requeued.data?.item?.item_status === "pending",
+    requeued.data?.item?.item_status ?? "");
+  if (requeued.data?.item?.id) await call("DELETE", `/api/items/${requeued.data.item.id}`, null, A);
 
   // Leave barista1 as found, so a later section is not surprised.
-  await call("PATCH", `/api/users/${barista.id}`, { can_manage_items: false, approval_code: null }, A);
+  await call("PATCH", `/api/users/${barista.id}`, { can_manage_items: false }, A);
 
   r = await call("POST", "/api/users", { username: "hack", full_name: "Hack", password: "password1" }, sc);
   check("staff blocked from creating users", r.status === 403, `${r.status}`);

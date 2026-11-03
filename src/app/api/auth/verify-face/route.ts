@@ -2,8 +2,9 @@ import { db } from "@/lib/supabase";
 import { handler, ok, fail, readBody, clientIp } from "@/lib/api";
 import { getSession } from "@/lib/auth";
 import { audit } from "@/lib/audit";
-import { PRIMARY_POSE, parseEmbedding, parseFaceFrames } from "@/lib/face";
+import { PRIMARY_POSE, parseEmbedding, parseFaceEvidence, parseFaceFrames } from "@/lib/face";
 import { evaluatePresentation } from "@/lib/face-samples";
+import { verifyFacePresentation } from "@/lib/face-liveness";
 import { getFaceEngine, getFaceMatchThreshold, getFaceRequireProfileAngles } from "@/lib/settings";
 import { getFaceStatus, recordFaceVerification } from "@/lib/face-gate";
 import {
@@ -112,13 +113,14 @@ export const POST = handler(async (req: Request) => {
    */
   const legacy = parseEmbedding(body.embedding);
   const parsedFrames = parseFaceFrames(body.face_frames);
-  const frames = parsedFrames.ok
+  const singleEvidence = parseFaceEvidence(body.face_evidence);
+  const candidateFrames = parsedFrames.ok
     ? parsedFrames.frames
-    : legacy
-      ? [{ pose: PRIMARY_POSE, embedding: legacy }]
+    : legacy && singleEvidence
+      ? [{ pose: PRIMARY_POSE, embedding: legacy, evidence: singleEvidence }]
       : null;
 
-  if (!frames) {
+  if (!candidateFrames) {
     // A malformed vector is a bad request rather than a failed identity check,
     // but it is still recorded as a denial: a client posting garbage here
     // repeatedly is the signature of someone probing the endpoint.
@@ -148,6 +150,25 @@ export const POST = handler(async (req: Request) => {
   const engine = await getFaceEngine();
   const threshold = await getFaceMatchThreshold(engine);
   const requireProfileAngles = await getFaceRequireProfileAngles();
+  const liveness = await verifyFacePresentation(candidateFrames, engine);
+  if (!liveness.ok) {
+    if (liveness.reason === "unavailable") {
+      return fail(
+        "Face liveness is not available on this server. Use your password or ask your manager for an override.",
+        503
+      );
+    }
+    await recordFaceAttempt(key, false);
+    await audit(
+      session,
+      "FACE_VERIFY",
+      "user",
+      session.id,
+      { method: "camera", result: "liveness_failed" },
+      { ip: clientIp(req), outcome: "denied", critical: false }
+    );
+    return fail("That face could not be verified as live. Try again, or ask your manager for an override.");
+  }
 
   /*
    * Every angle this account owes, against the samples it holds.
@@ -160,7 +181,7 @@ export const POST = handler(async (req: Request) => {
   const presentation = await evaluatePresentation({
     userId: session.id,
     legacyEmbedding: row?.face_embedding ?? null,
-    frames,
+    frames: liveness.frames,
     threshold,
     requireProfileAngles,
     engine,
@@ -220,7 +241,7 @@ export const POST = handler(async (req: Request) => {
       method: "camera",
       result: "matched",
       duty_hours: dutyHours,
-      angles_presented: frames.map((f) => f.pose),
+      angles_presented: liveness.frames.map((f) => f.pose),
     },
     { ip: clientIp(req), critical: false }
   );
@@ -234,4 +255,3 @@ export const POST = handler(async (req: Request) => {
     nextDueAt: new Date(Date.now() + dutyHours * 3_600_000).toISOString(),
   });
 });
-

@@ -11,10 +11,9 @@
  * Deliberately *not* a reuse of `FaceCapture`. That component is built for an
  * admin enrolling a colleague: it explains that the photo will be stored, shows
  * what was accepted, and talks about saving. None of that is true here — this
- * photo is never uploaded, only 128 floats are sent, and nothing is kept. The
- * matching itself is shared (lib/face.ts) and the camera problems are shared
- * (lib/face-diagnostics.ts); the wording is not, because the two situations are
- * genuinely different.
+ * camera evidence is sent to the local server for transient liveness checking
+ * and discarded; the matching and camera problems are shared, while the wording
+ * is not, because enrolment and sign-in are genuinely different.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -24,7 +23,7 @@ import {
   openCamera,
   permissionHelp,
 } from "@/lib/face-client";
-import { FACE_POSES, POSE_COPY } from "@/lib/face";
+import { POSE_COPY } from "@/lib/face";
 import { framesBody, useFacePoses } from "@/lib/use-face-poses";
 import { useAutoFaceCapture } from "@/lib/use-auto-face-capture";
 import FaceScanOverlay from "@/components/FaceScanOverlay";
@@ -41,7 +40,6 @@ type Phase =
   | "checking-models"
   | "loading-models"
   | "camera"
-  | "reading"
   | "checking"
   | "failed";
 
@@ -60,7 +58,6 @@ export default function FaceSignIn({ identifier, onSignedIn, onCancel }: Props) 
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const shotRef = useRef<HTMLImageElement | null>(null);
   const [modelsPresent, setModelsPresent] = useState<boolean | null>(null);
   const [progress, setProgress] = useState({ loaded: 0, total: 0 });
 
@@ -223,70 +220,7 @@ export default function FaceSignIn({ identifier, onSignedIn, onCancel }: Props) 
     onComplete: (frames) => void submit(frames),
   });
 
-  /**
-   * The insecure-origin path: the OS camera app hands back a file.
-   *
-   * Not a nicety. A phone on the cafe Wi-Fi is on plain http, the browser refuses
-   * a camera there before any script runs, and there is no library that can lift
-   * that. This input is handled by the operating system, so it works exactly
-   * where `getUserMedia` cannot — which on a real cafe floor is most of the time.
-   */
-  const onFile = useCallback(
-    async (file: File | undefined) => {
-      if (!file) return;
-      setMessage(null);
-      /*
-       * Same order as the camera: weights first. Without this the person picks a
-       * photo, sits through a silent ~7MB download, and only then finds out
-       * whether the face in it could be read at all.
-       */
-      if (!(await warmUp())) return;
-
-      try {
-        const dataUrl = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onerror = () => reject(new Error("unreadable"));
-          reader.onload = () => resolve(String(reader.result ?? ""));
-          reader.readAsDataURL(file);
-        });
-
-        const img = new Image();
-        img.src = dataUrl;
-        await img.decode().catch(() => {});
-        if (img.naturalWidth === 0) throw new Error("unreadable");
-        shotRef.current = img;
-
-        setPhase("reading");
-        const result = await poses.read(img);
-
-        if (result.outcome === "retry") {
-          setPhase("failed");
-          setMessage(result.message);
-          return;
-        }
-
-        if (result.outcome === "complete") {
-          await submit(result.frames);
-          return;
-        }
-
-        // One angle read; the file picker has to be used again for the next one.
-        const missing = FACE_POSES.find((pose) => !result.frames.some((f) => f.pose === pose));
-        setPhase("failed");
-        setMessage(
-          missing
-            ? `Got that one. Now choose the ${POSE_COPY[missing].short} photo.`
-            : "Got that one."
-        );
-      } catch {
-        setPhase("failed");
-        setMessage("That file could not be read as an image.");
-      }
-    },
-    [submit, warmUp, poses]
-  );
-
-  const working = phase === "reading" || phase === "checking";
+  const working = phase === "checking";
   const busyStarting = phase === "loading-models" || phase === "checking-models";
   const pct =
     progress.total > 0 ? Math.min(100, Math.round((progress.loaded / progress.total) * 100)) : 0;
@@ -361,8 +295,8 @@ export default function FaceSignIn({ identifier, onSignedIn, onCancel }: Props) 
           <p className="font-semibold">The face model files are not installed.</p>
           <p className="mt-1">
             Run <code className="font-mono">npm run setup:face</code> and reload.
-            Without them no camera can recognise a face. You can still use
-            &ldquo;Take a photo instead&rdquo; once they are installed.
+            Without them no camera can recognise a face. Use your password or
+            badge instead until the models are installed.
           </p>
         </div>
       )}
@@ -401,6 +335,11 @@ export default function FaceSignIn({ identifier, onSignedIn, onCancel }: Props) 
           top of hair to chin.
         </p>
       )}
+
+      <p className="text-center text-xs text-cocoa-500">
+        A few camera frames are sent to this server for a live-face check. They
+        are processed temporarily and are not saved.
+      </p>
 
       {blocked && (
         <div className="rounded-xl bg-amber-50 px-3.5 py-3 text-sm text-cocoa-700">
@@ -486,27 +425,9 @@ export default function FaceSignIn({ identifier, onSignedIn, onCancel }: Props) 
 
       {working && (
         <p className="text-center text-sm text-cocoa-500">
-          {phase === "reading" ? "Reading your face…" : "Checking…"}
+          Checking…
         </p>
       )}
-
-      {/* Always available, and never hidden. On a phone over plain http this is
-          the only camera there is, and on a till with no webcam it is the whole
-          point. */}
-      <label className="btn-ghost flex w-full cursor-pointer items-center justify-center">
-        Take a photo instead
-        <input
-          type="file"
-          accept="image/jpeg,image/png,image/webp"
-          capture="user"
-          className="sr-only"
-          disabled={working}
-          onChange={(e) => {
-            void onFile(e.target.files?.[0]);
-            e.target.value = "";
-          }}
-        />
-      </label>
 
       <button
         type="button"

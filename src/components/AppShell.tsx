@@ -19,6 +19,12 @@ import type { SessionUser } from "@/lib/auth";
  * unattended.
  */
 
+type FaceGateStatus = {
+  face?: {
+    required?: boolean;
+  };
+};
+
 function initials(name: string) {
   return name
     .split(" ")
@@ -66,7 +72,7 @@ export function AppShell({
      * The pathname guard matters because replace() while already on /verify
      * would re-run that page's own status load on every ping.
      */
-    const honourFace = (payload: any) => {
+    const honourFace = (payload: FaceGateStatus | null | undefined) => {
       if (payload?.face?.required && window.location.pathname !== "/verify") {
         router.replace("/verify");
       }

@@ -316,6 +316,7 @@ export default function ApprovalsPage() {
                 {r.name !== null && <li>Name → {r.name}</li>}
                 {r.category_id !== null && <li>Category changed</li>}
                 {r.location_id !== null && <li>Storage changed</li>}
+                {r.supplier_id !== null && <li>Supplier → {r.supplier?.name ?? "changed"}</li>}
                 {r.physical_form !== null && <li>Form → {r.physical_form}</li>}
                 {r.unit !== null && <li>Unit → {r.unit}</li>}
                 {r.units_per_box !== null && <li>Units per box → {r.units_per_box}</li>}

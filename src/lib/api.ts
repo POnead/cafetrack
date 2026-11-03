@@ -102,10 +102,12 @@ function tooLarge(maxBytes: number) {
  * Returns `{}` for an empty body so a route's own required-field checks produce
  * the useful message ("Item name is required") instead of a generic one.
  */
+type JsonObject = Record<string, unknown>;
+
 export async function readBody(
   req: Request,
   maxBytes: number = MAX_BODY_BYTES
-): Promise<any> {
+): Promise<JsonObject> {
   const declared = Number(req.headers.get("content-length") ?? "");
   if (Number.isFinite(declared) && declared > maxBytes) throw tooLarge(maxBytes);
 
@@ -132,11 +134,13 @@ export async function readBody(
     throw new HttpError(400, "Request body must be valid JSON");
   }
 
-  // A bare `null`, number or string parses fine but has no fields; treat those
-  // as an empty object so property access below cannot blow up.
-  if (parsed === null || typeof parsed !== "object") return {};
+  // A bare `null`, number, string, or array parses fine but has no fields; treat
+  // those as an empty object so property access below cannot blow up.
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {};
+  }
 
-  return parsed;
+  return parsed as JsonObject;
 }
 
 /**
@@ -170,7 +174,8 @@ export function clientIp(req: Request): string | null {
   if (real) return tidy(real);
 
   // Node exposes the socket address on a non-standard property.
-  const socket = (req as any).socket?.remoteAddress;
+  const socket = (req as Request & { socket?: { remoteAddress?: string } }).socket
+    ?.remoteAddress;
   if (typeof socket === "string" && socket) return tidy(socket);
 
   return null;
@@ -185,8 +190,10 @@ export function clientIp(req: Request): string | null {
  * request — the health endpoint already refuses to do that for the same reason.
  * The id is what lets an owner match a user's screenshot to the server log.
  */
-export function handler(fn: (...args: any[]) => Promise<Response>) {
-  return async (...args: any[]) => {
+export function handler<T extends unknown[]>(
+  fn: (...args: T) => Promise<Response>
+) {
+  return async (...args: T): Promise<Response> => {
     const requestId = randomUUID();
 
     const tag = (res: Response) => {
@@ -198,15 +205,19 @@ export function handler(fn: (...args: any[]) => Promise<Response>) {
       // Stamped here as well as in ok/fail, so a route that returns a
       // NextResponse of its own still declares which database answered.
       return tag(await fn(...args));
-    } catch (e: any) {
+    } catch (error: unknown) {
       // Framework control-flow signal (route read cookies during prerender) —
       // re-throw so Next.js can mark the route dynamic instead of us
       // swallowing it and reporting a bogus 500.
-      if (e?.digest === "DYNAMIC_SERVER_USAGE" || e?.name === "DynamicServerError") {
-        throw e;
+      const asDynamic = error as { digest?: string; name?: string };
+      if (
+        asDynamic?.digest === "DYNAMIC_SERVER_USAGE" ||
+        asDynamic?.name === "DynamicServerError"
+      ) {
+        throw error;
       }
-      if (e instanceof HttpError) return tag(fail(e.message, e.status));
-      console.error(`[api ${requestId}] unhandled error:`, e);
+      if (error instanceof HttpError) return tag(fail(error.message, error.status));
+      console.error(`[api ${requestId}] unhandled error:`, error);
       return tag(
         fail("Internal server error", 500, { request_id: requestId })
       );

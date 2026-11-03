@@ -1,7 +1,7 @@
 import { db } from "@/lib/supabase";
 import { handler, ok, fail, badId, readBody, clientIp } from "@/lib/api";
 import { requireUser } from "@/lib/auth";
-import { canManageItems, approvalCodeMatches } from "@/lib/permissions";
+import { canManageItems } from "@/lib/permissions";
 import { audit } from "@/lib/audit";
 import { eventBus, Events } from "@/lib/events";
 import { memoClear } from "@/lib/ttl-cache";
@@ -193,57 +193,53 @@ export const PATCH = handler(
     // until an admin decides; patch was already validated above, so the
     // request carries the same rules as a direct edit.
     if (!canEdit) {
-      const viaCode = await approvalCodeMatches(user, body.approval_code);
-      if (!viaCode) {
-        const proposal: Record<string, unknown> = {
-          item_id: id,
-          requested_by: user.id,
-          base_version: before.version,
-        };
-        for (const key of [
-          "name",
-          "category_id",
-          "location_id",
-          "supplier_id",
-          "physical_form",
-          "unit",
-          "units_per_box",
-          "unit_price",
-          "quantity",
-          "low_stock_threshold",
-          "expiration_date",
-        ] as const) {
-          if (body[key] !== undefined) proposal[key] = patch[key];
-        }
-        if (quantityCorrectionReason) proposal.correction_reason = quantityCorrectionReason;
-
-        const { data, error } = await db()
-          .from("item_change_requests")
-          .insert(proposal)
-          .select()
-          .single();
-
-        if (error) return fail(error.message, 500);
-
-        await audit(user, "ITEM_CHANGE_REQUEST", "item", id, {
-          sku: before.sku,
-          name: before.name,
-          request_id: data.id,
-        }, { ip: clientIp(req) });
-
-        // The item itself did not change, but the approvals queue did.
-        eventBus.emit(Events.ITEMS_CHANGED, {
-          action: "change-requested",
-          sku: before.sku,
-        });
-
-        return ok({
-          pending_change: true,
-          request: data,
-          message: "Edit submitted for approval — an admin will review it before it takes effect.",
-        }, 201);
+      const proposal: Record<string, unknown> = {
+        item_id: id,
+        requested_by: user.id,
+        base_version: before.version,
+      };
+      for (const key of [
+        "name",
+        "category_id",
+        "location_id",
+        "supplier_id",
+        "physical_form",
+        "unit",
+        "units_per_box",
+        "unit_price",
+        "quantity",
+        "low_stock_threshold",
+        "expiration_date",
+      ] as const) {
+        if (body[key] !== undefined) proposal[key] = patch[key];
       }
-      // With a valid code, fall through and apply the edit directly.
+      if (quantityCorrectionReason) proposal.correction_reason = quantityCorrectionReason;
+
+      const { data, error } = await db()
+        .from("item_change_requests")
+        .insert(proposal)
+        .select()
+        .single();
+
+      if (error) return fail(error.message, 500);
+
+      await audit(user, "ITEM_CHANGE_REQUEST", "item", id, {
+        sku: before.sku,
+        name: before.name,
+        request_id: data.id,
+      }, { ip: clientIp(req) });
+
+      // The item itself did not change, but the approvals queue did.
+      eventBus.emit(Events.ITEMS_CHANGED, {
+        action: "change-requested",
+        sku: before.sku,
+      });
+
+      return ok({
+        pending_change: true,
+        request: data,
+        message: "Edit submitted for approval — an admin will review it before it takes effect.",
+      }, 201);
     }
 
     const { data, error } = await db()

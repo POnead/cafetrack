@@ -105,7 +105,11 @@ async function confirm(ticket, extra = {}) {
   const res = await fetch(`${BASE}/api/auth/staff/confirm`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ticket, ...extra }),
+    body: JSON.stringify({
+      ticket,
+      face_evidence: "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////",
+      ...extra,
+    }),
   });
   return { res, body: await res.json(), cookie: cookieOf(res) };
 }

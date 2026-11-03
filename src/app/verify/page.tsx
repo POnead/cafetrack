@@ -16,9 +16,8 @@
  *              own face and needs to be told it is being read rather than
  *              abandoned.
  *
- * The comparison itself happens on the server. Only 128 floats travel, never a
- * photograph, and the answer is never a score — see the route. This page's whole
- * job is to get one good reading and hand it over.
+ * The comparison and liveness check happen on the server. A small, transient
+ * camera frame accompanies each embedding and is never stored.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -61,7 +60,6 @@ export default function VerifyPage() {
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const shotRef = useRef<HTMLImageElement | null>(null);
 
   /*
    * Whether the camera is actually running and should be on screen.
@@ -153,8 +151,7 @@ export default function VerifyPage() {
 
         const lib = await faceLib();
         if (!lib.cameraAvailable()) {
-          // Plain http on the LAN. The in-page camera is unavailable, but the
-          // native camera app through a capture input still works.
+          // Plain http on the LAN cannot provide trusted live camera evidence.
           setPhase("capture");
           return;
         }
@@ -230,7 +227,7 @@ export default function VerifyPage() {
       setMessage(
         problem === "permission-denied" && lib.permissionHelp("denied")
           ? lib.permissionHelp("denied")
-          : `${message} ${help ?? ""} You can take a photo instead with the button below.`
+          : `${message} ${help ?? ""} A live camera is required for this check. Use a secure address or ask your manager for an override.`
       );
     }
   }, []);
@@ -280,62 +277,6 @@ export default function VerifyPage() {
     [router, stopCamera]
   );
 
-  /** Read one image (the file-upload path), and submit once the set is complete. */
-  const verify = useCallback(
-    async (source: HTMLVideoElement | HTMLImageElement) => {
-      setPhase("verifying");
-      setMessage(null);
-      try {
-        const result = await poses.read(source);
-
-        if (result.outcome === "retry") {
-          setPhase("capture");
-          setMessage(result.message);
-          return;
-        }
-
-        if (result.outcome !== "complete") {
-          // Accepted, and there are more angles to ask for.
-          setPhase("capture");
-          return;
-        }
-
-        await submitFrames(result.frames);
-      } catch {
-        setPhase("capture");
-        setMessage("That could not be checked. Try again.");
-      }
-    },
-    [poses, submitFrames]
-  );
-
-  /** The insecure-origin path: the OS camera app hands back a file. */
-  const onFile = useCallback(
-    async (file: File | undefined) => {
-      if (!file) return;
-      setMessage(null);
-      try {
-        const lib = await faceLib();
-        const dataUrl = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onerror = () => reject(new Error("unreadable"));
-          reader.onload = () => resolve(String(reader.result ?? ""));
-          reader.readAsDataURL(file);
-        });
-        const img = new Image();
-        img.src = dataUrl;
-        await img.decode().catch(() => {});
-        if (img.naturalWidth === 0) throw new Error("unreadable");
-        shotRef.current = img;
-        await verify(img);
-      } catch {
-        setPhase("capture");
-        setMessage("That file could not be read as an image.");
-      }
-    },
-    [verify]
-  );
-
   /*
    * Automatic capture. Once the camera is live the loop watches for a face,
    * waits for the head to reach the angle being asked for, reads it, and moves
@@ -345,10 +286,7 @@ export default function VerifyPage() {
     sequence: poses,
     videoRef,
     /*
-     * Only while the live camera is the thing being used. A file picked through
-     * "Take a photo instead" moves the screen to `verifying`, which stops the
-     * loop — otherwise the camera could finish its own presentation while the
-     * file is still being read, and the two would submit against each other.
+     * Only while the live camera is running and this check is accepting frames.
      */
     active: cameraOn && phase === "capture",
     onComplete: (frames) => void submitFrames(frames),
@@ -528,28 +466,10 @@ export default function VerifyPage() {
         angle, the nudge and the count on the preview itself.
       */}
 
-      {/*
-        Always available. On an address that cannot use getUserMedia this is the
-        only way to get a camera at all — it opens the device's own camera app —
-        and on a till with no camera it is the whole point. It is never hidden,
-        because the people who need it most are the ones a failed camera leaves
-        stranded.
-      */}
-      <div className="mt-4 space-y-2 rounded-2xl border border-cream-200 bg-white p-3.5">
-        <label className="btn-ghost flex min-h-12 w-full cursor-pointer items-center justify-center">
-          Take a photo instead
-          <input
-            type="file"
-            accept="image/jpeg,image/png,image/webp"
-            capture="user"
-            className="sr-only"
-            onChange={(e) => {
-              void onFile(e.target.files?.[0]);
-              e.target.value = "";
-            }}
-          />
-        </label>
-      </div>
+      <p className="mt-4 text-center text-xs leading-relaxed text-cocoa-500">
+        This check requires a live camera. Camera frames are checked temporarily
+        on this server and are not saved.
+      </p>
 
       {message && (
         <div

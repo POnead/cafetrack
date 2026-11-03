@@ -7,8 +7,9 @@ import {
 } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { getSessionMinutes, getFaceEngine, getFaceLoginEnabled, getFaceMatchThreshold, getFaceRequireProfileAngles } from "@/lib/settings";
-import { PRIMARY_POSE, parseEmbedding, parseFaceFrames } from "@/lib/face";
+import { PRIMARY_POSE, parseEmbedding, parseFaceEvidence, parseFaceFrames } from "@/lib/face";
 import { evaluatePresentation } from "@/lib/face-samples";
+import { verifyFacePresentation } from "@/lib/face-liveness";
 import { recordFaceVerification } from "@/lib/face-gate";
 import { getIdGate } from "@/lib/id-gate";
 import {
@@ -163,13 +164,14 @@ export const POST = handler(async (req: Request) => {
    */
   const legacy = parseEmbedding(body.embedding);
   const parsedFrames = parseFaceFrames(body.face_frames);
-  const frames = parsedFrames.ok
+  const singleEvidence = parseFaceEvidence(body.face_evidence);
+  const candidateFrames = parsedFrames.ok
     ? parsedFrames.frames
-    : legacy
-      ? [{ pose: PRIMARY_POSE, embedding: legacy }]
+    : legacy && singleEvidence
+      ? [{ pose: PRIMARY_POSE, embedding: legacy, evidence: singleEvidence }]
       : null;
 
-  if (!frames) {
+  if (!candidateFrames) {
     await recordLoginAttempt(key, FACE_LOGIN_METHOD, false);
     await audit(
       null,
@@ -181,6 +183,30 @@ export const POST = handler(async (req: Request) => {
     );
     return fail(UNRECOGNISED, 401);
   }
+
+  const engine = await getFaceEngine();
+  const threshold = await getFaceMatchThreshold(engine);
+  const liveness = await verifyFacePresentation(candidateFrames, engine);
+  if (!liveness.ok) {
+    if (liveness.reason === "unavailable") {
+      return fail(
+        "Face liveness is not available on this server. Use your password or scan your badge.",
+        503
+      );
+    }
+
+    await recordLoginAttempt(key, FACE_LOGIN_METHOD, false);
+    await audit(
+      null,
+      "LOGIN_FAILED",
+      "user",
+      null,
+      { method: FACE_LOGIN_METHOD, reason: "liveness_failed" },
+      { critical: false, ip: clientIp(req), outcome: "failed" }
+    );
+    return fail(UNRECOGNISED, 401);
+  }
+  const frames = liveness.frames;
 
   const { data: user, error: lookupError } = await db()
     .from("users")
@@ -213,11 +239,6 @@ export const POST = handler(async (req: Request) => {
    * exist. Matching first means this branch is only reachable by someone who has
    * already proved they are that person.
    */
-  // Read the engine once: the threshold is calibrated per engine, so it has to be
-  // the same engine the gallery is filtered to below.
-  const engine = await getFaceEngine();
-  const threshold = await getFaceMatchThreshold(engine);
-
   /*
    * Matched against every angle on the account, after the lookup and before
    * anything about the account's state is revealed — see the note above about

@@ -149,7 +149,11 @@ async function staffSession(staff, embedding) {
   const step2 = await fetch(`${BASE}/api/auth/staff/confirm`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ticket, face_embedding: embedding }),
+    body: JSON.stringify({
+      ticket,
+      face_embedding: embedding,
+      face_evidence: "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////",
+    }),
   });
   const cookie = cookieOf(step2);
   if (!cookie.includes("cafetrack_session")) {
@@ -304,4 +308,3 @@ try {
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
-

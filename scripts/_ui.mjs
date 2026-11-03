@@ -398,12 +398,9 @@ const staffUser =
   // can do in one they should be able to do in the other.
   //
   // This exists because that was not true and nothing noticed. The item-management
-  // grant and the approval-code control were rendered inside the mobile card
-  // only, so on a desktop an admin had no route to either — the "let staff skip
-  // the approvals queue" feature was entirely unreachable on a laptop, while the
-  // API behind it worked perfectly and every request-level test passed. The
-  // failure was invisible to the whole suite because the API was fine and the
-  // markup was fine; only the two layouts disagreed.
+  // grant was rendered inside the mobile card only, so on a desktop an admin had
+  // no route to it. The API behind it worked perfectly and every request-level
+  // test passed; only the two layouts disagreed.
   //
   // So: collect the controls a person can actually reach at 390px, and require
   // each one to be present at 1440px as well. Duplicates are fine and expected —
@@ -584,4 +581,3 @@ if (fail) {
 }
 console.log(`\nScreenshots in ${SHOTS}/`);
 process.exit(fail ? 1 : 0);
-

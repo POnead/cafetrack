@@ -1,6 +1,6 @@
 "use client";
 
-import { readFaceFor, useFaceEngine } from "@/lib/face-engine";
+import { useFaceEngine } from "@/lib/face-engine";
 
 /**
  * Password-confirmation step for staff sign-in. The live face is matched only
@@ -19,8 +19,8 @@ import {
   describeCameraProblem,
   type CameraProblem,
 } from "@/lib/face-diagnostics";
-import { PRIMARY_POSE, descriptorVersionFor } from "@/lib/face";
-import { useFacePoses } from "@/lib/use-face-poses";
+import { descriptorVersionFor } from "@/lib/face";
+import { framesBody, useFacePoses, type PoseFrame } from "@/lib/use-face-poses";
 import { useAutoFaceCapture } from "@/lib/use-auto-face-capture";
 import FaceScanOverlay from "@/components/FaceScanOverlay";
 import FaceCaptureGuide from "@/components/FaceCaptureGuide";
@@ -28,8 +28,6 @@ import FaceCaptureGuide from "@/components/FaceCaptureGuide";
 /**
  * This screen asks for a straight-on face and compares it with the enrolled face.
  */
-const STAFF_POSES = [PRIMARY_POSE] as const;
-
 type Props = {
   /** The ticket from step one. Single use, five minutes, and not a session. */
   ticket: string;
@@ -47,7 +45,7 @@ export default function StaffCheck({ ticket, fullName, onVerified, onBack }: Pro
    * space the server compares against, or a correct face never matches.
    */
   const engine = useFaceEngine();
-  const poses = useFacePoses(STAFF_POSES);
+  const poses = useFacePoses();
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
@@ -162,15 +160,15 @@ export default function StaffCheck({ ticket, fullName, onVerified, onBack }: Pro
   /**
    * Send one face reading from the automatic scan or a manual capture.
    */
-  const submitFrame = useCallback(
-    async (faceEmbedding: number[] | null) => {
+  const submitFrames = useCallback(
+    async (frames: readonly PoseFrame[]) => {
       if (busyRef.current) return;
       busyRef.current = true;
       setBusy(true);
       setMessage(null);
 
       try {
-        if (!faceEmbedding) {
+        if (frames.length === 0 || frames.some((frame) => !frame.evidence)) {
           setMessage("No face was detected. Center your face in the camera and try again.");
           return;
         }
@@ -179,8 +177,8 @@ export default function StaffCheck({ ticket, fullName, onVerified, onBack }: Pro
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            ...framesBody(frames),
             ticket,
-            face_embedding: faceEmbedding,
             /*
              * Which reader produced the vector, and which revision of it.
              *
@@ -229,20 +227,21 @@ export default function StaffCheck({ ticket, fullName, onVerified, onBack }: Pro
       return;
     }
 
-    let faceEmbedding: number[] | null = null;
     try {
-      const face = await readFaceFor(engine, video);
-      // A low-confidence read is not thrown away here. The server is the only
-      // thing entitled to decide whether a face counts, and it compares against
-      // a known account rather than trusting this number.
-      if (face.ok) faceEmbedding = face.embedding;
+      const read = await poses.read(video);
+      if (read.outcome !== "complete") {
+        setMessage(
+          read.outcome === "retry"
+            ? read.message
+            : "Good. Follow the camera guide to capture the remaining angles."
+        );
+        return;
+      }
+      await submitFrames(read.frames);
     } catch {
       setMessage("Could not read the face. Check the camera and try again.");
-      return;
     }
-
-    await submitFrame(faceEmbedding);
-  }, [engine, submitFrame]);
+  }, [poses, submitFrames]);
 
   /*
    * Automatic face capture. Six seconds rather than the usual thirty keeps the
@@ -252,9 +251,8 @@ export default function StaffCheck({ ticket, fullName, onVerified, onBack }: Pro
     sequence: poses,
     videoRef,
     active: live,
-    poses: STAFF_POSES,
     noFaceTimeoutMs: 6_000,
-    onComplete: (frames) => void submitFrame(frames[0]?.embedding ?? null),
+    onComplete: (frames) => void submitFrames(frames),
   });
 
   const problem = blocked ? describeCameraProblem(blocked) : null;
@@ -318,7 +316,10 @@ export default function StaffCheck({ ticket, fullName, onVerified, onBack }: Pro
               className="mx-auto aspect-[4/5] max-h-[65vh] w-full max-w-sm rounded-xl object-cover"
             />
             {scan.phase === "scanning" && (
-              <FaceScanOverlay step={1} total={1} />
+              <FaceScanOverlay
+                step={Math.min(scan.progress + 1, scan.total)}
+                total={scan.total}
+              />
             )}
             {scan.phase === "prompt" && (
               <FaceCaptureGuide
@@ -349,7 +350,7 @@ export default function StaffCheck({ ticket, fullName, onVerified, onBack }: Pro
                 onClick={() => void capture()}
                 className="w-full min-h-12 rounded-xl bg-cream-400 px-4 py-3 text-sm font-semibold text-cocoa-900 transition hover:bg-cream-300"
               >
-                Use this face
+                Capture this angle
               </button>
               <button
                 type="button"

@@ -24,7 +24,8 @@ export const GET = handler(async (req: Request) => {
     .select(
       `id, item_id, requested_by, requested_at, status, reviewed_by, reviewed_at,
        review_note, base_version, name, category_id, location_id, physical_form,
-       unit, units_per_box, quantity, low_stock_threshold, expiration_date, correction_reason,
+       supplier_id, supplier:suppliers(id, name), unit, units_per_box, quantity,
+       low_stock_threshold, expiration_date, correction_reason,
        item:items(id, sku, name)`
     )
     .order("requested_at", { ascending: false });

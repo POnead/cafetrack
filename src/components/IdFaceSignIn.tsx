@@ -256,10 +256,17 @@ export default function IdFaceSignIn({ onSignedIn, onCancel }: Props) {
           return;
         }
 
+        if (!photoFile) {
+          setStage("face");
+          setMessage("That camera photo could not be read. Try again.");
+          return;
+        }
+
         const fd = new FormData();
         if (cardFileRef.current) fd.append("id_front", cardFileRef.current);
         if (cardHashRef.current) fd.append("card_hash", cardHashRef.current);
         fd.append("face_embedding", face.embedding.join(","));
+        fd.append("face_evidence", await toDataUrl(photoFile));
 
         const res = await fetch("/api/auth/id-login", { method: "POST", body: fd });
         const data = await res.json().catch(() => ({}));
@@ -287,13 +294,14 @@ export default function IdFaceSignIn({ onSignedIn, onCancel }: Props) {
     if (!video || !video.videoWidth) return;
 
     const canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    const scale = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
+    canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+    canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
     canvas.getContext("2d")?.drawImage(video, 0, 0);
 
     canvas.toBlob((blob) => {
       if (blob) void submit(blob);
-    }, "image/jpeg", 0.9);
+    }, "image/jpeg", 0.78);
   }, [submit]);
 
   /* ---- rendering -------------------------------------------------------- */
@@ -385,7 +393,7 @@ export default function IdFaceSignIn({ onSignedIn, onCancel }: Props) {
       <p className="text-center text-xs text-cocoa-500">
         {showingCard
           ? "Fill the frame with the card, flat on. The photo and the printed details both need to be readable."
-          : "Now fill the frame with your face — whole head, top of hair to chin."}
+          : "Now fill the frame with your face — whole head, top of hair to chin. A camera frame is temporarily sent to this server for a liveness check and is not saved."}
       </p>
 
       <button
@@ -413,27 +421,6 @@ export default function IdFaceSignIn({ onSignedIn, onCancel }: Props) {
         />
       </label>
 
-      {/* Shown from stage two onwards, because the camera has to be reopened
-          facing the person and that is the point at which a failure would strand
-          them here. */}
-      {showingFace && (
-        <label className="btn-ghost block w-full cursor-pointer text-center !py-2 text-sm">
-          Take my photo with the gallery instead
-          <input
-            type="file"
-            accept="image/*"
-            capture="user"
-            className="sr-only"
-            disabled={busy}
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              e.target.value = "";
-              if (file) void submit(file);
-            }}
-          />
-        </label>
-      )}
-
       <button
         type="button"
         className="w-full text-center text-xs text-cocoa-400 underline"
@@ -449,6 +436,15 @@ export default function IdFaceSignIn({ onSignedIn, onCancel }: Props) {
 }
 
 /* ------------------------------------------------------------- helpers -- */
+
+function toDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Could not read the camera frame."));
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.readAsDataURL(blob);
+  });
+}
 
 /** Downscale a captured card the way the upload path does, before fingerprinting. */
 async function normaliseCard(raw: File): Promise<File> {
@@ -483,6 +479,3 @@ async function normaliseCard(raw: File): Promise<File> {
 }
 
 export { normaliseCard };
-
-
-

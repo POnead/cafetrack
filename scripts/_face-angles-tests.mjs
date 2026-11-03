@@ -123,7 +123,8 @@ async function staffLogin(username, password) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ username, password }),
   });
-  return (r.headers.getSetCookie?.() ?? []).map((x) => x.split(";")[0]).join("; ");
+  const data = await r.json().catch(() => null);
+  return r.status === 200 && data?.step2_required === true;
 }
 
 /** Enrol one or more angles. `angles` is `{ pose: [embedding, signal, model?] }`. */
@@ -140,7 +141,12 @@ function faceForm(angles) {
 }
 
 function frame(pose, vector) {
-  return { pose, embedding: vector };
+  return {
+    pose,
+    embedding: vector,
+    evidence:
+      "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////",
+  };
 }
 
 /* ---------------- run ---------------- */
@@ -283,8 +289,8 @@ section("matching — the presentation the screens send");
 
 await call("PATCH", "/api/settings", { face_login_enabled: "1" }, cookie);
 
-const triStaffCookie = await staffLogin(`angle3${uniq}`, "staff123");
-check("the staff member can sign in for the test", Boolean(triStaffCookie));
+const triStaffStepOne = await staffLogin(`angle3${uniq}`, "staff123");
+check("the staff password step is accepted and requires step two", triStaffStepOne);
 
 const threeFrames = await call(
   "POST",
@@ -494,7 +500,7 @@ const stillLegacy = await call(
   },
   undefined
 );
-check("the old engine keeps working while the cafe is still on it", stillLegacy.status === 200, `${stillLegacy.status}`);
+check("legacy vectors fail closed while the cafe is still on legacy", stillLegacy.status === 503, `${stillLegacy.status}`);
 
 await call("PATCH", "/api/settings", { face_engine: "sface" }, cookie);
 const afterSwitch = await call(

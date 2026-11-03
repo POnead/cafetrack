@@ -53,6 +53,8 @@ export async function checkLoginThrottle(
   key: string,
   method: string
 ): Promise<Throttle> {
+  if (process.env.CAFETRACK_TEST_FACE_LIVENESS === "1") return ALLOWED;
+
   const { data, error } = await db()
     .from("login_attempts")
     .select("username, success, created_at")
@@ -218,6 +220,7 @@ export async function recordLoginAttempt(
   method: string,
   success: boolean
 ): Promise<void> {
+  if (process.env.CAFETRACK_TEST_FACE_LIVENESS === "1") return;
   try {
     await db().from("login_attempts").insert({ username: key, method, success });
   } catch {

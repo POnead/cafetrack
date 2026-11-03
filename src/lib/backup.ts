@@ -80,10 +80,13 @@ export function startAutoBackup(): void {
   const tick = async () => {
     try {
       await maybeBackup();
-    } catch (e: any) {
+    } catch (error: unknown) {
       // Never let a backup problem become an unhandled rejection that takes the
       // server down. A failed backup is worth a line in the log and nothing more.
-      console.error("auto-backup failed:", e?.message || e);
+      console.error(
+        "auto-backup failed:",
+        error instanceof Error ? error.message : String(error)
+      );
     }
   };
 
@@ -164,8 +167,12 @@ export async function runBackup(): Promise<{ path: string; rows: number } | null
   const counts: Record<string, number> = {};
   for (const table of TABLES) {
     try {
-      const r = (await pg.query(`select count(*)::int as n from ${table}`)) as any;
-      counts[table] = Number(r?.rows?.[0]?.n ?? 0);
+      const result = (await pg.query(
+        `select count(*)::int as n from ${table}`
+      )) as {
+        rows?: Array<{ n?: number | string }>;
+      };
+      counts[table] = Number(result.rows?.[0]?.n ?? 0);
     } catch {
       counts[table] = -1;
     }

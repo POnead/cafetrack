@@ -35,6 +35,13 @@ const StaffCheck = dynamic(
 
 type Mode = "staff" | "admin";
 
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return "Sign in failed";
+}
+
 export default function LoginPage() {
   const router = useRouter();
   const [mode, setMode] = useState<Mode>("staff");
@@ -112,13 +119,11 @@ export default function LoginPage() {
       // In staff mode the same field accepts either a barcode scan or a
       // typed username — the server decides which by the input's shape.
       const url = mode === "admin" ? "/api/auth/login" : "/api/auth/staff";
-      const body =
-        mode === "admin" ? { username, password } : { username, password };
 
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ username, password }),
       });
 
       const data = await res.json();
@@ -187,8 +192,8 @@ export default function LoginPage() {
       }
 
       router.replace("/dashboard");
-    } catch (e: any) {
-      setError(e.message);
+    } catch (error) {
+      setError(getErrorMessage(error));
       setBusy(false);
     }
   }

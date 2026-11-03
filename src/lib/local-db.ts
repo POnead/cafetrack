@@ -148,6 +148,12 @@ const RELATIONS: Record<
     foreignKey: "id",
     many: false,
   },
+  "item_change_requests.supplier": {
+    table: "suppliers",
+    localKey: "supplier_id",
+    foreignKey: "id",
+    many: false,
+  },
   "transactions.transaction_items": {
     table: "transaction_items",
     localKey: "id",

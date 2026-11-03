@@ -154,6 +154,7 @@ const child = spawn(
       // assertion expects. The daily-summary logic is tested by calling its
       // function directly, which is where the dedupe actually lives.
       CAFETRACK_DISABLE_EMAIL: "1",
+      CAFETRACK_TEST_FACE_LIVENESS: "1",
       /*
        * Step two is enforced by default, including in the isolated test server.
        * Legacy suites that need direct staff sessions must explicitly opt in to

@@ -71,7 +71,6 @@ type StaffUser = {
   role: "admin" | "staff";
   qr_token: string | null;
   can_manage_items: boolean;
-  approval_code: string | null;
   is_active: boolean;
   deactivation_reason: string | null;
   deactivated_at: string | null;
@@ -235,11 +234,8 @@ export default function UsersPage() {
   /** Whether the photo's action menu is open in the details panel. */
   const [photoMenuOpen, setPhotoMenuOpen] = useState(false);
 
-  // The per-account panel: barcode, item-management grant, approval code. One
-  // modal for all of it, opened from both the table and the cards, because the
-  // grant and the approval code used to live *only* in the mobile card — the
-  // desktop table had no route to either, so on a laptop an admin could not
-  // grant item-management or issue an approval code at all.
+  // The per-account panel holds the barcode and item-management grant. One modal
+  // for both table and cards keeps the permission action available at every size.
   const [detailsUser, setDetailsUser] = useState<StaffUser | null>(null);
   const [resetting, setResetting] = useState<StaffUser | null>(null);
   const [newPassword, setNewPassword] = useState("");
@@ -263,11 +259,8 @@ export default function UsersPage() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [reactivationError, setReactivationError] = useState<string | null>(null);
 
-  // Rotating a barcode is the other action that can lock someone out, and it
-  // used to be a single unlabelled click in a list row — so an admin looking for
-  // the approval-code control hit it and silently invalidated a printed badge
-  // they had no reason to touch. It asks first now, for the same reason
-  // deactivation does.
+  // Rotating a barcode can lock someone out, so it asks first, for the same
+  // reason deactivation does.
   const [rotating, setRotating] = useState<StaffUser | null>(null);
 
   /*
@@ -721,27 +714,6 @@ async function toggleItemPermission(user: StaffUser) {
       setRotating(null);
       setToast({
         msg: `New barcode issued — reprint ${updated.full_name}'s ID label, the old one no longer works`,
-        tone: "success",
-      });
-    }
-  }
-
-  /** Issue a fresh approval code, or revoke the current one. */
-  async function regenerateApprovalCode(user: StaffUser) {
-    const updated = await patch(user, { regenerate_approval_code: true });
-    if (updated) {
-      setToast({
-        msg: `Approval code for ${updated.full_name}: ${updated.approval_code}`,
-        tone: "success",
-      });
-    }
-  }
-
-  async function clearApprovalCode(user: StaffUser) {
-    const updated = await patch(user, { approval_code: null });
-    if (updated) {
-      setToast({
-        msg: `Approval code cleared — ${updated.full_name} now submits items for approval`,
         tone: "success",
       });
     }
@@ -1726,55 +1698,24 @@ async function toggleItemPermission(user: StaffUser) {
               </p>
             )}
 
-            {/* Both of these are staff-only. An admin can always manage items,
-                so a grant or an approval code would mean nothing. */}
+            {/* An admin can always manage items, so the grant is staff-only. */}
             {detailsUser.role === "staff" && (
-              <>
-                <DataField label="Item management">
-                  <div className="space-y-1.5">
-                    <button
-                      className="btn-ghost min-h-[40px] !px-3 !py-1.5 text-xs"
-                      disabled={busyId === detailsUser.id}
-                      onClick={() => toggleItemPermission(detailsUser)}
-                    >
-                      {detailsUser.can_manage_items ? "Granted" : "Not granted"}
-                    </button>
-                    <p className="text-[11px] text-cocoa-400">
-                      {detailsUser.can_manage_items
-                        ? "Their item changes take effect immediately, without waiting for approval."
-                        : "New ingredients and edits are submitted and wait on the Approvals page."}
-                    </p>
-                  </div>
-                </DataField>
-
-                <DataField label="Approval code">
-                  <div className="space-y-1.5">
-                    <span className="block font-mono text-sm">
-                      {detailsUser.approval_code ?? "none issued"}
-                    </span>
-                    <div className="flex gap-2 pt-0.5">
-                      <button
-                        className="btn-ghost min-h-[40px] !px-3 !py-1.5 text-xs"
-                        disabled={busyId === detailsUser.id}
-                        onClick={() => regenerateApprovalCode(detailsUser)}
-                      >
-                        {detailsUser.approval_code
-                          ? "New approval code"
-                          : "Generate approval code"}
-                      </button>
-                      {detailsUser.approval_code && (
-                        <button
-                          className="btn-ghost min-h-[40px] !px-3 !py-1.5 text-xs"
-                          disabled={busyId === detailsUser.id}
-                          onClick={() => clearApprovalCode(detailsUser)}
-                        >
-                          Revoke
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                </DataField>
-              </>
+              <DataField label="Item management">
+                <div className="space-y-1.5">
+                  <button
+                    className="btn-ghost min-h-[40px] !px-3 !py-1.5 text-xs"
+                    disabled={busyId === detailsUser.id}
+                    onClick={() => toggleItemPermission(detailsUser)}
+                  >
+                    {detailsUser.can_manage_items ? "Granted" : "Not granted"}
+                  </button>
+                  <p className="text-[11px] text-cocoa-400">
+                    {detailsUser.can_manage_items
+                      ? "Their item changes take effect immediately, without waiting for approval."
+                      : "New ingredients and edits are submitted and wait on the Approvals page."}
+                  </p>
+                </div>
+              </DataField>
             )}
 
             {/* No "Added" field down here — the identity block at the top already carries it,

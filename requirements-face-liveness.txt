@@ -1,0 +1,2 @@
+ai-edge-litert==2.3.0
+opencv-contrib-python-headless==5.0.0.93

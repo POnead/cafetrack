@@ -26,7 +26,7 @@ export const runtime = "nodejs";
  * from /api/users/:id/id/status, which is only fetched when someone is reviewing.
  */
 const USER_COLUMNS =
-  "id, username, full_name, role, qr_token, can_manage_items, approval_code, is_active, deactivation_reason, deactivated_at, created_at, position, start_date, first_name, last_name, face_enabled, face_enrolled_at, last_face_verified_at, verification_status, id_doc_type, verified_at";
+  "id, username, full_name, role, qr_token, can_manage_items, is_active, deactivation_reason, deactivated_at, created_at, position, start_date, first_name, last_name, face_enabled, face_enrolled_at, last_face_verified_at, verification_status, id_doc_type, verified_at";
 
 /* ---------------- list ---------------- */
 export const GET = handler(async () => {

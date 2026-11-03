@@ -156,9 +156,7 @@ create table if not exists users (
   -- having an admin approve each new ingredient first. Granted per person by an
   -- admin (FR-03). null/false means the submit-then-approve path.
   can_manage_items boolean not null default false,
-  -- Personal code a staff member can type when adding/editing an item, to
-  -- skip the admin approval queue for that one submission (FR-03). Set by an
-  -- admin; null means the staff member always goes through the queue.
+  -- Legacy field retained for existing databases; item approval never uses it.
   approval_code text,
   is_active     boolean not null default true,
   -- Why and when an admin switched the account off. Surfaced to the person
@@ -469,6 +467,17 @@ begin
 end;
 $$;
 
+-- Suppliers are declared before item change requests so queued edits can
+-- reference them. The items foreign key is added in the supplier section below.
+create table if not exists suppliers (
+  id           uuid primary key default gen_random_uuid(),
+  name         text not null,
+  contact_name text,
+  phone        text,
+  email        text,
+  created_at   timestamptz not null default now()
+);
+
 -- ---------- item change requests (FR-03) ----------
 -- A staff member without item-management permission cannot edit a live item
 -- directly: their change is queued here and only lands on the item when an
@@ -491,6 +500,7 @@ create table if not exists item_change_requests (
   name               text,
   category_id        uuid references categories(id) on delete set null,
   location_id        uuid references locations(id) on delete set null,
+  supplier_id        uuid references suppliers(id) on delete set null,
   physical_form      text check (physical_form in ('liquid','powder','solid')),
   unit               text,
   units_per_box      numeric(12,3),
@@ -536,6 +546,7 @@ begin
        set name = coalesce(v_req.name, name),
            category_id = coalesce(v_req.category_id, category_id),
            location_id = coalesce(v_req.location_id, location_id),
+           supplier_id = coalesce(v_req.supplier_id, supplier_id),
            physical_form = coalesce(v_req.physical_form, physical_form),
            unit = coalesce(v_req.unit, unit),
            units_per_box = coalesce(v_req.units_per_box, units_per_box),
@@ -1437,21 +1448,12 @@ alter table waste_events     enable row level security;
 -- The service role bypasses RLS, which is what our API routes use.
 
 -- ============================================================
--- SUPPLIERS (appended 2026-10-09)
+-- SUPPLIER REFERENCES (added 2026-10-09)
 -- ============================================================
-
--- ---------- suppliers ----------
-create table if not exists suppliers (
-  id           uuid primary key default gen_random_uuid(),
-  name         text not null,
-  contact_name text,
-  phone        text,
-  email        text,
-  created_at   timestamptz not null default now()
-);
 
 -- Add supplier_id to items (nullable, references suppliers(id) on delete set null)
 alter table items add column if not exists supplier_id uuid references suppliers(id) on delete set null;
+alter table item_change_requests add column if not exists supplier_id uuid references suppliers(id) on delete set null;
 
 -- RLS on new table
 alter table suppliers enable row level security;

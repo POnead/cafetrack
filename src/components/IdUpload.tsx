@@ -285,6 +285,21 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
     urls.current = urls.current.filter((u) => u !== url);
   }, []);
 
+  const acceptCameraFront = useCallback(
+    async (file: File) => {
+      stopCam();
+      setPendingFront({ file, preview: URL.createObjectURL(file) });
+    },
+    [stopCam]
+  );
+
+  const idScanner = useAutoIdCapture({
+    videoRef: camVideoRef,
+    active: camSlot === "front" && !camBlocked && !camBusy,
+    onCapture: acceptCameraFront,
+  });
+  const resumeIdScanner = idScanner.resume;
+
   /**
    * Read whatever faces the current selection allows.
    *
@@ -422,6 +437,7 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
     async (slot: Slot, deviceId?: string) => {
       setNote(null);
       setCamBlocked(null);
+      if (slot === "front") resumeIdScanner();
 
       // Checked before asking, so a plain-http LAN address gets an explanation
       // rather than a silent failure from getUserMedia — the common case here.
@@ -475,7 +491,7 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
         setCamBusy(false);
       }
     },
-    [attachCamStream, stopCam]
+    [attachCamStream, resumeIdScanner, stopCam]
   );
 
   const switchCamera = useCallback(
@@ -530,20 +546,6 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
     },
     [readFaces, revoke]
   );
-
-  const acceptCameraFront = useCallback(
-    async (file: File) => {
-      stopCam();
-      setPendingFront({ file, preview: URL.createObjectURL(file) });
-    },
-    [stopCam]
-  );
-
-  const idScanner = useAutoIdCapture({
-    videoRef: camVideoRef,
-    active: camSlot === "front" && !camBlocked && !camBusy,
-    onCapture: acceptCameraFront,
-  });
 
   const confirmFrontCapture = useCallback(async () => {
     if (!pendingFront) return;

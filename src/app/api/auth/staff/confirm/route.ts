@@ -8,9 +8,11 @@ import {
   PRIMARY_POSE,
   descriptorVersionFor,
   parseEmbedding,
+  parseFaceEvidence,
   parseFaceFrames,
   matchPresentation,
 } from "@/lib/face";
+import { verifyFacePresentation } from "@/lib/face-liveness";
 import { galleryFor, loadFaceSamples } from "@/lib/face-samples";
 import { recordFaceVerification } from "@/lib/face-gate";
 import { getIdGate } from "@/lib/id-gate";
@@ -191,10 +193,11 @@ export const POST = handler(async (req: Request) => {
 
   const parsedFrames = parseFaceFrames(body.face_frames);
   const legacyFace = parseEmbedding(body.face_embedding);
-  const frames = parsedFrames.ok
+  const singleEvidence = parseFaceEvidence(body.face_evidence);
+  const candidateFrames = parsedFrames.ok
     ? parsedFrames.frames
-    : legacyFace
-      ? [{ pose: PRIMARY_POSE, embedding: legacyFace }]
+    : legacyFace && singleEvidence
+      ? [{ pose: PRIMARY_POSE, embedding: legacyFace, evidence: singleEvidence }]
       : null;
 
   /*
@@ -203,7 +206,7 @@ export const POST = handler(async (req: Request) => {
    * A camera that showed no face is recorded separately from a face that failed
    * to match, but both receive the same generic refusal.
    */
-  if (!frames) {
+  if (!candidateFrames) {
     return refuse("nothing_recognised", false);
   }
 
@@ -237,6 +240,19 @@ export const POST = handler(async (req: Request) => {
       { reload: true }
     );
   }
+
+  const liveness = await verifyFacePresentation(candidateFrames, engine);
+  if (!liveness.ok) {
+    if (liveness.reason === "unavailable") {
+      return fail(
+        "Face liveness is not available on this server. Go back and use your password, or contact an administrator.",
+        503
+      );
+    }
+    return refuse("liveness_failed", true);
+  }
+
+  const frames = liveness.frames;
 
   /* ---- face -------------------------------------------------------------- */
 

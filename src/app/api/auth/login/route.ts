@@ -74,15 +74,19 @@ export const POST = handler(async (req: Request) => {
 
   if (!username || !password) return fail("Username and password are required");
 
+  const normalizedUsername = String(username).trim();
+  const normalizedPassword = String(password);
+  if (!normalizedUsername || !normalizedPassword) return fail("Username and password are required");
+
   // Throttled before any password work — that is the whole point of the check.
-  const key = userKey(String(username));
+  const key = userKey(normalizedUsername);
   const throttle = await checkLoginThrottle(key, "admin_password");
   if (throttle.blocked) return tooManyAttempts(throttle.retryAfterSeconds);
 
   const { data: user, error: lookupError } = await db()
     .from("users")
     .select(LOGIN_COLUMNS)
-    .eq("username", username)
+    .eq("username", normalizedUsername)
     .eq("role", "admin")
     .maybeSingle();
 
@@ -106,7 +110,7 @@ export const POST = handler(async (req: Request) => {
     return fail("Invalid credentials", 401);
   }
 
-  if (!verifyPassword(password, user.password_hash)) {
+  if (!verifyPassword(normalizedPassword, user.password_hash)) {
     await logAttempt(false);
     await recordRejection(
       req,

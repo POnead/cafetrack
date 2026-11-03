@@ -6,6 +6,7 @@ import {
   scryptSync,
   timingSafeEqual,
 } from "node:crypto";
+import type { DbFacade } from "./supabase";
 import { resolveAuthSecret } from "./secret";
 
 /*
@@ -243,7 +244,7 @@ export async function setSessionCookie(
   token: string,
   minutes: number = SESSION_MINUTES,
   userId?: string,
-  dbClient?: any
+  dbClient?: DbFacade
 ) {
   const jar = await cookies();
   jar.set({
@@ -272,7 +273,7 @@ export async function setSessionCookie(
   }
 }
 
-export async function clearSessionCookie(userId?: string, dbClient?: any) {
+export async function clearSessionCookie(userId?: string, dbClient?: DbFacade) {
   const jar = await cookies();
   jar.set({
     name: COOKIE_NAME,

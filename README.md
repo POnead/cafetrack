@@ -20,6 +20,7 @@ npm install
 cp .env.example .env.local     # optional — the app runs without it
 npm run setup:face             # optional — copies the ~12MB legacy face-model weights
 npm run setup:face:sface       # optional — fetches the ~9.5MB SFace engine and wasm runtime
+npm run setup:face:liveness    # required for free, local photo/spoof rejection
 npm run dev
 ```
 
@@ -41,14 +42,12 @@ items, the reference lists (categories, locations) and three accounts. Staff
 sign in with the barcode printed on their ID plus their password; admins use a
 username and password.
 
-`npm run setup:face` and `npm run setup:face:sface` are the two optional model
-steps. The first copies the original face models out of `@vladmandic/face-api`
-rather than committing them — see [the script](scripts/setup-face-models.mjs) for
-why; the second downloads the SFace engine. Skip them and everything still runs
-except face enrolment, face sign-in, the duty check and the ID portrait check;
-those pages say the model files are missing rather than showing a camera that does
-nothing. The ID portrait check always uses SFace, even when sign-in is set to the
-original model.
+`npm run setup:face` and `npm run setup:face:sface` provide the two recognition
+engines. `npm run setup:face:liveness` adds the local, open-source anti-spoof
+runtime; it is required for secure face sign-in and duty checks, and has no paid
+provider fallback. Skip the recognition setup and those camera features report
+that the required models are missing. Face authentication remains unavailable
+until the local liveness runtime is also installed.
 
 To see it work without typing anything: **Inventory → All Items → Print visible
 barcode labels**, print a sheet, then scan a label with the field on **Checkout

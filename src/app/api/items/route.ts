@@ -1,7 +1,7 @@
 import { db } from "@/lib/supabase";
 import { handler, ok, fail, readBody, clientIp } from "@/lib/api";
 import { requireUser } from "@/lib/auth";
-import { canManageItems, approvalCodeMatches } from "@/lib/permissions";
+import { canManageItems } from "@/lib/permissions";
 import { audit } from "@/lib/audit";
 import { eventBus, Events } from "@/lib/events";
 import { memoClear } from "@/lib/ttl-cache";
@@ -160,11 +160,6 @@ export const POST = handler(async (req: Request) => {
   const manages = await canManageItems(user);
   const body = await readBody(req);
 
-  // FR-03: a staff member with the admin-given code gets their submission
-  // through immediately, without a queue stop.
-  const viaCode = !manages && (await approvalCodeMatches(user, body.approval_code));
-  const trusted = manages || viaCode;
-
   const name = String(body.name || "").trim();
   if (!name) return fail("Item name is required");
 
@@ -253,7 +248,7 @@ export const POST = handler(async (req: Request) => {
   }
   if (!sku) return fail("Could not generate a unique SKU, try again", 500);
 
-  const itemStatus = trusted ? "active" : "pending";
+  const itemStatus = manages ? "active" : "pending";
 
   const { data, error } = await db()
     .from("items")
@@ -271,11 +266,9 @@ export const POST = handler(async (req: Request) => {
       low_stock_threshold: lowStock,
       expiration_date: expiry,
       item_status: itemStatus,
-      // Only a submission needs provenance. An item added by someone who could
+      // Only a submission needs provenance. An item added by someone who can
       // add it directly is not waiting on anyone, so recording it as submitted
-      // would imply a review that never happened. Exception: a code-verified
-      // staff submission skips the queue, but it was still their submission —
-      // the record keeps who did it.
+      // would imply a review that never happened.
       submitted_by: manages ? null : user.id,
       submitted_at: manages ? null : new Date().toISOString(),
     })
@@ -290,7 +283,6 @@ export const POST = handler(async (req: Request) => {
     quantity: data.quantity,
     unit: data.unit,
     item_status: itemStatus,
-    via_code: viaCode,
   }, { ip: clientIp(req) });
 
   // A pending item is invisible to refresh_alerts by design, so this is safe to
@@ -319,12 +311,10 @@ export const POST = handler(async (req: Request) => {
       item: data,
       // Spelled out rather than left for the client to infer, because the two
       // cases mean very different things to the person who just submitted.
-      pending_approval: !trusted,
+      pending_approval: !manages,
       message: manages
         ? `Item created — SKU ${data.sku}`
-        : viaCode
-          ? `Item created — SKU ${data.sku}. Approved immediately via your code.`
-          : `Submitted for approval — SKU ${data.sku}. An admin must approve it before it can be used.`,
+        : `Submitted for approval — SKU ${data.sku}. An admin must approve it before it can be used.`,
     },
     201
   );

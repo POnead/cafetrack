@@ -58,7 +58,7 @@ export const runtime = "nodejs";
 
 /** Never selects password_hash, and never selects face_embedding outside POST. */
 const USER_COLUMNS =
-  "id, username, full_name, role, qr_token, can_manage_items, approval_code, " +
+  "id, username, full_name, role, qr_token, can_manage_items, " +
   "is_active, deactivation_reason, deactivated_at, created_at, " +
   "face_enabled, face_enrolled_at, face_enrolled_by, last_face_verified_at";
 

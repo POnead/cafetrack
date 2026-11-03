@@ -761,13 +761,35 @@ export type StoredFaceSample = {
 export type FaceFrameInput = {
   pose: FacePose;
   embedding: Float32Array;
+  evidence: string;
 };
+
+const MAX_FACE_EVIDENCE_BYTES = 180_000;
+
+/** A bounded JPEG data URL captured from the same frame as the face embedding. */
+export function parseFaceEvidence(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const prefix = "data:image/jpeg;base64,";
+  if (!raw.startsWith(prefix) || raw.length > 240_300) return null;
+  const encoded = raw.slice(prefix.length);
+  if (
+    encoded.length === 0 ||
+    encoded.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded) ||
+    (encoded.length / 4) * 3 > MAX_FACE_EVIDENCE_BYTES
+  ) {
+    return null;
+  }
+  return raw;
+}
 
 /**
  * Read the frames out of a request body, or explain why they are not usable.
  *
- * A check sends `[{ pose, embedding }, ...]` — one entry per angle the person
- * presented. The rules are strict on purpose:
+ * A check sends `[{ pose, embedding, evidence }, ...]` — one entry per angle
+ * the person presented. `evidence` is a short-lived JPEG from the same source
+ * frame as the embedding, used for server-side anti-spoof verification. The
+ * rules are strict on purpose:
  *
  *   - at least one frame, because a check with no face is not a check;
  *   - no more frames than there are angles, so a caller cannot ask to be
@@ -820,8 +842,16 @@ export function parseFaceFrames(
       };
     }
 
+    const evidence = parseFaceEvidence(record.evidence);
+    if (!evidence) {
+      return {
+        ok: false,
+        error: `The ${pose} camera frame could not be verified. Turn on the camera and try again.`,
+      };
+    }
+
     seen.add(pose);
-    frames.push({ pose, embedding });
+    frames.push({ pose, embedding, evidence });
   }
 
   // The straight-on frame is the one angle every account has. A presentation

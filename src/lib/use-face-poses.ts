@@ -38,6 +38,7 @@ export type PoseFrame = {
   embedding: number[];
   poseSignal: number | null;
   quality: number;
+  evidence?: string;
 };
 
 export type ReadOutcome = "accepted" | "retry" | "complete";
@@ -73,7 +74,10 @@ export type FacePoseSequence = {
  * re-render to learn whether the set was complete would submit on the next
  * press instead of this one.
  */
-export function useFacePoses(poses: readonly FacePose[] = FACE_POSES): FacePoseSequence & {
+export function useFacePoses(
+  poses: readonly FacePose[] = FACE_POSES,
+  { includeEvidence = true }: { includeEvidence?: boolean } = {}
+): FacePoseSequence & {
   read: (source: HTMLVideoElement | HTMLImageElement) => Promise<ReadResult>;
 } {
   /*
@@ -101,12 +105,14 @@ export function useFacePoses(poses: readonly FacePose[] = FACE_POSES): FacePoseS
     async (source: HTMLVideoElement | HTMLImageElement): Promise<ReadResult> => {
       const expected = poses.find((pose) => !frames.some((f) => f.pose === pose)) ?? activePose;
 
-      const result = await readFaceFor(engine, source);
+      const capture = includeEvidence ? snapshot(source) : source;
+      const result = await readFaceFor(engine, capture);
       if (!result.ok) {
         setMessage(result.message);
         return { outcome: "retry", frames, message: result.message };
       }
 
+      const evidence = includeEvidence ? await toJpegDataUrl(capture as HTMLCanvasElement) : undefined;
       const state = poseStateOfRead(result);
       const seen = state.pose;
       const held = frames.map((f) => f.pose);
@@ -154,6 +160,7 @@ export function useFacePoses(poses: readonly FacePose[] = FACE_POSES): FacePoseS
           embedding: result.embedding,
           poseSignal: result.poseSignal,
           quality: result.score,
+          evidence,
         },
       ];
 
@@ -166,7 +173,7 @@ export function useFacePoses(poses: readonly FacePose[] = FACE_POSES): FacePoseS
         message: null,
       };
     },
-    [frames, poses, activePose, engine]
+    [frames, poses, activePose, engine, includeEvidence]
   );
 
   return {
@@ -190,13 +197,52 @@ export function useFacePoses(poses: readonly FacePose[] = FACE_POSES): FacePoseS
  */
 export function framesBody(frames: readonly PoseFrame[]): { face_frames: PoseFrame[] } {
   return {
-    face_frames: frames.map((f) => ({
-      pose: f.pose,
-      embedding: f.embedding,
-      poseSignal: f.poseSignal,
-      quality: f.quality,
-    })),
+    face_frames: frames.map((frame) => {
+      if (!frame.evidence) {
+        throw new Error("A live camera frame is required for face verification.");
+      }
+      return {
+        pose: frame.pose,
+        embedding: frame.embedding,
+        poseSignal: frame.poseSignal,
+        quality: frame.quality,
+        evidence: frame.evidence,
+      };
+    }),
   };
 }
 
+function snapshot(source: HTMLVideoElement | HTMLImageElement): HTMLCanvasElement {
+  const width = source instanceof HTMLVideoElement ? source.videoWidth : source.naturalWidth;
+  const height = source instanceof HTMLVideoElement ? source.videoHeight : source.naturalHeight;
+  if (width <= 0 || height <= 0) throw new Error("The camera frame is not ready.");
+
+  const scale = Math.min(1, 640 / Math.max(width, height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) throw new Error("This browser cannot read the camera frame.");
+  context.drawImage(source, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
+function toJpegDataUrl(canvas: HTMLCanvasElement): Promise<string> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          reject(new Error("The camera frame could not be encoded."));
+          return;
+        }
+        const reader = new FileReader();
+        reader.onerror = () => reject(new Error("The camera frame could not be read."));
+        reader.onload = () => resolve(String(reader.result ?? ""));
+        reader.readAsDataURL(blob);
+      },
+      "image/jpeg",
+      0.78
+    );
+  });
+}
 
