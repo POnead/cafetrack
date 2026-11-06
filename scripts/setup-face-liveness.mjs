@@ -29,7 +29,18 @@ function ensureSfaceModels() {
 }
 
 function installPythonDependencies() {
-  if (!existsSync(VENV_PYTHON)) {
+  let usableVenv = existsSync(VENV_PYTHON);
+  if (usableVenv) {
+    try {
+      execFileSync(VENV_PYTHON, ["--version"], { stdio: "ignore" });
+    } catch {
+      console.log("  rebuilding stale Python environment");
+      rmSync(VENV, { recursive: true, force: true });
+      usableVenv = false;
+    }
+  }
+
+  if (!usableVenv) {
     const python = process.env.PYTHON || (WINDOWS ? "python" : "python3");
     console.log(`  creating ${VENV}`);
     execFileSync(python, ["-m", "venv", VENV], { stdio: "inherit" });

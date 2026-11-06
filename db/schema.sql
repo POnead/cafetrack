@@ -47,13 +47,11 @@ insert into settings (key, value) values
   -- value; readers clamp it to the current range (see matchThresholdBand), and
   -- `on conflict do nothing` above means only a fresh install gets these seeds.
   ('face_match_threshold_sface', '0.5'),
-  -- Signing in with a face instead of a password (staff only).
+  -- Require the enrolled-face second step after a staff password (staff only).
   --
   -- Off by default, and separate from face_verification_enabled on purpose: one
-  -- asks for a face every duty, the other changes how someone gets *into* the
-  -- app at all. A cafe that wants both should be able to turn on the second
-  -- without implying anything about the first, and an admin trialling face sign-in
-  -- should not silently switch their staff over to duty checks as well.
+  -- asks for a face every duty, the other adds a face check to password sign-in.
+  -- A cafe that wants both can enable both independently.
   ('face_login_enabled', '0'),
   -- The https address a staff phone can open, when the register itself has no
   -- camera. Empty until a tunnel exists: a QR pointing at `localhost` gives the
@@ -163,6 +161,7 @@ create table if not exists users (
   -- trying to sign in, so they know who to talk to.
   deactivation_reason text,
   deactivated_at      timestamptz,
+  alerts_seen_at      timestamptz not null default now(),
   created_at    timestamptz not null default now()
 );
 
@@ -173,6 +172,7 @@ alter table users add column if not exists deactivation_reason text;
 alter table users add column if not exists deactivated_at timestamptz;
 alter table users add column if not exists can_manage_items boolean not null default false;
 alter table users add column if not exists approval_code text;
+alter table users add column if not exists alerts_seen_at timestamptz not null default now();
 
 -- Employment details an admin records when hiring. Both optional, both editable
 -- later — a cafe learns them after the interview: someone starts as "Crew" and is
@@ -214,6 +214,11 @@ alter table users add column if not exists last_name text;
 -- q0.85 is ~30KB and the embedding ~1.5KB.
 alter table users add column if not exists face_image       text;
 alter table users add column if not exists face_embedding   text;
+-- Face++ identity data points at one private FaceSet containing the enrolled
+-- reference face. It is never included in public user responses.
+alter table users add column if not exists facepp_faceset_token text;
+alter table users add column if not exists facepp_face_token text;
+alter table users add column if not exists facepp_retired_facesets jsonb not null default '[]'::jsonb;
 alter table users add column if not exists face_enabled     boolean not null default false;
 alter table users add column if not exists face_enrolled_at timestamptz;
 -- Which admin took the picture. Kept apart from the photo because "who put this
@@ -258,6 +263,8 @@ alter table users add column if not exists id_photo      text;
 -- re-check a hire and is used by ID-card sign-in.
 alter table users add column if not exists id_doc_type   text;
 alter table users add column if not exists id_doc_number text;
+alter table users add column if not exists id_doc_expiry date;
+alter table users add column if not exists id_doc_uploaded_by uuid references users(id) on delete set null;
 
 -- A 64-bit perceptual fingerprint of the front of the card, as 16 hex characters.
 --
@@ -316,6 +323,67 @@ alter table users add constraint users_verification_status_check
 alter table users add column if not exists verification_notes text;
 alter table users add column if not exists verified_at timestamptz;
 alter table users add column if not exists verified_by uuid references users(id) on delete set null;
+
+-- Privacy lifecycle and subject-rights record.
+-- Employment consent is deliberately not treated as inherently valid: the
+-- recorded basis must be one of consent, contract, legal_obligation, public_interest,
+-- or legitimate_interest (where the sensitive-data rule permits it).
+alter table users add column if not exists identity_processing_basis text
+  check (identity_processing_basis is null or identity_processing_basis in
+  ('consent','contract','legal_obligation','public_interest','legitimate_interest'));
+alter table users add column if not exists identity_notice_version text;
+alter table users add column if not exists identity_notice_acknowledged_at timestamptz;
+alter table users add column if not exists identity_basis_reviewed_at timestamptz;
+alter table users add column if not exists identity_retention_until timestamptz;
+alter table users add column if not exists identity_data_erased_at timestamptz;
+
+-- ---------- privacy notice and subject requests ----------
+create table if not exists privacy_notices (
+  id uuid primary key default gen_random_uuid(),
+  version text unique not null,
+  title text not null,
+  notice_text text not null,
+  purpose text not null,
+  recipients text not null,
+  storage_period text not null,
+  published_at timestamptz not null default now()
+);
+
+insert into privacy_notices
+  (version, title, notice_text, purpose, recipients, storage_period)
+values (
+  '2026-01',
+  'ID and face verification privacy notice',
+  'CafeTrack collects government ID images and details and face images or embeddings to verify identity, employment eligibility, and account access. Identity data is not used for advertising. HyperVerge may receive an ID and portrait when configured. See the controller for processor safeguards and requests. Identity verification data is retained for up to 365 days after collection unless law requires longer. A signed acknowledgement should precede processing.',
+  'Identity verification, authentication, fraud prevention, and employment verification.',
+  'Authorised administrators, hosting/database providers, and HyperVerge when configured.',
+  'Up to 365 days after collection unless a longer period is required by law.'
+)
+on conflict (version) do nothing;
+
+insert into privacy_notices
+  (version, title, notice_text, purpose, recipients, storage_period)
+values (
+  '2026-02',
+  'Temporary face-check request photo notice',
+  'If a staff member cannot complete a duty face check, they may choose to open the camera, capture a photo, and send it with a reason for administrator review. The photo is visible to authorised administrators for identity review and is deleted when the request is approved or declined. Sending a request is optional and does not create an account session.',
+  'Identify the staff member requesting a same-day face-check bypass and let an administrator decide the request.',
+  'Authorised administrators and hosting/database providers.',
+  'Until an administrator approves or declines the request; the photo is deleted when the decision is recorded. The reason and decision remain in the audit history.'
+)
+on conflict (version) do nothing;
+
+create table if not exists privacy_requests (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  request_type text not null check (request_type in ('access','correction','erasure','appeal')),
+  status text not null default 'pending' check (status in ('pending','reviewing','resolved','denied')),
+  details text not null,
+  requested_at timestamptz not null default now(),
+  resolved_at timestamptz,
+  resolution text,
+  resolved_by uuid references users(id) on delete set null
+);
 
 -- A pending "check this person on their phone instead" handover, for a register
 -- with no camera of its own.
@@ -426,6 +494,327 @@ alter table items drop constraint if exists items_expirable_check;
 alter table items add constraint items_expirable_check
   check (expirable = true or expiration_date is null);
 
+update items
+set expirable = false
+where lower(name) in ('16oz paper cups', 'cup lids')
+  and expirable = true
+  and expiration_date is null;
+
+update items
+set expirable = true
+where lower(name) in (
+  'arabica coffee beans',
+  'robusta coffee beans',
+  'fresh milk',
+  'condensed milk',
+  'vanilla syrup',
+  'caramel syrup',
+  'matcha powder',
+  'cocoa powder',
+  'black tea leaves',
+  'croissant dough'
+)
+and expirable = false;
+
+-- ---------- inventory batches ----------
+-- Every receipt is a separate lot so expiry and depletion are tracked against
+-- the stock that actually arrived together. `items.quantity` remains the
+-- compatibility total used by existing reports and inventory screens.
+create table if not exists inventory_batches (
+  id                 uuid primary key default gen_random_uuid(),
+  batch_code         text unique not null,
+  item_id            uuid not null references items(id) on delete cascade,
+  received_quantity  numeric(12,3) not null check (received_quantity > 0),
+  remaining_quantity numeric(12,3) not null check (remaining_quantity >= 0),
+  expiration_date    date,
+  source_type        text not null default 'restock'
+    check (source_type in ('opening','restock','adjustment')),
+  adjustment_reason  text,
+  received_at        timestamptz not null default now(),
+  created_at         timestamptz not null default now()
+);
+
+create index if not exists idx_inventory_batches_item_remaining
+  on inventory_batches(item_id, remaining_quantity, expiration_date, received_at);
+create index if not exists idx_inventory_batches_expiry
+  on inventory_batches(expiration_date) where remaining_quantity > 0;
+alter table inventory_batches add column if not exists adjustment_reason text;
+
+-- Existing inventory has no trustworthy lot history. Preserve its exact
+-- on-hand total and current date as one opening batch, once per item.
+insert into inventory_batches
+  (batch_code, item_id, received_quantity, remaining_quantity, expiration_date, source_type, received_at)
+select
+  'CTB-' || upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 16)),
+  i.id,
+  i.quantity,
+  i.quantity,
+  i.expiration_date,
+  'opening',
+  i.created_at
+from items i
+where i.item_status = 'active'
+  and i.quantity > 0
+  and not exists (
+    select 1 from inventory_batches b where b.item_id = i.id
+  );
+
+update items i
+set expirable = true
+where i.expirable = false
+  and lower(i.name) not in ('16oz paper cups', 'cup lids')
+  and exists (
+    select 1
+    from inventory_batches b
+    where b.item_id = i.id
+      and b.expiration_date is not null
+  );
+
+-- Keep direct item creation and the existing audited stock-correction flow in
+-- sync with the batch ledger. Normal stock movements update batches first, so
+-- this only creates/adjusts a batch when an item total is changed elsewhere.
+create or replace function sync_item_batch_quantity()
+returns trigger
+language plpgsql
+as $$
+declare
+  v_batch_total numeric(12,3);
+  v_delta numeric(12,3);
+  v_take numeric(12,3);
+  v_batch record;
+  v_expiry date;
+  v_batch_code text;
+begin
+  if new.item_status <> 'active' then
+    return new;
+  end if;
+
+  select coalesce(sum(remaining_quantity), 0)
+    into v_batch_total
+    from inventory_batches
+   where item_id = new.id;
+
+  v_delta := new.quantity - v_batch_total;
+  if v_delta > 0 then
+    v_batch_code := 'CTB-' || upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 16));
+    insert into inventory_batches
+      (batch_code, item_id, received_quantity, remaining_quantity, expiration_date, source_type)
+    values
+      (v_batch_code, new.id, v_delta, v_delta, new.expiration_date,
+       case when tg_op = 'INSERT' then 'opening' else 'adjustment' end);
+  elsif v_delta < 0 then
+    v_delta := abs(v_delta);
+    for v_batch in
+      select id, remaining_quantity
+        from inventory_batches
+       where item_id = new.id and remaining_quantity > 0
+       order by received_at desc, id desc
+       for update
+    loop
+      exit when v_delta <= 0;
+      v_take := least(v_delta, v_batch.remaining_quantity);
+      update inventory_batches
+         set remaining_quantity = remaining_quantity - v_take
+       where id = v_batch.id;
+      v_delta := v_delta - v_take;
+    end loop;
+  end if;
+
+  if exists (select 1 from inventory_batches where item_id = new.id) then
+    select min(expiration_date)
+      into v_expiry
+      from inventory_batches
+     where item_id = new.id and remaining_quantity > 0;
+
+    update items
+       set expiration_date = v_expiry
+     where id = new.id and expiration_date is distinct from v_expiry;
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists items_sync_batch_quantity on items;
+create trigger items_sync_batch_quantity
+after insert or update of quantity, item_status on items
+for each row execute function sync_item_batch_quantity();
+
+-- A product-level expiry edit may update its only open batch, but must never
+-- erase distinct expiry dates from multiple lots. Movement updates already set
+-- the product date to the earliest remaining batch, so they pass through.
+create or replace function sync_single_batch_expiration()
+returns trigger
+language plpgsql
+as $$
+declare
+  v_open_batches integer;
+  v_earliest_expiry date;
+begin
+  if new.expiration_date is not distinct from old.expiration_date then
+    return new;
+  end if;
+
+  select count(*), min(expiration_date)
+    into v_open_batches, v_earliest_expiry
+    from inventory_batches
+   where item_id = new.id and remaining_quantity > 0;
+
+  if v_open_batches > 1 and new.expiration_date is distinct from v_earliest_expiry then
+    raise exception
+      'this item has multiple active batches; edit expiry dates on individual batches';
+  elsif v_open_batches = 1 and new.expiration_date is distinct from v_earliest_expiry then
+    update inventory_batches
+       set expiration_date = new.expiration_date
+     where item_id = new.id and remaining_quantity > 0;
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists items_sync_single_batch_expiration on items;
+create trigger items_sync_single_batch_expiration
+before update of expiration_date on items
+for each row execute function sync_single_batch_expiration();
+
+create or replace function correct_item_batch_counts(
+  p_item_id uuid,
+  p_expected_version integer,
+  p_patch jsonb,
+  p_batch_adjustments jsonb,
+  p_reason text
+) returns items
+language plpgsql
+security definer
+as $$
+declare
+  v_item items;
+  v_adjustment record;
+  v_batch inventory_batches;
+  v_target numeric(12,3);
+  v_delta numeric(12,3);
+  v_total numeric(12,3);
+begin
+  if jsonb_typeof(p_batch_adjustments) <> 'array'
+     or jsonb_array_length(p_batch_adjustments) = 0 then
+    raise exception 'at least one batch quantity correction is required';
+  end if;
+  if nullif(trim(p_reason), '') is null or length(p_reason) > 500 then
+    raise exception 'enter a stock correction reason of 500 characters or fewer';
+  end if;
+  if jsonb_array_length(p_batch_adjustments) > 500 then
+    raise exception 'too many batch corrections in one request';
+  end if;
+  if (
+    select count(*) <> count(distinct value->>'batch_id')
+    from jsonb_array_elements(p_batch_adjustments)
+  ) then
+    raise exception 'a batch can only be corrected once per request';
+  end if;
+
+  select * into v_item
+    from items
+   where id = p_item_id
+   for update;
+  if not found then
+    raise exception 'item not found';
+  end if;
+  if v_item.version <> p_expected_version then
+    raise exception 'item was modified by someone else; refresh and retry';
+  end if;
+
+  for v_adjustment in
+    select batch_id, quantity
+      from jsonb_to_recordset(p_batch_adjustments)
+        as entry(batch_id uuid, quantity numeric)
+     order by batch_id
+  loop
+    if v_adjustment.batch_id is null
+       or v_adjustment.quantity is null
+       or v_adjustment.quantity < 0
+       or v_adjustment.quantity > 999999999 then
+      raise exception 'each batch needs a valid non-negative quantity';
+    end if;
+
+    select * into v_batch
+      from inventory_batches
+     where id = v_adjustment.batch_id
+       and item_id = p_item_id
+     for update;
+    if not found then
+      raise exception 'a selected batch no longer belongs to this item';
+    end if;
+
+    v_target := v_adjustment.quantity;
+    v_delta := v_target - v_batch.remaining_quantity;
+    if v_delta < 0 then
+      update inventory_batches
+         set remaining_quantity = v_target
+       where id = v_batch.id;
+    elsif v_delta > 0 then
+      insert into inventory_batches
+        (batch_code, item_id, received_quantity, remaining_quantity,
+         expiration_date, source_type, adjustment_reason)
+      values
+        ('CTB-' || upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 16)),
+         p_item_id, v_delta, v_delta, v_batch.expiration_date, 'adjustment',
+         trim(p_reason));
+    end if;
+  end loop;
+
+  if p_patch ? 'expirable'
+     and (p_patch->>'expirable')::boolean = false
+     and exists (
+       select 1 from inventory_batches
+        where item_id = p_item_id
+          and remaining_quantity > 0
+          and expiration_date is not null
+     ) then
+    raise exception 'remove or resolve dated batches before marking this item non-expiring';
+  end if;
+
+  select coalesce(sum(remaining_quantity), 0)
+    into v_total
+    from inventory_batches
+   where item_id = p_item_id;
+
+  update items
+     set name = case when p_patch ? 'name' then p_patch->>'name' else name end,
+         category_id = case when p_patch ? 'category_id'
+           then nullif(p_patch->>'category_id', '')::uuid else category_id end,
+         location_id = case when p_patch ? 'location_id'
+           then nullif(p_patch->>'location_id', '')::uuid else location_id end,
+         supplier_id = case when p_patch ? 'supplier_id'
+           then nullif(p_patch->>'supplier_id', '')::uuid else supplier_id end,
+         physical_form = case when p_patch ? 'physical_form'
+           then p_patch->>'physical_form' else physical_form end,
+         unit = case when p_patch ? 'unit' then p_patch->>'unit' else unit end,
+         units_per_box = case when p_patch ? 'units_per_box'
+           then nullif(p_patch->>'units_per_box', '')::numeric else units_per_box end,
+         unit_price = case when p_patch ? 'unit_price'
+           then nullif(p_patch->>'unit_price', '')::numeric else unit_price end,
+         low_stock_threshold = case when p_patch ? 'low_stock_threshold'
+           then (p_patch->>'low_stock_threshold')::numeric else low_stock_threshold end,
+         expiration_date = case
+           when p_patch ? 'expirable' and (p_patch->>'expirable')::boolean = false
+             then null
+           when p_patch ? 'expiration_date'
+             then nullif(p_patch->>'expiration_date', '')::date
+           else expiration_date
+         end,
+         expirable = case when p_patch ? 'expirable'
+           then (p_patch->>'expirable')::boolean else expirable end,
+         quantity = v_total,
+         version = version + 1,
+         updated_at = now()
+   where id = p_item_id
+  returning * into v_item;
+
+  return v_item;
+end;
+$$;
+
 -- Approving a submission or rejecting one is an ordinary item update with two
 -- things a plain UPDATE cannot do: it must refuse to run on an item that is not
 -- actually awaiting a decision, and it must stamp who decided. Both in one
@@ -507,9 +896,33 @@ create table if not exists item_change_requests (
   quantity           numeric(12,3) check (quantity is null or quantity >= 0),
   low_stock_threshold numeric(12,3),
   expiration_date    date,
+  expirable          boolean,
+  batch_adjustments  jsonb,
   correction_reason  text,
   unit_price        numeric(12,2)
 );
+
+-- A temporary, admin-reviewed request to bypass the staff face check for today.
+-- The submitted camera image is cleared as soon as an admin decides.
+create table if not exists duty_bypass_requests (
+  id                 uuid primary key default gen_random_uuid(),
+  requested_by       uuid not null references users(id) on delete cascade,
+  requester_name     text not null,
+  requester_username text not null,
+  reason             text not null,
+  photo_data         text,
+  requested_at       timestamptz not null default now(),
+  status             text not null default 'pending'
+    check (status in ('pending','approved','rejected')),
+  reviewed_by        uuid references users(id) on delete set null,
+  reviewed_at        timestamptz,
+  review_note        text,
+  approved_until     timestamptz
+);
+
+create unique index if not exists duty_bypass_requests_one_pending_per_user
+  on duty_bypass_requests(requested_by)
+  where status = 'pending';
 
 create or replace function review_change_request(
   p_request_id uuid,
@@ -542,6 +955,28 @@ begin
   end if;
 
   if p_decision = 'approve' then
+    if v_req.batch_adjustments is not null then
+      select * into v_item
+        from correct_item_batch_counts(
+          v_req.item_id,
+          v_req.base_version,
+          jsonb_strip_nulls(jsonb_build_object(
+            'name', v_req.name,
+            'category_id', v_req.category_id,
+            'location_id', v_req.location_id,
+            'supplier_id', v_req.supplier_id,
+            'physical_form', v_req.physical_form,
+            'unit', v_req.unit,
+            'units_per_box', v_req.units_per_box,
+            'unit_price', v_req.unit_price,
+            'low_stock_threshold', v_req.low_stock_threshold,
+            'expiration_date', v_req.expiration_date,
+            'expirable', v_req.expirable
+          )),
+          v_req.batch_adjustments,
+          v_req.correction_reason
+        );
+    else
     update items
        set name = coalesce(v_req.name, name),
            category_id = coalesce(v_req.category_id, category_id),
@@ -552,7 +987,11 @@ begin
            units_per_box = coalesce(v_req.units_per_box, units_per_box),
            quantity = coalesce(v_req.quantity, quantity),
            low_stock_threshold = coalesce(v_req.low_stock_threshold, low_stock_threshold),
-           expiration_date = coalesce(v_req.expiration_date, expiration_date),
+           expiration_date = case
+             when v_req.expirable = false then null
+             else coalesce(v_req.expiration_date, expiration_date)
+           end,
+           expirable = coalesce(v_req.expirable, expirable),
            unit_price = coalesce(v_req.unit_price, unit_price),
            version = version + case when v_req.quantity is not null then 1 else 0 end,
            updated_at = now()
@@ -562,6 +1001,7 @@ begin
 
     if not found then
       raise exception 'item was changed after this request was made — reject it and ask again';
+    end if;
     end if;
   end if;
 
@@ -578,6 +1018,7 @@ create table if not exists transactions (
   note       text,
   created_at timestamptz not null default now()
 );
+alter table transactions add column if not exists note text;
 
 create table if not exists transaction_items (
   id             uuid primary key default gen_random_uuid(),
@@ -588,8 +1029,12 @@ create table if not exists transaction_items (
   quantity       numeric(12,3) not null,
   qty_before     numeric(12,3) not null,
   qty_after      numeric(12,3) not null,
-  expiration_date date
+  expiration_date date,
+  note           text
 );
+alter table transaction_items add column if not exists note text;
+alter table transaction_items
+  add column if not exists batch_allocations jsonb not null default '[]'::jsonb;
 
 -- ---------- audit trail (hash chained, append-only) ----------
 create table if not exists audit_log (
@@ -630,8 +1075,19 @@ create table if not exists alerts (
   resolved    boolean not null default false,
   resolved_by text,
   resolved_at timestamptz,
-  created_at  timestamptz not null default now()
+  resolved_reason text,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
 );
+
+alter table alerts add column if not exists updated_at timestamptz;
+alter table alerts add column if not exists resolved_reason text;
+update alerts set updated_at = created_at where updated_at is null;
+update alerts
+   set resolved_reason = 'Previously resolved; no reason was recorded.'
+ where resolved = true and resolved_reason is null;
+alter table alerts alter column updated_at set default now();
+alter table alerts alter column updated_at set not null;
 
 -- ---------- failed / successful login attempts ----------
 create table if not exists login_attempts (
@@ -836,7 +1292,7 @@ create or replace function process_transaction(
   p_type       text,
   p_actor_id   uuid,
   p_actor_name text,
-  p_items      jsonb,   -- [{"sku":"CT-COF-1234","qty":2,"exp":"2026-04-01"}, ...]
+  p_items      jsonb,   -- lines may include a scanned batch_id
   p_note       text default null
 ) returns jsonb
 language plpgsql
@@ -850,6 +1306,17 @@ declare
   v_exp     date;
   v_min_days integer;
   v_loc     text;
+  v_batch_id uuid;
+  v_batch_code text;
+  v_batch record;
+  v_remaining numeric(12,3);
+  v_take numeric(12,3);
+  v_current_exp date;
+  v_allocations jsonb;
+  v_batch_alloc record;
+  v_manual_total numeric(12,3);
+  v_seen_batches uuid[];
+  v_current_batches jsonb;
   v_results jsonb := '[]'::jsonb;
 begin
   if p_type not in ('checkout','restock','waste') then
@@ -867,7 +1334,11 @@ begin
   for v_req in
     select (e->>'sku') as sku, (e->>'qty')::numeric as qty,
            nullif(btrim(e->>'exp'), '') as exp_text,
-           (e->>'boxes')::numeric as boxes
+           (e->>'boxes')::numeric as boxes,
+           nullif(btrim(e->>'batch_id'), '')::uuid as batch_id,
+           nullif(e->'batch_allocations', 'null'::jsonb) as batch_allocations,
+           nullif(left(btrim(e->>'note'), 500), '') as item_note,
+           nullif(left(btrim(e->>'waste_reason'), 500), '') as waste_reason
     from jsonb_array_elements(p_items) e
   loop
     -- The quantity is checked at the END of this block, not here. A line that
@@ -937,6 +1408,21 @@ begin
       raise exception 'invalid quantity for %', v_req.sku;
     end if;
 
+    if p_type <> 'waste' and v_req.waste_reason is not null then
+      raise exception 'waste reasons are only valid for waste logs';
+    end if;
+    if length(
+         case
+           when v_req.waste_reason is not null
+             and position(v_req.waste_reason in coalesce(v_req.item_note, '')) > 0
+             then v_req.item_note
+           else concat_ws(E'\n', v_req.item_note, v_req.waste_reason)
+         end
+       ) > 500 then
+      raise exception 'item note and waste reason exceed 500 characters for %',
+        v_req.sku;
+    end if;
+
     -- Minimum shelf life on receipt. A location can refuse stock that arrives
     -- already too close to its date — the point of a freezer is that things keep
     -- for months, so a delivery with days left is not worth taking. Only a
@@ -954,47 +1440,232 @@ begin
       end if;
     end if;
 
-    if p_type in ('checkout','waste') then
-      if v_row.quantity <= 0 then
-        raise exception 'cannot deduct from % — out of stock (have 0, need %)',
-          v_row.sku, v_req.qty;
+    v_allocations := '[]'::jsonb;
+    if p_type = 'restock' then
+      if v_req.batch_id is not null or v_req.batch_allocations is not null then
+        raise exception 'a restock creates a new batch and cannot target an existing batch';
       end if;
-      if v_row.quantity < v_req.qty then
-        raise exception 'insufficient stock for % (have %, need %)',
-          v_row.sku, v_row.quantity, v_req.qty;
-      end if;
-      v_new_qty := v_row.quantity - v_req.qty;
-    else
+      -- Every receipt is a distinct batch, even when its expiry matches an
+      -- earlier delivery. A UUID-derived barcode uniquely identifies the lot.
+      v_batch_code := 'CTB-' || upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 16));
+      insert into inventory_batches
+        (batch_code, item_id, received_quantity, remaining_quantity, expiration_date, source_type)
+      values
+        (v_batch_code, v_row.id, v_req.qty, v_req.qty, v_exp, 'restock')
+      returning id into v_batch_id;
+
+      v_allocations := jsonb_build_array(jsonb_build_object(
+        'batch_id', v_batch_id,
+        'batch_code', v_batch_code,
+        'expiration_date', v_exp,
+        'quantity', v_req.qty
+      ));
       v_new_qty := v_row.quantity + v_req.qty;
+    else
+      v_remaining := v_req.qty;
+
+      if v_req.batch_allocations is not null then
+        if p_type <> 'checkout' then
+          raise exception 'manual batch selection is only supported for checkout';
+        end if;
+        if v_req.batch_id is not null then
+          raise exception 'use either a scanned batch or manual batch allocations, not both';
+        end if;
+        if jsonb_typeof(v_req.batch_allocations) <> 'array'
+           or jsonb_array_length(v_req.batch_allocations) = 0 then
+          raise exception 'manual batch selection must include at least one batch';
+        end if;
+
+        v_manual_total := 0;
+        v_seen_batches := '{}'::uuid[];
+        for v_batch_alloc in
+          select value as allocation
+            from jsonb_array_elements(v_req.batch_allocations)
+        loop
+          v_batch_id := nullif(btrim(v_batch_alloc.allocation->>'batch_id'), '')::uuid;
+          v_take := nullif(btrim(v_batch_alloc.allocation->>'qty'), '')::numeric;
+          if v_batch_id is null or v_take is null or v_take <= 0 then
+            raise exception 'invalid batch allocation for %', v_req.sku;
+          end if;
+          if v_batch_id = any(v_seen_batches) then
+            raise exception 'batch % was selected more than once', v_batch_id;
+          end if;
+          v_seen_batches := array_append(v_seen_batches, v_batch_id);
+
+          select * into v_batch
+            from inventory_batches
+           where id = v_batch_id and item_id = v_row.id
+           for update;
+          if not found then
+            raise exception 'the selected batch does not belong to %', v_row.sku;
+          end if;
+          if v_batch.expiration_date < current_date then
+            raise exception 'batch % expired on % and cannot be checked out',
+              v_batch.batch_code, v_batch.expiration_date;
+          end if;
+          if v_batch.remaining_quantity < v_take then
+            raise exception 'batch % has only % remaining',
+              v_batch.batch_code, v_batch.remaining_quantity;
+          end if;
+
+          update inventory_batches
+             set remaining_quantity = remaining_quantity - v_take
+           where id = v_batch.id;
+          v_manual_total := v_manual_total + v_take;
+          v_allocations := v_allocations || jsonb_build_array(jsonb_build_object(
+            'batch_id', v_batch.id,
+            'batch_code', v_batch.batch_code,
+            'expiration_date', v_batch.expiration_date,
+            'quantity', v_take
+          ));
+        end loop;
+
+        if v_manual_total <> v_req.qty then
+          raise exception 'selected batch quantities total %, but checkout quantity is %',
+            v_manual_total, v_req.qty;
+        end if;
+      elsif v_req.batch_id is not null then
+        select * into v_batch
+          from inventory_batches
+         where id = v_req.batch_id and item_id = v_row.id
+         for update;
+        if not found then
+          raise exception 'the scanned batch does not belong to %', v_row.sku;
+        end if;
+        if p_type = 'checkout' and v_batch.expiration_date < current_date then
+          raise exception 'batch % expired on % and cannot be checked out',
+            v_batch.batch_code, v_batch.expiration_date;
+        end if;
+        if p_type = 'waste'
+           and (v_batch.expiration_date is null or v_batch.expiration_date >= current_date)
+           and v_req.waste_reason is null then
+          raise exception 'a reason is required to waste non-expired batch %',
+            v_batch.batch_code;
+        end if;
+        if v_batch.remaining_quantity < v_remaining then
+          raise exception 'batch % has only % remaining',
+            v_batch.batch_code, v_batch.remaining_quantity;
+        end if;
+
+        update inventory_batches
+           set remaining_quantity = remaining_quantity - v_remaining
+         where id = v_batch.id;
+        v_allocations := jsonb_build_array(jsonb_build_object(
+          'batch_id', v_batch.id,
+          'batch_code', v_batch.batch_code,
+          'expiration_date', v_batch.expiration_date,
+          'quantity', v_remaining
+        ));
+      else
+        -- Checkout uses FEFO and never takes expired stock. Waste consumes the
+        -- oldest lot first so expired stock is written off before good stock.
+        for v_batch in
+          select *
+            from inventory_batches
+           where item_id = v_row.id
+             and remaining_quantity > 0
+             and (
+               (p_type = 'waste' and expiration_date < current_date)
+               or (
+                 p_type = 'checkout'
+                 and (expiration_date is null or expiration_date >= current_date)
+               )
+             )
+           order by expiration_date asc nulls last, received_at asc, id asc
+           for update
+        loop
+          exit when v_remaining <= 0;
+          v_take := least(v_remaining, v_batch.remaining_quantity);
+          update inventory_batches
+             set remaining_quantity = remaining_quantity - v_take
+           where id = v_batch.id;
+          v_allocations := v_allocations || jsonb_build_array(jsonb_build_object(
+            'batch_id', v_batch.id,
+            'batch_code', v_batch.batch_code,
+            'expiration_date', v_batch.expiration_date,
+            'quantity', v_take
+          ));
+          v_remaining := v_remaining - v_take;
+        end loop;
+
+        if v_remaining > 0 then
+          if p_type = 'checkout' then
+            raise exception 'insufficient non-expired stock for % (need % more)',
+              v_row.sku, v_remaining;
+          elsif p_type = 'waste' then
+            raise exception 'insufficient expired stock for automatic waste of % (need % more); select a batch and provide a reason to waste non-expired stock',
+              v_row.sku, v_remaining;
+          else
+            raise exception 'insufficient stock for % (need % more)',
+              v_row.sku, v_remaining;
+          end if;
+        end if;
+      end if;
+
+      select coalesce(sum(remaining_quantity), 0)
+        into v_new_qty
+        from inventory_batches
+       where item_id = v_row.id;
     end if;
 
-    -- A restock may carry the new batch's expiry date. checkout and waste
-    -- deliberately do not: receiving stock is the only moment the date is
-    -- known, and leaving it alone everywhere else keeps a stale date from
-    -- being silently extended or cleared. A line with no date keeps whatever
-    -- the item already had, rather than nulling it.
-    update items
-       set quantity = v_new_qty,
-           version = version + 1,
-           updated_at = now(),
-           expiration_date = case
-             when p_type = 'restock' and v_exp is not null then v_exp
-             else expiration_date
-           end
+    -- Keep the compatibility total and single-date field aligned with the
+    -- remaining batches. Expiry is the earliest date among lots still on hand.
+      select min(expiration_date)
+        into v_current_exp
+        from inventory_batches
+       where item_id = v_row.id and remaining_quantity > 0;
+
+      update items
+         set quantity = v_new_qty,
+             version = version + 1,
+             updated_at = now(),
+             expiration_date = v_current_exp
      where id = v_row.id and version = v_row.version;
 
     if not found then
       raise exception 'concurrent modification on % — please retry', v_row.sku;
     end if;
 
+    select coalesce(
+      jsonb_agg(
+        jsonb_build_object(
+          'id', id,
+          'batch_code', batch_code,
+          'received_quantity', received_quantity,
+          'remaining_quantity', remaining_quantity,
+          'expiration_date', expiration_date,
+          'received_at', received_at
+        )
+        order by expiration_date asc nulls last, received_at asc, id asc
+      ),
+      '[]'::jsonb
+    )
+      into v_current_batches
+      from inventory_batches
+     where item_id = v_row.id and remaining_quantity > 0;
+
     insert into transaction_items
-      (transaction_id, item_id, sku, item_name, quantity, qty_before, qty_after, expiration_date)
+      (transaction_id, item_id, sku, item_name, quantity, qty_before, qty_after,
+       expiration_date, note, batch_allocations)
     values
       (v_txn_id, v_row.id, v_row.sku, v_row.name, v_req.qty, v_row.quantity, v_new_qty,
        case
-         when p_type = 'restock' and v_exp is not null then v_exp
+         when p_type = 'restock' then v_exp
+         when p_type = 'checkout' and jsonb_array_length(v_allocations) = 1
+           then nullif(v_allocations->0->>'expiration_date', '')::date
+         when p_type = 'checkout' then null
          else v_row.expiration_date
-       end);
+       end,
+       nullif(
+         case
+           when v_req.waste_reason is not null
+             and position(v_req.waste_reason in coalesce(v_req.item_note, '')) > 0
+             then v_req.item_note
+           else concat_ws(E'\n', v_req.item_note, v_req.waste_reason)
+         end,
+         ''
+       ),
+       v_allocations);
 
     v_results := v_results || jsonb_build_object(
       'sku', v_row.sku,
@@ -1008,13 +1679,9 @@ begin
       'added', v_new_qty - v_row.quantity,
       'boxes', case when v_req.boxes is not null then v_req.boxes end,
       'units_per_box', v_row.units_per_box,
-      -- The date as it now stands, so a caller can see whether a supplied
-      -- expiry was applied or the previous one kept.
-      'expiration', case
-        when p_type = 'restock' and v_exp is not null
-          then to_char(v_exp, 'YYYY-MM-DD')
-        else to_char(v_row.expiration_date, 'YYYY-MM-DD')
-      end
+      'expiration', to_char(v_current_exp, 'YYYY-MM-DD'),
+      'batches', v_allocations,
+      'current_batches', v_current_batches
     );
   end loop;
 
@@ -1289,28 +1956,75 @@ begin
          message = case when i.quantity <= 0
                         then i.name || ' is out of stock'
                         else i.name || ' is low on stock (' || i.quantity || ' ' || i.unit || ' left)'
-                   end
+                   end,
+         updated_at = now()
     from items i
    where i.id = a.item_id
      and a.resolved = false
      and a.type in ('low_stock','out_of_stock')
-     and a.type is distinct from
-         (case when i.quantity <= 0 then 'out_of_stock' else 'low_stock' end);
+     and (
+       a.type is distinct from
+         (case when i.quantity <= 0 then 'out_of_stock' else 'low_stock' end)
+       or a.message is distinct from
+         (case when i.quantity <= 0
+           then i.name || ' is out of stock'
+           else i.name || ' is low on stock (' || i.quantity || ' ' || i.unit || ' left)'
+         end)
+     );
 
-  -- Same for expiry: an item that crosses its date while its warning is open
-  -- is expired, not merely expiring.
+  -- Expiry alerts describe the affected lots, not the item's aggregate
+  -- earliest date. One item can have both expired and usable batches.
   update alerts a
-     set type = case when i.expiration_date < current_date then 'expired' else 'near_expiry' end,
-         message = case when i.expiration_date < current_date
-                        then i.name || ' expired on ' || i.expiration_date
-                        else i.name || ' expires on ' || i.expiration_date
-                   end
+     set type = case when lot_status.expired_quantity > 0 then 'expired' else 'near_expiry' end,
+         message = i.name ||
+           case when lot_status.expired_quantity > 0 then
+             ' has expired batch stock: ' || lot_status.expired_details ||
+             case when lot_status.usable_quantity > 0
+               then '; ' || lot_status.usable_quantity || ' ' || i.unit || ' remains usable'
+               else ''
+             end
+           else
+             ' has batch stock expiring soon: ' || lot_status.soon_details
+           end,
+         updated_at = now()
     from items i
+    cross join lateral (
+      select
+        coalesce(sum(b.remaining_quantity) filter (where b.expiration_date < current_date), 0) as expired_quantity,
+        coalesce(sum(b.remaining_quantity) filter (where b.expiration_date between current_date and current_date + (v_days || ' days')::interval), 0) as soon_quantity,
+        coalesce(sum(b.remaining_quantity) filter (where b.expiration_date is null or b.expiration_date >= current_date), 0) as usable_quantity,
+        string_agg(
+          b.batch_code || ': ' || b.remaining_quantity || ' ' || i.unit || ' (expired ' || b.expiration_date || ')',
+          ', '
+        ) filter (where b.expiration_date < current_date) as expired_details,
+        string_agg(
+          b.batch_code || ': ' || b.remaining_quantity || ' ' || i.unit || ' (expires ' || b.expiration_date || ')',
+          ', '
+        ) filter (where b.expiration_date between current_date and current_date + (v_days || ' days')::interval) as soon_details
+      from inventory_batches b
+      where b.item_id = i.id and b.remaining_quantity > 0
+    ) lot_status
    where i.id = a.item_id
+     and i.item_status = 'active'
+     and i.expirable = true
      and a.resolved = false
      and a.type in ('near_expiry','expired')
-     and a.type is distinct from
-         (case when i.expiration_date < current_date then 'expired' else 'near_expiry' end);
+     and (lot_status.expired_quantity > 0 or lot_status.soon_quantity > 0)
+     and (
+       a.type is distinct from
+         (case when lot_status.expired_quantity > 0 then 'expired' else 'near_expiry' end)
+       or a.message is distinct from
+         (i.name ||
+           case when lot_status.expired_quantity > 0 then
+             ' has expired batch stock: ' || lot_status.expired_details ||
+             case when lot_status.usable_quantity > 0
+               then '; ' || lot_status.usable_quantity || ' ' || i.unit || ' remains usable'
+               else ''
+             end
+           else
+             ' has batch stock expiring soon: ' || lot_status.soon_details
+           end)
+     );
 
   -- open stock alerts
   insert into alerts (item_id, type, message)
@@ -1333,19 +2047,40 @@ begin
         and a.type in ('low_stock','out_of_stock')
     );
 
-  -- open expiry alerts (skip non-expirable items)
+  -- One expiry alert per item, naming the affected batches and quantities.
   insert into alerts (item_id, type, message)
   select i.id,
-         case when i.expiration_date < current_date then 'expired' else 'near_expiry' end,
-         case when i.expiration_date < current_date
-              then i.name || ' expired on ' || i.expiration_date
-              else i.name || ' expires on ' || i.expiration_date
-         end
-  from items i
+         case when lot_status.expired_quantity > 0 then 'expired' else 'near_expiry' end,
+         i.name ||
+           case when lot_status.expired_quantity > 0 then
+             ' has expired batch stock: ' || lot_status.expired_details ||
+             case when lot_status.usable_quantity > 0
+               then '; ' || lot_status.usable_quantity || ' ' || i.unit || ' remains usable'
+               else ''
+             end
+           else
+             ' has batch stock expiring soon: ' || lot_status.soon_details
+           end
+    from items i
+    cross join lateral (
+      select
+        coalesce(sum(b.remaining_quantity) filter (where b.expiration_date < current_date), 0) as expired_quantity,
+        coalesce(sum(b.remaining_quantity) filter (where b.expiration_date between current_date and current_date + (v_days || ' days')::interval), 0) as soon_quantity,
+        coalesce(sum(b.remaining_quantity) filter (where b.expiration_date is null or b.expiration_date >= current_date), 0) as usable_quantity,
+        string_agg(
+          b.batch_code || ': ' || b.remaining_quantity || ' ' || i.unit || ' (expired ' || b.expiration_date || ')',
+          ', '
+        ) filter (where b.expiration_date < current_date) as expired_details,
+        string_agg(
+          b.batch_code || ': ' || b.remaining_quantity || ' ' || i.unit || ' (expires ' || b.expiration_date || ')',
+          ', '
+        ) filter (where b.expiration_date between current_date and current_date + (v_days || ' days')::interval) as soon_details
+      from inventory_batches b
+      where b.item_id = i.id and b.remaining_quantity > 0
+    ) lot_status
   where i.item_status = 'active'
     and i.expirable = true
-    and i.expiration_date is not null
-    and i.expiration_date <= current_date + (v_days || ' days')::interval
+    and (lot_status.expired_quantity > 0 or lot_status.soon_quantity > 0)
     and not exists (
       select 1 from alerts a
       where a.item_id = i.id and a.resolved = false
@@ -1366,27 +2101,154 @@ begin
 
   -- auto-resolve stock alerts that cleared
   update alerts a
-     set resolved = true, resolved_by = 'system', resolved_at = now()
+     set resolved = true,
+         resolved_by = coalesce((
+           select t.actor_name
+             from transactions t
+             join transaction_items ti on ti.transaction_id = t.id
+            where t.type = 'restock'
+              and ti.item_id = i.id
+              and t.created_at >= a.created_at
+            order by t.created_at desc, t.id desc
+            limit 1
+         ), 'system'),
+         resolved_at = coalesce((
+           select t.created_at
+             from transactions t
+             join transaction_items ti on ti.transaction_id = t.id
+            where t.type = 'restock'
+              and ti.item_id = i.id
+              and t.created_at >= a.created_at
+            order by t.created_at desc, t.id desc
+            limit 1
+         ), now()),
+         resolved_reason = coalesce((
+           select 'Stock replenished by ' || t.actor_name || ' via restock (' ||
+                  ti.quantity || ' ' || i.unit || ').' ||
+                  case
+                    when nullif(btrim(concat_ws(' — ', t.note, ti.note)), '') is null then ''
+                    else ' Note: ' || concat_ws(' — ', t.note, ti.note)
+                  end
+             from transactions t
+             join transaction_items ti on ti.transaction_id = t.id
+            where t.type = 'restock'
+              and ti.item_id = i.id
+              and t.created_at >= a.created_at
+            order by t.created_at desc, t.id desc
+            limit 1
+         ), 'Stock level recovered above the configured low-stock threshold.'),
+         updated_at = now()
+    from items i
    where a.resolved = false
      and a.type in ('low_stock','out_of_stock')
-     and exists (
-       select 1 from items i
-       where i.id = a.item_id and i.quantity > i.low_stock_threshold
-     );
+     and i.id = a.item_id
+     and i.quantity > i.low_stock_threshold;
 
-  -- auto-resolve expiry alerts that cleared
+  -- Resolve each expiry severity only after its affected batches are gone or
+  -- no longer inside the warning window.
   update alerts a
-     set resolved = true, resolved_by = 'system', resolved_at = now()
+     set resolved = true,
+         resolved_by = coalesce((
+           select t.actor_name
+             from transactions t
+             join transaction_items ti on ti.transaction_id = t.id
+            where t.type in ('waste','checkout')
+              and ti.item_id = i.id
+              and t.created_at >= a.created_at
+              and exists (
+                select 1
+                  from jsonb_array_elements(ti.batch_allocations) allocation
+                 where nullif(allocation->>'expiration_date', '')::date is not null
+                   and (allocation->>'expiration_date')::date <
+                       case when a.type = 'expired'
+                         then current_date
+                         else current_date + (v_days || ' days')::interval
+                       end
+                   and (
+                     allocation->>'batch_code' is null
+                     or position(allocation->>'batch_code' in a.message) > 0
+                   )
+              )
+            order by t.created_at desc, t.id desc
+            limit 1
+         ), 'system'),
+         resolved_at = coalesce((
+           select t.created_at
+             from transactions t
+             join transaction_items ti on ti.transaction_id = t.id
+            where t.type in ('waste','checkout')
+              and ti.item_id = i.id
+              and t.created_at >= a.created_at
+              and exists (
+                select 1
+                  from jsonb_array_elements(ti.batch_allocations) allocation
+                 where nullif(allocation->>'expiration_date', '')::date is not null
+                   and (allocation->>'expiration_date')::date <
+                       case when a.type = 'expired'
+                         then current_date
+                         else current_date + (v_days || ' days')::interval
+                       end
+                   and (
+                     allocation->>'batch_code' is null
+                     or position(allocation->>'batch_code' in a.message) > 0
+                   )
+              )
+            order by t.created_at desc, t.id desc
+            limit 1
+         ), now()),
+         resolved_reason = coalesce((
+           select case
+                    when t.type = 'waste' then
+                      'Expired/near-expiry stock logged as waste by ' || t.actor_name ||
+                      ' (' || ti.quantity || ' ' || i.unit || ').'
+                    else
+                      'Expiring batch used in checkout by ' || t.actor_name ||
+                      ' (' || ti.quantity || ' ' || i.unit || ').'
+                  end ||
+                  case
+                    when nullif(btrim(concat_ws(' — ', t.note, ti.note)), '') is null then ''
+                    else ' Note: ' || concat_ws(' — ', t.note, ti.note)
+                  end
+             from transactions t
+             join transaction_items ti on ti.transaction_id = t.id
+            where t.type in ('waste','checkout')
+              and ti.item_id = i.id
+              and t.created_at >= a.created_at
+              and exists (
+                select 1
+                  from jsonb_array_elements(ti.batch_allocations) allocation
+                 where nullif(allocation->>'expiration_date', '')::date is not null
+                   and (allocation->>'expiration_date')::date <
+                       case when a.type = 'expired'
+                         then current_date
+                         else current_date + (v_days || ' days')::interval
+                       end
+                   and (
+                     allocation->>'batch_code' is null
+                     or position(allocation->>'batch_code' in a.message) > 0
+                   )
+              )
+            order by t.created_at desc, t.id desc
+            limit 1
+         ), 'The affected expired or near-expiry batches are no longer in stock.'),
+         updated_at = now()
+    from items i
    where a.resolved = false
      and a.type in ('near_expiry','expired')
-     and exists (
-       select 1 from items i
-       where i.id = a.item_id
-         and (i.expirable = false
-              or i.expiration_date is null
-              or i.quantity <= 0
-              or i.expiration_date > current_date + (v_days || ' days')::interval)
-     );
+     and i.id = a.item_id
+     and (
+           i.expirable = false
+           or not exists (
+             select 1
+               from inventory_batches b
+              where b.item_id = i.id
+                and b.remaining_quantity > 0
+                and case when a.type = 'expired'
+                  then b.expiration_date < current_date
+                  else b.expiration_date between current_date and current_date + (v_days || ' days')::interval
+                end
+           )
+         );
 end;
 $$;
 
@@ -1400,6 +2262,7 @@ alter table categories        enable row level security;
 alter table locations         enable row level security;
 alter table transactions      enable row level security;
 alter table transaction_items enable row level security;
+alter table inventory_batches enable row level security;
 alter table audit_log         enable row level security;
 alter table alerts            enable row level security;
 alter table login_attempts    enable row level security;
@@ -1465,12 +2328,15 @@ create index if not exists idx_items_supplier on items(supplier_id);
 -- ACTIVE SESSION TRACKING (FR-16)
 -- ============================================================
 alter table users add column if not exists session_token text;
+alter table users add column if not exists session_last_active_at timestamptz;
 create unique index if not exists idx_users_session_token on users(session_token) where session_token is not null;
 -- ============================================================
 -- COST PRICE tracking (appended 2026-10-09)
 -- ============================================================
 alter table items add column if not exists unit_price numeric(12,2);
 alter table item_change_requests add column if not exists unit_price numeric(12,2);
+alter table item_change_requests add column if not exists expirable boolean;
+alter table item_change_requests add column if not exists batch_adjustments jsonb;
 
 -- The ID-card sign-in lookup reads the staff rows and compares an OCR'd number
 -- against this column. Indexed so that is a lookup rather than a scan as the table

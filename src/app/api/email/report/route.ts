@@ -35,6 +35,7 @@ export const POST = handler(async (req: Request) => {
       .map(({ label, count, qty }) => `${label}: ${count} transactions, ${qty} units`)
       .join("; ")}`,
     `Filters: ${report.filterDescription}`,
+    ...report.warnings.map((warning) => `Warning: ${warning}`),
     "",
     "The complete inventory and movement report is attached as a PDF.",
   ].join("\n");

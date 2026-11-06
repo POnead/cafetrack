@@ -2,7 +2,9 @@ import { handler, ok, fail } from "@/lib/api";
 import {
   getSession,
   getSessionToken,
+  hasActiveSession,
   needsRefresh,
+  readSessionToken,
   signSession,
   setSessionCookie,
 } from "@/lib/auth";
@@ -12,24 +14,62 @@ import { getFaceStatus } from "@/lib/face-gate";
 
 export const runtime = "nodejs";
 
-export const GET = handler(async () => {
+export const GET = handler(async (req: Request) => {
   const session = await getSession();
-  if (!session) return fail("Not signed in", 401);
+  const search = new URL(req.url).searchParams;
+  const sessionCheck = search.get("session_check") === "1";
+  const userActivity = search.get("activity") === "1";
+  if (!session) {
+    if (sessionCheck) {
+      const token = await getSessionToken();
+      const tokenUser = token ? await readSessionToken(token) : null;
+      if (token && tokenUser) {
+        const { data: row, error } = await db()
+          .from("users")
+          .select("session_token, is_active, session_last_active_at")
+          .eq("id", tokenUser.id)
+          .maybeSingle();
 
-  // The idle window is admin-configurable, so the browser is told what it is
-  // instead of hardcoding 15 minutes on both sides.
+        if (error) {
+          console.error("session conflict check failed:", error.message);
+          return fail("Could not verify the current session", 503);
+        }
+
+        const sessionConflict =
+          Boolean(row && row.is_active !== false && row.session_token !== token) &&
+          await hasActiveSession(row?.session_token, row?.session_last_active_at);
+        return fail("Not signed in", 401, { session_conflict: sessionConflict });
+      }
+    }
+
+    return fail("Not signed in", 401);
+  }
+
+  // The periodic browser check only needs to know whether this token is still
+  // current. It must not extend an otherwise idle session.
+  if (sessionCheck) return ok({ user: session });
+
   const minutes = await getSessionMinutes();
-
-  // Sliding session: re-issue the cookie only once the token is past
-  // half-life. Re-signing on every call would rewrite the cookie on each
-  // dashboard poll and activity ping for no benefit.
-  //
-  // The new token is deliberately passed with the user id and client: rotating
-  // the cookie without updating `users.session_token` made the server's own
-  // revocation check reject the fresh token on the very next request (the row
-  // still named the old one), so every session died at half its configured
-  // lifetime. Writing both together keeps the sliding window working.
   const token = await getSessionToken();
+
+  if (userActivity && token) {
+    const { data, error } = await db()
+      .from("users")
+      .update({ session_last_active_at: new Date().toISOString() })
+      .eq("id", session.id)
+      .eq("session_token", token)
+      .select("id")
+      .maybeSingle();
+
+    if (error) {
+      console.error("session activity update failed:", error.message);
+      return fail("Could not update session activity", 503);
+    }
+    if (!data) return fail("Not signed in", 401);
+  }
+
+  // Only visible user activity updates the persisted idle timestamp.
+  // Session checks and background polls never count as activity.
   if (token && (await needsRefresh(token, minutes))) {
     await setSessionCookie(
       await signSession(session, minutes),

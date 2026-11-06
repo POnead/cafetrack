@@ -17,6 +17,7 @@
 
 import { assertTestTarget } from "./_guard.mjs";
 const BASE = process.env.BASE_URL || "http://127.0.0.1:3100";
+const ADMIN_PASSWORD = process.env.SEED_ADMIN_PASSWORD || "admin123";
 
 let pass = 0;
 let fail = 0;
@@ -44,6 +45,9 @@ function day(offset) {
 }
 
 async function call(method, path, body, cookie) {
+  if (method === "DELETE" && path.startsWith("/api/items/") && body === undefined) {
+    body = { password: ADMIN_PASSWORD };
+  }
   const headers = { "content-type": "application/json" };
   if (cookie) headers.cookie = cookie;
   const r = await fetch(BASE + path, {
@@ -65,7 +69,7 @@ async function signInAdmin() {
   return cookieOf(
     await call("POST", "/api/auth/login", {
       username: "admin",
-      password: process.env.SEED_ADMIN_PASSWORD || "admin123",
+      password: ADMIN_PASSWORD,
     })
   );
 }

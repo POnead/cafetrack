@@ -1,7 +1,11 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail, badId, readBody } from "@/lib/api";
+import { handler, ok, fail, badId, readBody, clientIp } from "@/lib/api";
 import { hashPassword, verifyPassword, newStaffToken, requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
+import {
+  deleteFacePlusPlusEnrollment,
+  facePlusPlusFaceSetTokens,
+} from "@/lib/facepp";
 
 export const runtime = "nodejs";
 
@@ -312,5 +316,72 @@ export const PATCH = handler(
     });
 
     return ok({ user: data });
+  }
+);
+
+/** Permanently remove an inactive staff account after explicit confirmation. */
+export const DELETE = handler(
+  async (req: Request, { params }: { params: Promise<{ id: string }> }) => {
+    const admin = await requireAdmin();
+    const { id } = await params;
+
+    const malformed = badId(id, "user");
+    if (malformed) return malformed;
+
+    const body = await readBody(req);
+    const { data: before, error: lookupError } = await db()
+      .from("users")
+      .select(
+        "id, username, full_name, role, is_active, facepp_faceset_token, facepp_retired_facesets"
+      )
+      .eq("id", id)
+      .maybeSingle();
+
+    if (lookupError) return fail(lookupError.message, 500);
+    if (!before) return fail("User not found", 404);
+    if (before.role !== "staff") return fail("Only staff accounts can be deleted", 400);
+    if (before.is_active) return fail("Deactivate this account before deleting it", 409);
+    if (String(body.confirm_username ?? "") !== before.username) {
+      return fail("Enter the account username to confirm deletion");
+    }
+
+    const faceSets = facePlusPlusFaceSetTokens(
+      before.facepp_faceset_token,
+      before.facepp_retired_facesets
+    );
+    const deletedFaceSets = await Promise.all(faceSets.map(deleteFacePlusPlusEnrollment));
+    const undeletedFaceSet = deletedFaceSets.find((result) => result.status === "unavailable");
+    if (undeletedFaceSet?.status === "unavailable") {
+      console.error(
+        `Face++ could not remove a deleted account's FaceSet (${undeletedFaceSet.code}).`
+      );
+      return fail(
+        "Face++ could not remove this account's stored reference. The account was not deleted; try again later.",
+        503
+      );
+    }
+
+    const { data: deleted, error } = await db()
+      .from("users")
+      .delete()
+      .eq("id", id)
+      .eq("role", "staff")
+      .eq("is_active", false)
+      .select("id")
+      .maybeSingle();
+
+    if (error) return fail(error.message, 500);
+    if (!deleted) return fail("The account changed before it could be deleted. Refresh and try again.", 409);
+
+    await audit(
+      admin,
+      "USER_DELETE",
+      "user",
+      id,
+      { username: before.username, full_name: before.full_name, role: before.role },
+      { ip: clientIp(req) }
+    );
+
+    return ok({ deleted: true });
   }
 );

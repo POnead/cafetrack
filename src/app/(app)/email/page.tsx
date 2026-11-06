@@ -15,7 +15,17 @@
  * confused with one another.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Card, Spinner, Toast, Empty, Badge, Modal, DataCard, DataField } from "@/components/ui";
+import {
+  Card,
+  ConfirmDialog,
+  Spinner,
+  Toast,
+  Empty,
+  Badge,
+  Modal,
+  DataCard,
+  DataField,
+} from "@/components/ui";
 import { fmtDate } from "@/lib/format";
 
 type Kind = { key: string; label: string };
@@ -84,6 +94,13 @@ type Status = {
 
 type Tone = "info" | "error" | "success";
 
+type PendingConfirmation = {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  onConfirm: () => void;
+};
+
 const STATUS_TONE: Record<QueueRow["status"], "slate" | "green" | "amber" | "red"> = {
   sent: "green",
   queued: "slate",
@@ -115,6 +132,7 @@ export default function EmailSettingsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<{ msg: string; tone: Tone } | null>(null);
+  const [confirmation, setConfirmation] = useState<PendingConfirmation | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
   const [editing, setEditing] = useState<Recipient | null>(null);
@@ -278,24 +296,31 @@ async function sendTest() {
   }
 }
 
-async function clearAccount() {
-  if (!confirm("Forget the saved sending account?")) return;
-  setBusy("clear_smtp");
-  try {
-    const res = await fetch("/api/email", {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ action: "clear_smtp" }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Could not remove the account");
-    setToast({ msg: "Sending account removed", tone: "success" });
-    await load(false);
-  } catch (e: any) {
-    setToast({ msg: e.message, tone: "error" });
-  } finally {
-    setBusy(null);
-  }
+function clearAccount() {
+  setConfirmation({
+    title: "Remove the sending account?",
+    message:
+      "Forget the saved sending account? Email notifications will stop until a new account is configured.",
+    confirmLabel: "Remove account",
+    onConfirm: async () => {
+      setBusy("clear_smtp");
+      try {
+        const res = await fetch("/api/email", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "clear_smtp" }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Could not remove the account");
+        setToast({ msg: "Sending account removed", tone: "success" });
+        await load(false);
+      } catch (e: any) {
+        setToast({ msg: e.message, tone: "error" });
+      } finally {
+        setBusy(null);
+      }
+    },
+  });
 }
 
 /** Fill the form from a preset — host and port only, never the credentials. */
@@ -482,20 +507,26 @@ async function action(name: string, body: Record<string, unknown> = {}) {
     }
   }
 
-async function removeRecipient(r: Recipient) {
-    if (!confirm(`Stop emailing ${r.email_address}?`)) return;
-    setBusy(r.id);
-    try {
-      const res = await fetch(`/api/email?id=${r.id}`, { method: "DELETE" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Could not remove");
-      setToast({ msg: "Recipient removed", tone: "success" });
-      await load();
-    } catch (e: any) {
-      setToast({ msg: e.message, tone: "error" });
-    } finally {
-      setBusy(null);
-    }
+  function removeRecipient(r: Recipient) {
+    setConfirmation({
+      title: "Remove this recipient?",
+      message: `Stop emailing ${r.email_address}?`,
+      confirmLabel: "Remove recipient",
+      onConfirm: async () => {
+        setBusy(r.id);
+        try {
+          const res = await fetch(`/api/email?id=${r.id}`, { method: "DELETE" });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "Could not remove");
+          setToast({ msg: "Recipient removed", tone: "success" });
+          await load();
+        } catch (e: any) {
+          setToast({ msg: e.message, tone: "error" });
+        } finally {
+          setBusy(null);
+        }
+      },
+    });
   }
 
   if (loading) return <Spinner label="Loading email settings..." />;
@@ -510,6 +541,18 @@ async function removeRecipient(r: Recipient) {
   return (
     <div className="space-y-5">
       <Toast message={toast?.msg ?? null} tone={toast?.tone} onDone={() => setToast(null)} />
+      <ConfirmDialog
+        open={!!confirmation}
+        title={confirmation?.title ?? ""}
+        message={confirmation?.message ?? ""}
+        confirmLabel={confirmation?.confirmLabel}
+        onCancel={() => setConfirmation(null)}
+        onConfirm={() => {
+          const confirm = confirmation?.onConfirm;
+          setConfirmation(null);
+          confirm?.();
+        }}
+      />
 
       <div>
         <h1 className="deco-title text-3xl">Email Notifications</h1>

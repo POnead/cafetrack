@@ -2,6 +2,7 @@ import { daysUntil } from "../src/lib/format.ts";
 import { assertTestTarget } from "./_guard.mjs";
 
 const BASE = process.env.BASE_URL || "http://localhost:3100";
+const ADMIN_PASSWORD = process.env.SEED_ADMIN_PASSWORD || "admin123";
 let pass = 0, fail = 0;
 const failures = [];
 
@@ -32,6 +33,13 @@ async function login(username, password) {
   return { status: r.status, cookie };
 }
 async function call(method, path, body, cookie) {
+  if (
+    method === "DELETE" &&
+    path.startsWith("/api/items/") &&
+    (body == null || (typeof body === "object" && Object.keys(body).length === 0))
+  ) {
+    body = { password: ADMIN_PASSWORD };
+  }
   const r = await fetch(BASE + path, {
     method,
     headers: { "content-type": "application/json", ...(cookie ? { cookie } : {}) },
@@ -56,7 +64,7 @@ async function rawCall(method, path, rawBody, cookie) {
 
 (async () => {
   await assertTestTarget(BASE);
-  const admin = await login("admin", "admin123");
+  const admin = await login("admin", ADMIN_PASSWORD);
   const A = admin.cookie;
   check("admin login", admin.status === 200);
 
@@ -82,6 +90,12 @@ async function rawCall(method, path, rawBody, cookie) {
     r = await call("GET", "/api/items?q=" + encodeURIComponent("Quote\" & <b>"), null, A);
     check("search finds special-char name", r.status === 200 && (r.data.items ?? []).some((i) => i.id === weird.id),
       `${r.status} ${(r.data.items ?? []).length} rows`);
+    r = await rawCall("DELETE", `/api/items/${weird.id}`, undefined, A);
+    check("item deletion requires a password", r.status === 400, `${r.status} ${r.data?.error ?? ""}`);
+    r = await call("DELETE", `/api/items/${weird.id}`, { password: "incorrect-password" }, A);
+    check("incorrect password does not delete the item", r.status === 401, `${r.status} ${r.data?.error ?? ""}`);
+    r = await call("GET", `/api/items/${weird.id}`, null, A);
+    check("item remains after incorrect password", r.status === 200);
     await call("DELETE", `/api/items/${weird.id}`, undefined, A);
   }
 
@@ -501,8 +515,40 @@ async function rawCall(method, path, rawBody, cookie) {
   check("staff can checkout with own password", r.status === 201, `${r.status} ${r.data?.error}`);
 
   /* ---- waste: a third movement type, separate from checkout (SR-F21a) ---- */
-  r = await call("POST", "/api/transactions", { type: "waste", password: "staff123", items: [{ sku: spillItem.sku, qty: 2 }] }, sc);
+  const spillLookup = await call(
+    "GET",
+    `/api/items/lookup?code=${encodeURIComponent(spillItem.sku)}`,
+    null,
+    sc
+  );
+  const spillBatch = spillLookup.data?.item?.batches?.find(
+    (batch) => Number(batch.remaining_quantity) > 0
+  );
+  r = await call("POST", "/api/transactions", {
+    type: "waste",
+    password: "staff123",
+    items: [{
+      sku: spillItem.sku,
+      qty: 2,
+      batch_id: spillBatch?.id,
+      waste_reason: "Spill during preparation",
+    }],
+  }, sc);
   check("staff can log waste", r.status === 201, `${r.status} ${r.data?.error}`);
+  const wasteHistory = await call(
+    "GET",
+    `/api/transactions?type=waste&item=${encodeURIComponent(spillItem.sku)}`,
+    undefined,
+    sc
+  );
+  check(
+    "waste history keeps the Log Waste transaction type",
+    wasteHistory.status === 200 &&
+      wasteHistory.data?.transactions?.some(
+        (transaction) => transaction.type === "waste"
+      ),
+    `${wasteHistory.status}`
+  );
 
   const afterWaste = await call("GET", `/api/items/lookup?code=${encodeURIComponent(spillItem.sku)}`, null, sc);
   const wasteQty = Number(afterWaste.data?.item?.quantity);

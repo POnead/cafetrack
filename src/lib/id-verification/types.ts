@@ -153,6 +153,8 @@ export type IdVerificationResult = {
    * never be taken back out.
    */
   raw?: unknown;
+  /** A card type detected from strong, printed identifiers on the front. */
+  detectedDocType?: IdDocType | null;
 };
 
 export type IdVerificationProvider = {

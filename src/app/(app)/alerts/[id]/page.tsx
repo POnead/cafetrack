@@ -14,7 +14,9 @@ type AlertRow = {
   resolved: boolean;
   resolved_by: string | null;
   resolved_at: string | null;
+  resolved_reason: string | null;
   created_at: string;
+  updated_at: string;
   item_id: string | null;
 };
 
@@ -46,7 +48,9 @@ type HistoryRow = {
   resolved: boolean;
   resolved_by: string | null;
   resolved_at: string | null;
+  resolved_reason: string | null;
   created_at: string;
+  updated_at: string;
 };
 
 export default function AlertDetailPage() {
@@ -59,6 +63,8 @@ export default function AlertDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [showResolveDialog, setShowResolveDialog] = useState(false);
+  const [resolveReason, setResolveReason] = useState("");
   // Resolving is admin-only (FR-08). Staff can open this page to see why an
   // item is unavailable, so the controls are hidden for them rather than the
   // page being blocked.
@@ -105,13 +111,13 @@ export default function AlertDetailPage() {
     };
   }, []);
 
-  async function setResolved(resolved: boolean) {
+  async function setResolved(resolved: boolean, reason?: string) {
     setBusy(true);
     try {
       const res = await fetch(`/api/alerts/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ resolved }),
+        body: JSON.stringify({ resolved, reason }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not update the alert");
@@ -120,6 +126,8 @@ export default function AlertDetailPage() {
         msg: resolved ? "Alert resolved" : "Alert re-opened",
         tone: "success",
       });
+      setShowResolveDialog(false);
+      setResolveReason("");
       await load();
     } catch (e: any) {
       setToast({ msg: e.message, tone: "error" });
@@ -164,7 +172,9 @@ export default function AlertDetailPage() {
             </div>
             <h1 className="text-lg font-bold text-cocoa-900">{alert.message}</h1>
             <p className="text-sm text-cocoa-500">
-              Raised {fmtDateTime(alert.created_at)}
+              Updated {fmtDateTime(alert.updated_at)}
+              {" · raised "}
+              {fmtDateTime(alert.created_at)}
               {alert.resolved && alert.resolved_at && (
                 <>
                   {" · resolved "}
@@ -183,7 +193,11 @@ export default function AlertDetailPage() {
                   : "btn-danger !px-4 !py-2 text-sm"
               }
               disabled={busy}
-              onClick={() => setResolved(!alert.resolved)}
+              onClick={() =>
+                alert.resolved
+                  ? setResolved(false)
+                  : setShowResolveDialog(true)
+              }
             >
               {busy ? "Saving..." : alert.resolved ? "Re-open alert" : "Resolve alert"}
             </button>
@@ -195,11 +209,81 @@ export default function AlertDetailPage() {
         </div>
 
         <p className="border-t border-cream-100 pt-3 text-xs text-cocoa-400">
-          Resolving only closes this alert — stock levels are untouched, so use
-          Checkout &amp; Restock for the actual movement. An alert re-opens by
-          itself if the condition comes back.
+          Resolving records that the issue was handled; it does not change stock.
+          Add the action taken in the reason field. Alerts can be re-opened here.
         </p>
+        {alert.resolved && alert.resolved_reason && (
+          <div className="rounded-xl bg-cream-50 px-3.5 py-3 text-sm text-cocoa-700">
+            <div className="mb-1 text-xs font-bold uppercase tracking-wide text-cocoa-500">
+              Resolution reason
+            </div>
+            {alert.resolved_reason}
+          </div>
+        )}
       </Card>
+
+      {showResolveDialog && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-cocoa-950/50 p-4"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !busy) {
+              setShowResolveDialog(false);
+              setResolveReason("");
+            }
+          }}
+        >
+          <div
+            className="card w-full max-w-lg space-y-4 p-5"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="resolve-alert-title"
+          >
+            <div>
+              <h2
+                id="resolve-alert-title"
+                className="text-lg font-bold text-cocoa-900"
+              >
+                Resolve alert
+              </h2>
+              <p className="mt-1 text-sm text-cocoa-500">
+                Record what was done to handle this issue. This reason will
+                remain with the alert in its history.
+              </p>
+            </div>
+            <textarea
+              autoFocus
+              rows={4}
+              maxLength={1000}
+              value={resolveReason}
+              onChange={(event) => setResolveReason(event.target.value)}
+              placeholder="Describe how the issue was resolved"
+              className="input min-h-28 w-full resize-y"
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                className="btn-ghost"
+                disabled={busy}
+                onClick={() => {
+                  setShowResolveDialog(false);
+                  setResolveReason("");
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={busy || !resolveReason.trim()}
+                onClick={() => setResolved(true, resolveReason)}
+              >
+                {busy ? "Saving..." : "Save and resolve"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ---------- the item behind it ---------- */}
       <div className="grid gap-5 lg:grid-cols-2">
@@ -351,7 +435,9 @@ export default function AlertDetailPage() {
                     </div>
                     <div className="text-sm text-cocoa-700">{h.message}</div>
                     <div className="text-[11px] text-cocoa-400">
-                      Raised {fmtDateTime(h.created_at)}
+                      Updated {fmtDateTime(h.updated_at)}
+                      {" · raised "}
+                      {fmtDateTime(h.created_at)}
                       {h.resolved && h.resolved_at && (
                         <>
                           {" · resolved "}
@@ -360,6 +446,11 @@ export default function AlertDetailPage() {
                         </>
                       )}
                     </div>
+                    {h.resolved && h.resolved_reason && (
+                      <div className="mt-1 text-xs text-cocoa-600">
+                        Resolution reason: {h.resolved_reason}
+                      </div>
+                    )}
                   </div>
 
                   {!isCurrent && (

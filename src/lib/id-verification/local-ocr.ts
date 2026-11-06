@@ -40,6 +40,7 @@ import { buildLayout } from "./ocr/rows";
 import { extract, isTrustworthy, type Extraction } from "./ocr/extract";
 import { MIN_OCR_WIDTH, languageModelPresent, runOcr } from "./ocr/engine";
 import { readImageSize } from "./image-size";
+import { detectCardType } from "./ocr/card-type";
 
 /** Where the reading came from, in the words an admin needs. */
 const STRATEGY_WORDS: Record<string, string> = {
@@ -157,6 +158,7 @@ export const localOcrProvider: IdVerificationProvider = {
 
     const layout = buildLayout(run.words);
     const { fields, mrz } = extract(layout, input.docType);
+    const detected = detectCardType(layout.text || run.text);
 
     const signals: IdSignal[] = Object.entries(fields).map(([key, value]) =>
       signalFor(key as keyof Extraction, value)
@@ -189,8 +191,9 @@ export const localOcrProvider: IdVerificationProvider = {
             detail:
               `No text could be read off this ${ID_DOC_TYPE_LABELS[input.docType]} ` +
               `(${Math.round(run.confidence)}% overall confidence). Either the photo is too ` +
-              `blurry, or this app has no template for this card type — in which case ` +
-              `compare the card with the roster by eye.`,
+              `blurry, or this ${ID_DOC_TYPE_LABELS[input.docType]} layout is not supported by ` +
+              `the current template. Capture the front square-on with both edges visible, avoid ` +
+              `glare, and compare the card with the roster by eye.`,
           }
         : missing === 0
           ? {
@@ -229,6 +232,11 @@ export const localOcrProvider: IdVerificationProvider = {
       }
     }
 
-    return { provider: "local_ocr", signals, fields: out };
+    return {
+      provider: "local_ocr",
+      signals,
+      fields: out,
+      detectedDocType: detected.confidence === "high" ? detected.type : null,
+    };
   },
 };

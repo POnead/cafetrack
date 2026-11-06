@@ -28,6 +28,8 @@ import {
   MIN_MATCH_THRESHOLD,
   PRIMARY_POSE,
   SIDE_MIN_SIGNAL,
+  SFACE_FRONT_MAX_SIGNAL,
+  SFACE_SIDE_MIN_SIGNAL,
   distance,
   fileFrame,
   formatEmbedding,
@@ -40,6 +42,7 @@ import {
   parsePose,
   parseStoredEmbedding,
   poseAlreadyHeld,
+  poseConfirmedBySignal,
   poseFromSignal,
   poseSatisfies,
   posesRequired,
@@ -522,6 +525,34 @@ check(
 check("the side threshold is a side", poseFromSignal(SIDE_MIN_SIGNAL) === "left");
 check("and mirrored", poseFromSignal(-SIDE_MIN_SIGNAL) === "right");
 check("a hard turn is still a side", poseFromSignal(0.9) === "left");
+check(
+  "a head-angle left turn is not captured before its signal reaches the left band",
+  !poseConfirmedBySignal("left", SIDE_MIN_SIGNAL - 1e-6)
+);
+check(
+  "a server-compatible left-turn signal confirms the left pose",
+  poseConfirmedBySignal("left", SIDE_MIN_SIGNAL)
+);
+check(
+  "SFace side threshold matches the 25-degree visual capture gate",
+  poseFromSignal(SFACE_SIDE_MIN_SIGNAL, "sface") === "left"
+);
+check(
+  "SFace signal from a 20-degree turn is not captured as a side",
+  poseFromSignal(0.131, "sface") === null
+);
+check(
+  "SFace front signal uses its own five-point band",
+  poseFromSignal(SFACE_FRONT_MAX_SIGNAL, "sface") === "front"
+);
+check(
+  "legacy signal bands remain unchanged for existing captures",
+  poseFromSignal(0.15, "legacy") === null
+);
+check(
+  "a head-angle left turn is not confirmed by a right-turn signal",
+  !poseConfirmedBySignal("left", -SIDE_MIN_SIGNAL)
+);
 
 const deadZone = headTurnSignal(landmarks({ noseX: 109 }));
 check(

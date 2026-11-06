@@ -12,17 +12,15 @@
  * into the Supabase SQL Editor. That works, but it means reading a few hundred
  * lines to find the one function you actually changed.
  *
- * This pulls out just the statements that are safe to run against a live
- * database and no-ops when they are already in place:
+ * This pulls out statements that are safe to re-run against a live database:
  *
  *   - `create or replace function`  — always safe, replaces the body
  *   - `alter table ... add column if not exists` — safe, existing data kept
+ *   - the allow-listed, additive inventory-batch table, indexes, backfill, and
+ *     trigger setup — only creates the new batch ledger and opening batches
  *
- * It deliberately EXCLUDES anything that would be destructive or that assumes a
- * brand-new project: `create extension`, `create table`, `create index`, the
- * default `insert into settings`, and the `enable row level security` block.
- * None of those are needed to pick up a function change, and leaving them out
- * means this file cannot touch a row of client data.
+ * Other tables and indexes are deliberately excluded. In particular, this
+ * never re-runs seed inserts or changes existing stock quantities.
  *
  * It never connects to a database. It only reads schema.sql and writes a file.
  */
@@ -58,6 +56,78 @@ function functionBlock(startIndex) {
 
 const functions = [];
 const addColumns = [];
+
+function requiredMatch(regex, description) {
+  const match = regex.exec(source);
+  if (!match) {
+    console.error(`Refusing to write: could not find ${description} in db/schema.sql.`);
+    process.exit(1);
+  }
+  return match[0].trim();
+}
+
+const batchTable = requiredMatch(
+  /create table if not exists inventory_batches \([\s\S]*?\n\);/,
+  "the inventory_batches table"
+);
+const batchIndexes = [
+  requiredMatch(
+    /create index if not exists idx_inventory_batches_item_remaining[\s\S]*?;/,
+    "the inventory-batch item index"
+  ),
+  requiredMatch(
+    /create index if not exists idx_inventory_batches_expiry[\s\S]*?;/,
+    "the inventory-batch expiry index"
+  ),
+];
+const openingBatchBackfill = requiredMatch(
+  /insert into inventory_batches[\s\S]*?where i\.item_status = 'active'[\s\S]*?;\s*(?=-- Keep direct item creation)/,
+  "the idempotent opening-batch backfill"
+);
+const batchTriggers = [
+  requiredMatch(
+    /drop trigger if exists items_sync_batch_quantity on items;[\s\S]*?create trigger items_sync_batch_quantity[\s\S]*?execute function sync_item_batch_quantity\(\);/,
+    "the item quantity synchronization trigger"
+  ),
+  requiredMatch(
+    /drop trigger if exists items_sync_single_batch_expiration on items;[\s\S]*?create trigger items_sync_single_batch_expiration[\s\S]*?execute function sync_single_batch_expiration\(\);/,
+    "the single-batch expiration trigger"
+  ),
+];
+const batchRls = requiredMatch(
+  /alter table inventory_batches enable row level security;/,
+  "inventory-batch row-level security"
+);
+const alertUpdatedAtBackfill = [
+  requiredMatch(
+    /update alerts set updated_at = created_at where updated_at is null;/i,
+    "the alert updated_at backfill"
+  ),
+  requiredMatch(
+    /alter table alerts alter column updated_at set default now\(\);/i,
+    "the alert updated_at default"
+  ),
+  requiredMatch(
+    /alter table alerts alter column updated_at set not null;/i,
+    "the alert updated_at not-null constraint"
+  ),
+].join("\n");
+const alertResolvedReasonBackfill = requiredMatch(
+  /update alerts\s+set resolved_reason = 'Previously resolved; no reason was recorded\.'\s+where resolved = true and resolved_reason is null;/i,
+  "the alert resolved_reason backfill"
+);
+const nonExpiringPackagingBackfill = requiredMatch(
+  /update items\s+set expirable = false\s+where lower\(name\) in \('16oz paper cups', 'cup lids'\)\s+and expirable = true\s+and expiration_date is null;/i,
+  "the non-expiring packaging item backfill"
+);
+const seededExpirableItemsBackfill = requiredMatch(
+  /update items\s+set expirable = true\s+where lower\(name\) in \(\s+'arabica coffee beans',\s+'robusta coffee beans',\s+'fresh milk',\s+'condensed milk',\s+'vanilla syrup',\s+'caramel syrup',\s+'matcha powder',\s+'cocoa powder',\s+'black tea leaves',\s+'croissant dough'\s+\)\s+and expirable = false;/i,
+  "the seeded expirable item backfill"
+);
+const datedBatchExpirableBackfill = requiredMatch(
+  /update items i\s+set expirable = true\s+where i\.expirable = false\s+and lower\(i\.name\) not in \('16oz paper cups', 'cup lids'\)\s+and exists\s+\(\s+select 1\s+from inventory_batches b\s+where b\.item_id = i\.id\s+and b\.expiration_date is not null\s+\);/i,
+  "the dated-batch expirable item backfill"
+);
 
 // Walk the file once, collecting only the two safe statement kinds.
 let i = 0;
@@ -108,21 +178,34 @@ const out = `-- ============================================================
 --   Supabase dashboard -> SQL Editor -> New query -> paste this whole file
 --   -> Run. It is safe to run more than once.
 --
--- What this contains: only the re-runnable statements, so it cannot create,
--- drop, or modify any client data. Tables, indexes, the extension, the default
--- settings rows, and the row-level security statements are all excluded on
--- purpose — they are set up once when the project is created and are not
--- needed to pick up a change to a stored function.
+-- The inventory-batch section is an additive migration. It creates a new
+-- ledger, copies each active item's current stock/date into one opening batch
+-- only when that item has no batch yet, and does not change item quantities.
 --
--- Apply a structural change (a new table, column, or index) by running the
--- full db/schema.sql in the SQL Editor instead. That file is also re-runnable
--- and never drops or truncates anything.
---
+
+-- ---------- batch inventory structure ----------
+${batchTable}
+
+${batchIndexes.join("\n\n")}
+
+${openingBatchBackfill}
+
+${batchRls}
 
 -- ---------- columns added since the first release ----------
 -- Safe on a live database: the column is added only if it is not already there,
 -- and existing rows are left untouched.
 ${addColumns.map((a) => a.text).join("\n")}
+
+${alertUpdatedAtBackfill}
+
+${alertResolvedReasonBackfill}
+
+${nonExpiringPackagingBackfill}
+
+${seededExpirableItemsBackfill}
+
+${datedBatchExpirableBackfill}
 
 -- ---------- stored functions ----------
 -- create or replace keeps the existing function id and re-points it at the new
@@ -130,6 +213,9 @@ ${addColumns.map((a) => a.text).join("\n")}
 ${functions
   .map((f) => `-- ${f.name}()\n${f.text}`)
   .join("\n\n")}
+
+-- ---------- batch inventory triggers ----------
+${batchTriggers.join("\n\n")}
 
 -- ---------- after applying ----------
 -- Force the current state to be recomputed so the new logic takes effect on

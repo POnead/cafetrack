@@ -161,6 +161,7 @@ export async function runIdVerification(
   const signals: IdSignal[] = [];
   const fields: IdExtractedFields = {};
   const providersRun: string[] = [];
+  let detectedDocType: IdVerificationResult["detectedDocType"] = null;
   let primary = "local";
 
   for (const provider of chosen) {
@@ -169,6 +170,7 @@ export async function runIdVerification(
 
       signals.push(...result.signals);
       mergeFields(fields, result.fields);
+      if (result.detectedDocType) detectedDocType = result.detectedDocType;
 
       providersRun.push(provider.id);
       // The first provider that actually read something is the one whose answer
@@ -250,6 +252,7 @@ export async function runIdVerification(
       (a, b) => toneRank(b.tone) - toneRank(a.tone) || 0
     ),
     fields,
+    detectedDocType,
   };
 }
 

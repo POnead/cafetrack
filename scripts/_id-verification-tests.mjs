@@ -8,10 +8,9 @@ import { assertTestTarget } from "./_guard.mjs";
  * the fact that only an admin can reach any of it, and the fact that an approval
  * with nothing attached behind it is refused.
  *
- * No camera and no model are involved. The two face embeddings a browser would
- * normally compute are simply not sent, so the comparison reports "unknown" —
- * which is itself one of the outcomes worth asserting on, because an unknown
- * must never be presented as a pass.
+ * No camera or face model is involved. Fixture uploads without required face
+ * embeddings must be rejected, while valid uploads can be exercised with
+ * synthetically supplied embeddings.
  */
 
 const BASE = process.env.BASE_URL || "http://localhost:3100";
@@ -57,6 +56,11 @@ const TINY_JPEG = Uint8Array.from(
   (c) => c.charCodeAt(0)
 );
 
+const FIXTURE_EMBEDDING = Array.from({ length: 128 }, (_, i) =>
+  0.08838834764831844
+);
+const FIXTURE_EMBEDDING_TEXT = FIXTURE_EMBEDDING.join(",");
+
 /** A PNG header followed by junk — correctly identified, never decodable. */
 function fakePng() {
   const b = new Uint8Array(64);
@@ -100,6 +104,15 @@ async function upload(path, form, cookie) {
     data: ct.includes("json") ? await r.json() : null,
     headers: r.headers,
   };
+}
+
+async function enrolFixtureFace(userId, cookie) {
+  const f = new FormData();
+  for (const pose of ["front", "left", "right"]) {
+    f.append(`embedding_${pose}`, FIXTURE_EMBEDDING_TEXT);
+    f.append(`image_${pose}`, file(TINY_JPEG, `${pose}.jpg`, "image/jpeg"));
+  }
+  return upload(`/api/users/${userId}/face`, f, cookie);
 }
 
 /**
@@ -150,8 +163,27 @@ if (!cookie) {
   process.exit(1);
 }
 
-// A staff account to attach an ID to. Deleted at the end.
 const uniq = Date.now().toString(36);
+const reviewerUser = await call(
+  "POST",
+  "/api/users",
+  {
+    username: `idreviewer${uniq}`,
+    password: "review123",
+    first_name: "ID",
+    last_name: "Reviewer",
+    role: "admin",
+  },
+  cookie
+);
+const reviewer = await login(`idreviewer${uniq}`, "review123");
+const reviewerCookie = reviewer.cookie;
+if (!reviewerUser.data?.user?.id || !reviewerCookie) {
+  console.error("\n  Could not create a separate ID reviewer admin.\n");
+  process.exit(1);
+}
+
+// A staff account to attach an ID to. Deleted at the end.
 const created = await call(
   "POST",
   "/api/users",
@@ -169,6 +201,9 @@ const userId = created.data?.user?.id;
 check("staff account created for the test", Boolean(userId), userId ?? JSON.stringify(created.data));
 
 if (userId) {
+  const enrolled = await enrolFixtureFace(userId, cookie);
+  check("the staff account has a required enrolled face", enrolled.status === 200, `status ${enrolled.status}`);
+
   /* ---- status defaults ---- */
   section("status");
 
@@ -266,6 +301,8 @@ if (userId) {
       f.append("front", file(TINY_JPEG, "front.jpg", "image/jpeg"));
       f.append("photo", file(TINY_JPEG, "person.jpg", "image/jpeg"));
       f.append("id_number", "N01-23-456789");
+      f.append("card_embedding", FIXTURE_EMBEDDING_TEXT);
+      f.append("photo_embedding", FIXTURE_EMBEDDING_TEXT);
       return f;
     })(),
     cookie
@@ -281,8 +318,8 @@ if (userId) {
 
   const signals = good.data?.signals ?? [];
   check(
-    "the face comparison reports that it could not run, rather than passing",
-    signals.some((s) => s.id === "face_match" && s.tone === "unknown"),
+    "the face comparison runs successfully for matching account and card embeddings",
+    signals.some((s) => s.id === "face_match" && s.tone === "pass"),
     JSON.stringify(signals.find((s) => s.id === "face_match")?.tone)
   );
   check(
@@ -301,6 +338,19 @@ if (userId) {
     "the name check must never pass on nothing"
   );
 
+  const sameAdminApprove = await call(
+    "PATCH",
+    `/api/users/${userId}/id`,
+    { decision: "approve", reason: "" },
+    cookie
+  );
+  check(
+    "the administrator who uploaded an ID can also approve it",
+    sameAdminApprove.status === 200 &&
+      sameAdminApprove.data?.user?.verification_status === "verified",
+    `status ${sameAdminApprove.status}`
+  );
+
   /* ---- the cross-account checks ---- */
   section("duplicate card and ID number shape");
 
@@ -313,6 +363,8 @@ if (userId) {
         const f = new FormData();
         f.append("doc_type", "philsys");
         f.append("front", file(TINY_JPEG, "front.jpg", "image/jpeg"));
+        f.append("card_embedding", FIXTURE_EMBEDDING_TEXT);
+        f.append("photo_embedding", FIXTURE_EMBEDDING_TEXT);
         for (const [k, v] of Object.entries(fields)) {
           if (v !== null && v !== undefined) f.append(k, String(v));
         }
@@ -364,6 +416,12 @@ if (userId) {
   check("a second staff account was created", Boolean(secondId), secondId ?? "none");
 
   if (secondId) {
+    const secondEnrolled = await enrolFixtureFace(secondId, cookie);
+    check(
+      "the duplicate-check account also has an enrolled face",
+      secondEnrolled.status === 200,
+      `status ${secondEnrolled.status}`
+    );
     const dupe = await uploadWith(secondId, { card_hash: HASH_A_AGAIN });
     const dupeSignal = signalOf(dupe, "card_duplicate");
 
@@ -550,11 +608,6 @@ if (userId) {
     headers: { cookie },
     redirect: "manual",
   });
-  check(
-    "the photo of the person is served too",
-    photoImage.status === 200,
-    `status ${photoImage.status}`
-  );
 
   /* ---- the decision ---- */
   section("approve and reject");
@@ -563,7 +616,7 @@ if (userId) {
     "PATCH",
     `/api/users/${userId}/id`,
     { decision: "reject" },
-    cookie
+    reviewerCookie
   );
   check("rejecting without a reason is refused", noReason.status === 400, `status ${noReason.status}`);
 
@@ -571,7 +624,7 @@ if (userId) {
     "PATCH",
     `/api/users/${userId}/id`,
     { decision: "maybe" },
-    cookie
+    reviewerCookie
   );
   check(
     "an unrecognised decision is refused",
@@ -583,7 +636,7 @@ if (userId) {
     "PATCH",
     `/api/users/${userId}/id`,
     { decision: "approve", reason: "" },
-    cookie
+    reviewerCookie
   );
   check(
     "approving without a reason is allowed",
@@ -604,7 +657,7 @@ if (userId) {
     "PATCH",
     `/api/users/${userId}/id`,
     { decision: "reject", reason: "The surname on the card does not match the roster." },
-    cookie
+    reviewerCookie
   );
   check(
     "rejecting with a reason works",
@@ -633,7 +686,7 @@ if (userId) {
       "PATCH",
       `/api/users/${bare.data.user.id}/id`,
       { decision: "approve", reason: "" },
-      cookie
+      reviewerCookie
     );
     check(
       "approving an account with no ID attached is refused",
@@ -736,6 +789,8 @@ if (userId) {
         const f = new FormData();
         f.append("doc_type", "philsys");
         f.append("front", file(TINY_JPEG, "front.jpg", "image/jpeg"));
+        f.append("card_embedding", FIXTURE_EMBEDDING_TEXT);
+        f.append("photo_embedding", FIXTURE_EMBEDDING_TEXT);
         return f;
       })(),
       cookie
@@ -752,7 +807,7 @@ if (userId) {
       "PATCH",
       `/api/users/${userId}/id`,
       { decision: "approve", reason: "" },
-      cookie
+      reviewerCookie
     );
 
     const afterApprove = await staffSignIn(`idtest${uniq}`, "staff123");

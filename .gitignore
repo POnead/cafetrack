@@ -37,14 +37,15 @@ face-probe-images/*
 # megabytes into every clone forever, for files the package already ships.
 # See scripts/setup-face-models.mjs.
 public/models/
+.face-liveness/
 
 # The SFace engine: two ONNX models (~9.5MB) plus the onnxruntime wasm build
 # (~13.6MB), fetched by `npm run setup:face:sface`. Same reasoning — and these are
 # not even on npm, so a clone without the setup step simply has no SFace engine.
 public/onnx/
+public/mediapipe/
 
 # A whole PGlite data directory copied by hand beside the app. The app's own
 # snapshots live in backups/, which is ignored above; these hand-made copies
 # were not, so a `git add -A` would have swallowed 50MB+ of database.
 .cafetrack-backup-*/
-

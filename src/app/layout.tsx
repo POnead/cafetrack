@@ -22,8 +22,8 @@ const nunito = Nunito({
 });
 
 export const metadata: Metadata = {
-  title: "CafeTrack — Merrylane Cafe Foodhub",
-  description: "Real-time stock monitoring with barcode-based authentication",
+  title: "CafeTrack — Cafe Inventory Management",
+  description: "CafeTrack inventory operations for cafe teams",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

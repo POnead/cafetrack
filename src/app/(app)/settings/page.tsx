@@ -45,7 +45,7 @@ const NUMERIC_FIELDS = [
   {
     key: "session_timeout_minutes",
     label: "Session timeout",
-    hint: "Minutes of inactivity before a session signs itself out.",
+    hint: "Shortens the idle limit for both roles. Admins otherwise sign out after 5 minutes; staff after 10.",
     min: 1,
     max: 480,
   },
@@ -573,62 +573,42 @@ export default function SettingsPage() {
         </div>
       </Card>
 
-      {/*
-        Face verification.
-
-        Two switches in one card, but deliberately described as two separate
-        decisions — they are not two views of one thing. One asks for a face at
-        the start of a shift, the other changes how someone gets in at all. An
-        admin should be able to tell them apart without reading any code.
-
-        Both are off in every fresh database, so nothing here disturbs the login
-        the cafe uses today until it is deliberately switched on.
-      */}
       <Card>
-        <h2 className="text-lg font-semibold text-cocoa-800">Face verification</h2>
+        <h2 className="text-lg font-semibold text-cocoa-800">Staff login face check</h2>
 
-        <div className="mt-4 space-y-3">
-          {(
-            [
-              {
-                key: "face_verification_enabled",
-                title: "Duty face check",
-                on: "Staff confirm their face once per duty before they can move stock. One check covers the duty length set below.",
-                off: "Enrol everyone's photo from Staff Accounts first — this holds every member of staff at the camera screen.",
-              },
-              {
-                key: "face_login_enabled",
-                title: "Sign in with a face",
-                on: "Staff can scan their badge and confirm their face instead of typing a password. Admins still use a password.",
-                off: "Staff without a reference photo cannot use this, so enrol them from Staff Accounts first. Password sign-in keeps working either way.",
-              },
-              {
-                key: "face_require_profile_angles",
-                title: "Turned-head checks",
-                on: "A check asks for the straight-on photo and both turned-head photos. A printed portrait cannot produce the turned ones, which is what makes it fail.",
-                off: "Only the straight-on photo is required. The turned-head photos stay on file as reference photographs, and turning this back on needs no re-enrolment.",
-              },
-            ] as const
-          ).map((t) => {
-            const on = settings[t.key] === "1";
-            return (
-              <div
-                key={t.key}
-                className="flex flex-wrap items-start justify-between gap-3 rounded-xl border border-cream-200 bg-cream-50 px-3.5 py-3"
-              >
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-bold text-cocoa-800">{t.title}</p>
-                </div>
-                <button
-                  className={on ? "btn-ghost" : "btn-primary"}
-                  disabled={saving}
-                  onClick={() => saveField(t.key, on ? "0" : "1")}
-                >
-                  {on ? "Turn off" : "Turn on"}
-                </button>
-              </div>
-            );
-          })}
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-cream-200 bg-cream-50 px-3.5 py-3">
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-bold text-cocoa-800">Staff login face check</p>
+            <p className="mt-1 text-xs leading-relaxed text-cocoa-500">
+              When on, staff enter their password and then complete the automatic face scan,
+              including the blink, before signing in. Face++ verifies the scan; MediaPipe
+              detects the blink in the live camera. When off, staff sign in with their
+              username or barcode and password without this login scan.
+            </p>
+          </div>
+          <button
+            className={settings.face_login_enabled === "1" ? "btn-ghost" : "btn-primary"}
+            disabled={saving}
+            onClick={() =>
+              saveField("face_login_enabled", settings.face_login_enabled === "1" ? "0" : "1")
+            }
+          >
+            {settings.face_login_enabled === "1" ? "Turn off" : "Turn on"}
+          </button>
+        </div>
+
+        <div
+          role="status"
+          aria-live="polite"
+          className={`mt-3 rounded-xl px-3.5 py-2.5 text-xs font-medium ${
+            settings.face_login_enabled === "1"
+              ? "bg-sage-50 text-sage-700"
+              : "bg-cream-100 text-cocoa-600"
+          }`}
+        >
+          {settings.face_login_enabled === "1"
+            ? "On: the Face++ and blink-checked face scan is required at staff sign-in."
+            : "Off: staff can sign in with their password without a face scan."}
         </div>
 
         <p className="mt-3 text-xs text-cocoa-400">
@@ -637,70 +617,30 @@ export default function SettingsPage() {
           and needs no camera permission.
         </p>
 
-        {/*
-          The two numbers the check actually reads.
-
-          They belong in this card rather than in Alerts & sessions: the duty
-          length is how long one face check covers, and the threshold is how
-          close two faces have to be. Both were settable through the API before
-          this form existed, which meant an admin reading this page was told
-          about values they could not see.
-
-          The threshold field follows the engine in use, because the two engines
-          do not share a scale — one field with the other model's bounds would
-          let an admin save a number that means "accept nobody" on the model
-          actually running.
-        */}
-        <div className="mt-4 grid gap-4 sm:grid-cols-2">
-          <div>
-            <label className="label" htmlFor="face_duty_hours">
-              Duty length
-            </label>
-            <input
-              id="face_duty_hours"
-              type="number"
-              className="input"
-              min={1}
-              max={24}
-              value={settings.face_duty_hours ?? ""}
-              disabled={saving}
-              onChange={(e) =>
-                setSettings((prev) => ({ ...prev, face_duty_hours: e.target.value }))
+        <div className="mt-4 max-w-sm">
+          <label className="label" htmlFor={thresholdBand.setting}>
+            Match threshold ({thresholdName})
+          </label>
+          <input
+            id={thresholdBand.setting}
+            type="number"
+            step="0.001"
+            className="input"
+            min={thresholdBand.min}
+            max={thresholdBand.max}
+            placeholder={String(thresholdBand.fallback)}
+            value={settings[thresholdBand.setting] ?? ""}
+            disabled={saving}
+            onChange={(e) =>
+              setSettings((prev) => ({ ...prev, [thresholdBand.setting]: e.target.value }))
+            }
+            onBlur={(e) => {
+              const v = e.target.value;
+              if (v !== "" && v !== saved.current[thresholdBand.setting]) {
+                saveField(thresholdBand.setting, v);
               }
-              onBlur={(e) => {
-                const v = e.target.value;
-                if (v !== "" && v !== saved.current.face_duty_hours) {
-                  saveField("face_duty_hours", v);
-                }
-              }}
-            />
-          </div>
-
-          <div>
-            <label className="label" htmlFor={thresholdBand.setting}>
-              Match threshold ({thresholdName})
-            </label>
-            <input
-              id={thresholdBand.setting}
-              type="number"
-              step="0.001"
-              className="input"
-              min={thresholdBand.min}
-              max={thresholdBand.max}
-              placeholder={String(thresholdBand.fallback)}
-              value={settings[thresholdBand.setting] ?? ""}
-              disabled={saving}
-              onChange={(e) =>
-                setSettings((prev) => ({ ...prev, [thresholdBand.setting]: e.target.value }))
-              }
-              onBlur={(e) => {
-                const v = e.target.value;
-                if (v !== "" && v !== saved.current[thresholdBand.setting]) {
-                  saveField(thresholdBand.setting, v);
-                }
-              }}
-            />
-          </div>
+            }}
+          />
         </div>
 
         {/*

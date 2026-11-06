@@ -248,7 +248,7 @@ export const POST = handler(
     // audit entry records what actually changed.
     const { data: before } = await db()
       .from("users")
-      .select("id, username, full_name, role, is_active, verification_status, id_provider")
+      .select("id, username, full_name, role, is_active, verification_status, id_provider, face_image")
       .eq("id", id)
       .maybeSingle();
 
@@ -316,12 +316,22 @@ export const POST = handler(
      * parseEmbedding does the real validation — 128 finite floats inside the
      * model's norm band — and returns null for anything else.
      *
-     * A missing or malformed one is not an error. It means "this check could not
-     * run", which becomes an `unknown` signal. Refusing the upload instead would
-     * turn the app's inability to read a face into a refusal to record an ID.
+     * Both values are mandatory identity evidence. Missing or malformed values
+     * reject the upload rather than creating a reviewable ID record whose face
+     * comparison never ran.
      */
     const cardEmbedding = parseEmbedding(form.get("card_embedding"));
     const photoEmbedding = parseEmbedding(form.get("photo_embedding"));
+
+    if (!before.face_image) {
+      return fail("Enroll this account's face before uploading an ID for verification", 400);
+    }
+    if (!cardEmbedding) {
+      return fail("The printed portrait on the ID could not be read; a face portrait match is required", 400);
+    }
+    if (!photoEmbedding) {
+      return fail("The account's enrolled face photo could not be read; a face portrait match is required", 400);
+    }
 
     const declaredNumber = String(form.get("id_number") ?? "").trim();
 
@@ -348,6 +358,14 @@ export const POST = handler(
       },
       { faceMatchThreshold: threshold, preferredProvider: preferred }
     );
+
+    if (result.detectedDocType && result.detectedDocType !== docType) {
+      return fail(
+        `The scanned ID was detected as ${ID_DOC_TYPE_LABELS[result.detectedDocType]}, ` +
+        `but ${ID_DOC_TYPE_LABELS[docType]} was selected. Choose the matching ID type and upload again.`,
+        400
+      );
+    }
 
     /*
      * The two cross-account checks, appended to the same signal list so the review
@@ -376,6 +394,10 @@ export const POST = handler(
         id_photo: photo && photo.ok ? photo.dataUrl : null,
         id_doc_type: docType,
         id_doc_number: declaredNumber || null,
+        id_doc_expiry: typeof result.fields?.date_of_expiry === "string"
+          && /^\d{4}-\d{2}-\d{2}$/.test(result.fields.date_of_expiry)
+            ? result.fields.date_of_expiry : null,
+        id_doc_uploaded_by: admin.id,
         // Kept so the next upload can be compared against this one. Not part of the
         // review payload and not audited: 64 bits that cannot become a photograph
         // have nothing an auditor needs to read.
@@ -446,7 +468,7 @@ export const POST = handler(
  */
 export const GET = handler(
   async (req: Request, { params }: { params: Promise<{ id: string }> }) => {
-    await requireAdmin();
+    const admin = await requireAdmin();
     const { id } = await params;
 
     const malformed = badId(id, "user");
@@ -473,6 +495,10 @@ export const GET = handler(
 
     const match = /^data:([^;,]+);base64,(.*)$/.exec(stored);
     if (!match) return fail(`No ${fieldLabel(part)} stored for this account`, 404);
+
+    await audit(admin, "IDENTITY_DOCUMENT_READ", "user", id, {
+      part,
+    }, { ip: clientIp(req) });
 
     const [, type, base64] = match;
 

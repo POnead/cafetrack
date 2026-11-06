@@ -38,6 +38,25 @@ export type IdCameraChoice = {
   facing: IdCameraFacing;
 };
 
+async function stabilizeIdCamera(stream: MediaStream): Promise<void> {
+  const track = stream.getVideoTracks()[0];
+  if (!track?.applyConstraints) return;
+
+  try {
+    await track.applyConstraints({
+      advanced: [
+        {
+          focusMode: "continuous",
+          exposureMode: "continuous",
+          whiteBalanceMode: "continuous",
+        },
+      ],
+    } as unknown as MediaTrackConstraints);
+  } catch {
+    // Supported capture constraints vary between browsers and camera hardware.
+  }
+}
+
 /**
  * Ask for a camera pointed at the card.
  *
@@ -68,6 +87,7 @@ async function requestIdCamera(
       audio: false,
       video: { ...size, deviceId: { exact: deviceId } },
     });
+    await stabilizeIdCamera(stream);
     return { stream, facing: facingFromSettings(stream) };
   }
 
@@ -79,6 +99,7 @@ async function requestIdCamera(
         facingMode: requireRear ? { exact: "environment" } : { ideal: "environment" },
       },
     });
+    await stabilizeIdCamera(stream);
     return {
       stream,
       facing: requireRear ? "rear" : facingFromSettings(stream),
@@ -100,6 +121,7 @@ async function requestIdCamera(
      */
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: size });
+      await stabilizeIdCamera(stream);
       return { stream, facing: facingFromSettings(stream) };
     } catch {
       throw e;

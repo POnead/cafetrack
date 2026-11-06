@@ -54,6 +54,7 @@ export type IdLookupRow = {
   deactivation_reason: string | null;
   deactivated_at: string | null;
   session_token: string | null;
+  session_last_active_at: string | null;
 };
 
 /** How a card was recognised. Both may be true for the same account. */

@@ -3,41 +3,39 @@
 /**
  * The duty check a staff member passes before starting work.
  *
- * Shown after sign-in when the account still owes a check. Three states, and the
- * order matters:
+ * Shown after sign-in when the account still owes a check. The frames go to
+ * Face++: Detect finds the face, reads its pose and its eye state (which is how
+ * the open → closed → open blink is verified), and Compare matches the
+ * straight-on frame with the photo enrolled on the account.
  *
- *   loading  — reading whether a check is even owed, from /api/auth/me. The
- *              screen must never flash the camera at someone who is already
- *              inside their window, so this is a real state and not a spinner
- *              over the form.
- *   capture  — the person proves who they are.
- *   verifying— a full-screen hold while the numbers go up and are compared. Not
- *              a corner spinner: the person has just pointed a camera at their
- *              own face and needs to be told it is being read rather than
- *              abandoned.
+ * The capture is automatic. The café's local pose gate decides when the
+ * straight-on, left and right frames are ready, and a small landmark model times
+ * the blink. That model never decides identity — it only decides when to take a
+ * picture; Face++ still judges every frame.
  *
- * The comparison and liveness check happen on the server. A small, transient
- * camera frame accompanies each embedding and is never stored.
+ * Three states, and the order matters:
+ *
+ *   loading   — reading whether a check is even owed, from /api/auth/me. The
+ *               screen must never flash the camera at someone who is already
+ *               inside their window, so this is a real state.
+ *   capture   — the guided scan: straight on, left, right, blink.
+ *   verifying — a full-screen hold while Face++ makes the decision.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { describeCameraProblem } from "@/lib/face-diagnostics";
 import {
-  cameraOriginProblem,
-  classifyCameraError,
-  describeCameraProblem,
-} from "@/lib/face-diagnostics";
-import { POSE_COPY } from "@/lib/face";
-import { framesBody, useFacePoses, type PoseFrame } from "@/lib/use-face-poses";
-import { useAutoFaceCapture } from "@/lib/use-auto-face-capture";
-import FaceScanOverlay from "@/components/FaceScanOverlay";
-import FaceCaptureGuide from "@/components/FaceCaptureGuide";
+  FACEPP_CAPTURE_COPY,
+  facePlusPlusPermissionHelp,
+  useFacePlusPlusCapture,
+  type FacePlusPlusImages,
+} from "@/lib/use-facepp-capture";
 
 type Phase =
   | "loading"
   | "not-required"
   | "no-camera"
-  | "denied"
   | "capture"
   | "verifying"
   | "passed"
@@ -57,77 +55,83 @@ export default function VerifyPage() {
   const [phase, setPhase] = useState<Phase>("loading");
   const [message, setMessage] = useState<string | null>(null);
   const [status, setStatus] = useState<FaceStatus | null>(null);
+  const [facePlusPlusState, setFacePlusPlusState] = useState<
+    "checking" | "configured" | "unavailable"
+  >("checking");
 
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
+  const submitFrames = useCallback(
+    async (images: FacePlusPlusImages) => {
+      setPhase("verifying");
+      setMessage(null);
+      try {
+        const res = await fetch("/api/auth/verify-face", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            face_images: {
+              front: images.front,
+              left: images.left,
+              right: images.right,
+            },
+            blink_evidence: {
+              before: images.before,
+              closed: images.closed,
+              after: images.after,
+            },
+          }),
+        });
+        const data = await res.json();
 
-  /*
-   * Whether the camera is actually running and should be on screen.
-   *
-   * Separate from `phase`, because `phase` describes what the *check* is doing
-   * (waiting, reading, passed) and says nothing about the hardware. This screen
-   * opens a camera and then has to decide what to draw, and drawing it from
-   * `phase` meant a successful open changed nothing visible at all.
-   */
-  const [cameraOn, setCameraOn] = useState(false);
+        if (res.ok && data.ok) {
+          setPhase("passed");
+          // Long enough to read the confirmation, then in.
+          setTimeout(() => router.replace("/dashboard"), 1200);
+          return;
+        }
 
-  /*
-   * Model download progress.
-   *
-   * Without this the screen does nothing visible for the several seconds the
-   * ~7MB recognition weights take, which is the same "no hint anything is
-   * happening" complaint as a dead camera — the button simply stops responding.
-   * The other two camera screens both show this, and this one has to as well.
-   */
-  const [loadingModels, setLoadingModels] = useState(false);
-  const [progress, setProgress] = useState({ loaded: 0, total: 0 });
+        setPhase("failed");
+        setMessage(
+          data.error ||
+            "That face was not recognised. Try again, or ask your manager for an override."
+        );
+      } catch {
+        setPhase("failed");
+        setMessage("That could not be checked. Try again.");
+      }
+    },
+    [router]
+  );
 
-  /*
-   * Attach the stream to the video element as it mounts.
-   *
-   * A callback ref, not `videoRef.current = ...` in the open routine. The two
-   * used to be ordered so that the element did not exist yet when the stream was
-   * assigned to it, so the assignment landed on null and was discarded — the
-   * camera opened, its light came on, the stream ran, and the page showed no
-   * picture of any kind. Assigning on mount makes the order irrelevant.
-   */
-  const attachStream = useCallback((node: HTMLVideoElement | null) => {
-    videoRef.current = node;
-    if (!node) return;
-    const stream = streamRef.current;
-    if (!stream) return;
-    node.srcObject = stream;
-    void node.play().catch(() => {});
-  }, []);
+  const capture = useFacePlusPlusCapture({ onComplete: submitFrames });
 
-  // face-client pulls in tfjs, which has no server. Loaded on first use so the
-  // 6MB model is not fetched by anyone who turns out not to owe a check.
-  const faceRef = useRef<typeof import("@/lib/face-client") | null>(null);
-  const faceLib = async () => {
-    if (!faceRef.current) faceRef.current = await import("@/lib/face-client");
-    return faceRef.current;
-  };
-
-  const stopCamera = useCallback(() => {
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
-    setCameraOn(false);
-  }, []);
-
-  useEffect(() => stopCamera, [stopCamera]);
-
-  // Ask whether a check is owed. Anything other than "yes, and there is a face to
-  // compare against" sends them on to the app.
+  // Ask whether a check is owed, and whether Face++ is configured. Both answers
+  // are needed before a camera is ever opened.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch("/api/auth/me", { cache: "no-store" });
-        if (!res.ok) {
+        const [meRes, configRes] = await Promise.all([
+          fetch("/api/auth/me", { cache: "no-store" }),
+          fetch("/api/auth/face-login", { cache: "no-store" }).catch(() => null),
+        ]);
+
+        if (!meRes.ok) {
           router.replace("/login");
           return;
         }
-        const data = await res.json();
+
+        if (configRes) {
+          const config = await configRes.json().catch(() => null);
+          if (!cancelled) {
+            setFacePlusPlusState(
+              config?.facePlusPlusConfigured ? "configured" : "unavailable"
+            );
+          }
+        } else if (!cancelled) {
+          setFacePlusPlusState("unavailable");
+        }
+
+        const data = await meRes.json();
         if (cancelled) return;
 
         const face: FaceStatus = data.face;
@@ -149,12 +153,6 @@ export default function VerifyPage() {
           return;
         }
 
-        const lib = await faceLib();
-        if (!lib.cameraAvailable()) {
-          // Plain http on the LAN cannot provide trusted live camera evidence.
-          setPhase("capture");
-          return;
-        }
         setPhase("capture");
       } catch {
         if (!cancelled) router.replace("/login");
@@ -165,132 +163,21 @@ export default function VerifyPage() {
     };
   }, [router]);
 
-  const startCamera = useCallback(async () => {
+  const start = useCallback(async () => {
     setMessage(null);
+    setPhase("capture");
 
-    /*
-     * Checked before asking for one. On plain http to a phone on the LAN there
-     * is no navigator.mediaDevices at all, so calling getUserMedia first would
-     * fail in a way that reads as "the camera is broken" rather than "this
-     * address cannot have a camera" — and this is the common case at a cafe, not
-     * the rare one.
-     */
-    const originProblem = cameraOriginProblem();
-    if (originProblem) {
-      setMessage(describeCameraProblem(originProblem).help ?? describeCameraProblem(originProblem).message);
+    if (facePlusPlusState === "unavailable") {
+      setMessage(
+        "Face check is unavailable right now. Ask your manager for help."
+      );
       return;
     }
 
-    try {
-      const lib = await faceLib();
-
-      /*
-       * The model first, then the camera.
-       *
-       * `verify` runs the recognition weights, so opening the camera ahead of
-       * them means holding still in front of a live preview for the length of a
-       * ~7MB download. FaceSignIn and the enrolment capture already load first;
-       * this now matches them — with a progress bar, because a button that stops
-       * responding for several seconds is indistinguishable from a broken one.
-       */
-      setLoadingModels(true);
-      setProgress({ loaded: 0, total: 6_700_000 });
-      try {
-        await lib.loadFaceModels((loaded, total) => {
-          if (total > 0) setProgress({ loaded, total });
-        });
-      } finally {
-        setLoadingModels(false);
-      }
-
-      const stream = await lib.openCamera();
-      streamRef.current = stream;
-      // Mounts the <video>; attachStream picks the stream up on that mount.
-      setCameraOn(true);
-    } catch (e) {
-      const lib = await faceLib();
-
-      /*
-       * The real cause, read off the exception rather than re-derived from a
-       * second permission query.
-       *
-       * Everything that was not a refusal used to be reported as "no camera",
-       * so a camera held open by a video call and a machine with no webcam at all
-       * both sent someone to check hardware that was working fine. The wording
-       * comes from the shared table so this screen, the enrolment capture and
-       * sign-in cannot drift apart again.
-       */
-      const problem = classifyCameraError(e);
-      const { message, help } = describeCameraProblem(problem);
-
-      setPhase(problem === "permission-denied" ? "denied" : "no-camera");
-      setMessage(
-        problem === "permission-denied" && lib.permissionHelp("denied")
-          ? lib.permissionHelp("denied")
-          : `${message} ${help ?? ""} A live camera is required for this check. Use a secure address or ask your manager for an override.`
-      );
-    }
-  }, []);
-
-  /*
-   * The three-angle sequence: straight on, then the person's left, then their
-   * right. The prompt on screen and the button label both come from the same
-   * active angle, so they cannot disagree about what is being asked for.
-   */
-  const poses = useFacePoses();
-
-  /** Send a complete presentation to the server and act on the answer. */
-  const submitFrames = useCallback(
-    async (frames: readonly PoseFrame[]) => {
-      setPhase("verifying");
+    if (await capture.start()) {
       setMessage(null);
-      try {
-        const res = await fetch("/api/auth/verify-face", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          // Every angle, in one body. A check that sent only the straight-on
-          // frame would fail on any account holding side samples.
-          body: JSON.stringify(framesBody(frames)),
-        });
-        const data = await res.json();
-
-        if (res.ok && data.ok) {
-          setPhase("passed");
-          // Nothing left to read, so the light goes off while they read the
-          // confirmation rather than staying on until the next page loads.
-          stopCamera();
-          // Long enough to read the confirmation, then in.
-          setTimeout(() => router.replace("/dashboard"), 1200);
-          return;
-        }
-
-        setPhase("failed");
-        setMessage(
-          data.error ||
-            "That face was not recognised. Try again, or ask your manager for an override."
-        );
-      } catch {
-        setPhase("capture");
-        setMessage("That could not be checked. Try again.");
-      }
-    },
-    [router, stopCamera]
-  );
-
-  /*
-   * Automatic capture. Once the camera is live the loop watches for a face,
-   * waits for the head to reach the angle being asked for, reads it, and moves
-   * on — no capture button while it is working. See use-auto-face-capture.
-   */
-  const scan = useAutoFaceCapture({
-    sequence: poses,
-    videoRef,
-    /*
-     * Only while the live camera is running and this check is accepting frames.
-     */
-    active: cameraOn && phase === "capture",
-    onComplete: (frames) => void submitFrames(frames),
-  });
+    }
+  }, [capture, facePlusPlusState]);
 
   if (phase === "loading") {
     return (
@@ -323,153 +210,107 @@ export default function VerifyPage() {
         <p className="text-center text-sm text-cocoa-600">
           {phase === "passed"
             ? "You're on duty. Taking you in…"
-            : "Hold still — this only takes a moment."}
+            : "Checking your face…"}
         </p>
       </Screen>
     );
   }
+
+  const problem = capture.blocked ? describeCameraProblem(capture.blocked) : null;
 
   return (
     <Screen
       title={
         phase === "no-camera" && !status?.enrolled
           ? "No reference photo"
-          : "Confirm it's you"
+          : "Duty face check"
       }
       subtitle={
         status
-          ? `One check covers ${status.dutyHours} hours of duty.`
+          ? `Password sign-in is complete. Duty face checks are on, so verify now to continue. One check covers ${status.dutyHours} hours.`
           : undefined
       }
     >
-      {/*
-        The live preview.
-
-        This element did not exist at all, while the code above opened a camera
-        and assigned the stream to a ref that nothing ever pointed at. So the
-        camera light came on, the stream ran, the page showed no picture, and the
-        only evidence anything had happened was a green LED — with no way to take
-        the photo even if it had shown something.
-
-        `autoPlay` and `muted` are both required, not decoration: a video with a
-        MediaStream will not start drawing frames until it is playing, and a
-        browser will refuse to play audible media that did not start from a user
-        gesture. Both are satisfied here, and `attachStream` calls play() as well
-        so a browser that ignores autoplay for the stream still starts.
-      */}
-      {cameraOn && (
+      {capture.phase === "camera" ? (
         <div className="mb-5 overflow-hidden rounded-2xl bg-cocoa-900 p-2 sm:p-3">
           <div className="relative mx-auto aspect-[4/5] max-h-[65vh] w-full max-w-sm overflow-hidden rounded-xl">
             <video
-              ref={attachStream}
+              ref={capture.attachStream}
               playsInline
               muted
               autoPlay
               className="block h-full w-full object-cover"
             />
-            {/* The loading screen for the angle being read. */}
-            {scan.phase === "scanning" && (
-              <FaceScanOverlay
-                step={Math.min(scan.progress + 1, scan.total)}
-                total={scan.total}
-              />
-            )}
-            {/* The live guide, until the loop hands over to the manual button. */}
-            {scan.phase === "prompt" && (
-              <FaceCaptureGuide
-                poses={scan.poses}
-                activePose={scan.activePose}
-                done={scan.frames.map((f) => f.pose)}
-                state={scan.liveState}
-                holdProgress={scan.holdProgress}
-                flashPose={scan.flashPose}
-                message={scan.message}
-              />
-            )}
+            <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-between bg-gradient-to-b from-cocoa-900/45 via-transparent to-cocoa-900/75 p-4 text-center text-cream-100">
+              <p className="rounded-full bg-cocoa-900/70 px-3 py-1 text-xs font-semibold">
+                {FACEPP_CAPTURE_COPY[capture.stage].step}
+              </p>
+              <div className="flex aspect-square w-[72%] items-center justify-center rounded-[42%] border-4 border-cream-100/80">
+                <span className="sr-only">Position your head inside the guide</span>
+              </div>
+              <p className="rounded-xl bg-cocoa-900/75 px-3 py-2 text-sm font-medium">
+                {FACEPP_CAPTURE_COPY[capture.stage].prompt}
+              </p>
+            </div>
           </div>
         </div>
-      )}
+      ) : null}
 
-      {cameraOn ? (
-        /*
-         * The manual fallback. Hidden while auto-capture is working; it appears
-         * only after repeated failures, which is the one case where the loop has
-         * stopped being useful.
-         */
-        scan.showManual ? (
-          <div className="mb-5 grid gap-2 sm:grid-cols-2">
-            <button
-              type="button"
-              className="btn-primary"
-              onClick={() => void scan.captureNow()}
-            >
-              Take the {POSE_COPY[scan.activePose].short} photo
-            </button>
-            <button type="button" className="btn-ghost" onClick={scan.resume}>
-              Keep scanning
-            </button>
+      {capture.phase === "camera" ? (
+        <div className="mb-4 space-y-3">
+          <div className="h-1.5 overflow-hidden rounded-full bg-cream-200">
+            <div
+              className="h-full rounded-full bg-ochre-400 transition-[width] duration-150"
+              style={{ width: `${Math.round(capture.holdProgress * 100)}%` }}
+            />
           </div>
-        ) : phase === "failed" ? (
-          <div className="mb-5 flex justify-center">
+          {capture.showManual && (
             <button
               type="button"
               className="btn-primary min-h-12 w-full"
-              onClick={() => {
-                scan.reset();
-                setPhase("capture");
-              }}
+              onClick={capture.capture}
             >
-              Try again
+              {FACEPP_CAPTURE_COPY[capture.stage].button}
             </button>
-          </div>
-        ) : null
+          )}
+          {capture.message && (
+            <p role="status" className="text-center text-xs text-cocoa-500">
+              {capture.message}
+            </p>
+          )}
+        </div>
       ) : (
         <div className="mb-4 flex justify-center">
           <button
             type="button"
             className="btn-primary"
-            disabled={loadingModels}
-            onClick={() => void startCamera()}
+            disabled={phase === "no-camera" || facePlusPlusState === "checking"}
+            onClick={() => void start()}
           >
-            {loadingModels ? "Getting ready…" : "Turn on the camera"}
+            {phase === "failed"
+              ? "Try again"
+              : facePlusPlusState === "checking"
+                ? "Checking availability…"
+                : facePlusPlusState === "unavailable"
+                  ? "Face check unavailable"
+                  : "Turn on the camera"}
           </button>
         </div>
       )}
 
-      {loadingModels && (
-        <div className="mb-5 rounded-xl border border-cream-200 bg-white px-4 py-3.5">
-          <div className="h-2 overflow-hidden rounded-full bg-cream-200">
-            <div
-              className="h-full rounded-full bg-ochre-400 transition-all"
-              style={{
-                width: `${
-                  progress.total > 0
-                    ? Math.min(100, Math.round((progress.loaded / progress.total) * 100))
-                    : 0
-                }%`,
-              }}
-            />
-          </div>
+      {problem && (
+        <div
+          role="status"
+          className="mb-4 space-y-2 rounded-xl border border-terracotta-100 bg-terracotta-50 px-4 py-3.5 text-sm leading-relaxed text-terracotta-700"
+        >
+          <p className="font-semibold">{problem.message}</p>
+          <p>
+            {capture.blocked === "permission-denied"
+              ? facePlusPlusPermissionHelp()
+              : problem.help}
+          </p>
         </div>
       )}
-
-      {/*
-        Framing, before anyone tries rather than after they fail.
-
-        Measured on the real model: the same person re-shot with room around the
-        face sits at 0.002-0.02 from their own reference, and cropped tight enough
-        to clip the chin, at 0.030. That last figure is close to the stricter
-        0.033 cut-off, so a badly framed photo still costs a scan, and one line
-        here buys a retake instead.
-
-        Only while the camera is off. Once it is open the live guide carries the
-        angle, the nudge and the count on the preview itself.
-      */}
-
-      <p className="mt-4 text-center text-xs leading-relaxed text-cocoa-500">
-        This check requires a live camera. Camera frames are checked temporarily
-        on this server and are not saved.
-      </p>
 
       {message && (
         <div

@@ -61,7 +61,7 @@ import {
   toJpegDataUrl,
 } from "@/lib/face-client";
 import {
-  poseStateOfRead,
+  capturePoseStateOfRead,
   readFaceFor,
   useFaceEngine,
   type EngineRead,
@@ -247,6 +247,11 @@ export default function FaceCapture({ onCapture, currentPhotos, disabled }: Prop
     videoRef,
     active: phase === "camera",
     poses: session ?? FACE_POSES,
+    // Sample more often and capture after a brief stillness check, so a held
+    // pose is accepted promptly without filing a transient frame.
+    intervalMs: 180,
+    stableReads: 2,
+    scanMinMs: 250,
     /*
      * The photo is grabbed at the same instant as the embedding, so the JPEG and
      * the 128 floats always describe the same frame.
@@ -378,7 +383,7 @@ export default function FaceCapture({ onCapture, currentPhotos, disabled }: Prop
       read: Extract<EngineRead, { ok: true }>,
       photo: string
     ): { accepted: boolean } => {
-      const state = poseStateOfRead(read);
+      const state = capturePoseStateOfRead(read, enrolmentEngine);
       const held = FACE_POSES.filter((pose) => shotsRef.current[pose]);
       const filing = fileFrame({ expected, seen: state.pose, held });
 
@@ -619,8 +624,8 @@ export default function FaceCapture({ onCapture, currentPhotos, disabled }: Prop
                   total={scan.total}
                 />
               )}
-              {/* The live guide, until the loop hands over to the manual button. */}
-              {scan.phase === "prompt" && (
+              {/* Keep the pose guidance visible while the manual fallback is available. */}
+              {(scan.phase === "prompt" || scan.phase === "failed") && (
                 <FaceCaptureGuide
                   poses={scan.poses}
                   activePose={scan.activePose}
@@ -633,6 +638,18 @@ export default function FaceCapture({ onCapture, currentPhotos, disabled }: Prop
               )}
             </div>
           </div>
+          {(scan.phase === "prompt" || scan.phase === "failed") && (
+            <FaceCaptureGuide
+              display="instructions"
+              poses={scan.poses}
+              activePose={scan.activePose}
+              done={scan.frames.map((f) => f.pose)}
+              state={scan.liveState}
+              holdProgress={scan.holdProgress}
+              flashPose={scan.flashPose}
+              message={scan.message}
+            />
+          )}
 
           {scan.showManual && (
             <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-relaxed text-cocoa-700">

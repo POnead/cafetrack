@@ -180,6 +180,16 @@ check("a different person fails", different.tone === "fail", different.detail);
 const lower = nameSignal("dela cruz, juan", "Juan Santos Dela Cruz", "ok");
 check("case does not decide it", lower.tone === "pass", lower.detail);
 
+const prince = nameSignal("RODRIGUEZ, PRINCE DEANO AGUILA", "Prince Deano Rodriguez", "ok");
+check("the complete given name matches the account", prince.tone === "pass", prince.detail);
+
+const otherRodriguez = nameSignal("RODRIGUEZ, MARIA DELA CRUZ", "Prince Deano Rodriguez", "ok");
+check("a different first name is not accepted just because the surname matches", otherRodriguez.tone === "fail", otherRodriguez.detail);
+check("the same-surname warning explains why it failed", /same surname alone/i.test(otherRodriguez.detail), otherRodriguez.detail);
+
+const surnameOnly = nameSignal("RODRIGUEZ", "Prince Deano Rodriguez", "ok");
+check("a surname-only OCR result is not a full-name pass", surnameOnly.tone === "unknown", surnameOnly.detail);
+
 check(
   "a card name is quoted in the detail an admin has to read",
   /REYES/i.test(different.detail)

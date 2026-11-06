@@ -23,6 +23,7 @@ import { buildRows, buildLayout, isFillerWord, contentWords, wordsBeside } from 
 import { extract, isTrustworthy } from "../src/lib/id-verification/ocr/extract.ts";
 import { parseMrz, mrzDateToIso, checkDigit } from "../src/lib/id-verification/ocr/mrz.ts";
 import { TEMPLATES, templateFor } from "../src/lib/id-verification/ocr/templates.ts";
+import { detectCardType } from "../src/lib/id-verification/ocr/card-type.ts";
 
 let pass = 0;
 let fail = 0;
@@ -363,6 +364,25 @@ section("heuristic reads are not trusted");
   const { fields } = extract(layout, "philsys");
 
   check("a printed label is never mistaken for a name", fields.full_name.value === "DELA CRUZ JUAN", fields.full_name.value);
+}
+
+section("card type detection");
+
+{
+  const detected = detectCardType(
+    "REPUBLIC OF THE PHILIPPINES PAMBANSANG PAGKAKAKILANLAN PHILIPPINE IDENTIFICATION SYSTEM PSN 1234"
+  );
+  check("PhilSys card furniture is detected", detected.type === "philsys", detected.type);
+  check("multiple PhilSys markers are high confidence", detected.confidence === "high", detected.confidence);
+}
+
+{
+  const detected = detectCardType("REPUBLIC OF THE PHILIPPINES LAND TRANSPORTATION OFFICE DRIVER'S LICENSE");
+  check("LTO card furniture is detected", detected.type === "lto_license", detected.type);
+}
+
+{
+  check("unrecognised text does not invent a card type", detectCardType("HELLO WORLD").type === null);
 }
 
 console.log(`\n----------------------------------------------`);

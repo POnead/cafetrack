@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { readFaceSface, sfaceModelsPresent } from "@/lib/face-sface";
+import { readFaceSface, sfaceModelsPresent, type SfaceRead } from "@/lib/face-sface";
 import { cameraAvailable, permissionHelp } from "@/lib/face-client";
 import {
   cameraOriginProblem,
@@ -21,7 +21,8 @@ import { fingerprintFromCanvas } from "@/lib/card-fingerprint";
 import { useAutoIdCapture } from "@/lib/use-auto-id-capture";
 
 /**
- * Attach a government ID and a photo of the person, and send both up.
+ * Attach a government ID and compare its portrait with the target account's
+ * enrolled face before sending the verification request.
  *
  * Loaded with `ssr: false` and `next/dynamic` by its callers, for the same
  * reason FaceCapture is: reading a face pulls in ONNX Runtime and SFace, which
@@ -64,16 +65,15 @@ import { useAutoIdCapture } from "@/lib/use-auto-id-capture";
  * displayed. The pictures are still uploaded, because an admin has to look at
  * them — that judgement is the whole point.
  *
- * **Failure is soft.** No face in the card image, or no face in the photo, is not
- * an error. It becomes an "unknown" signal on the review screen saying the
- * comparison could not run. Refusing the upload would turn the model's inability
- * to read a face into a refusal to record an ID. The same applies when the SFace
- * models are not installed: the upload still goes, and the review screen says the
- * portrait was not compared.
+ * **Face comparison is required.** A readable card portrait and readable
+ * account face are prerequisites for publishing the upload. The absence of
+ * either result keeps the ID from being submitted, rather than recording a
+ * verification with an unknown face result.
  */
 
 /** Long edge, in pixels, that every image is reduced to before upload. */
 const MAX_EDGE = 1600;
+const FRONT_OCR_MAX_EDGE = 2400;
 
 /**
  * JPEG quality for the re-encode.
@@ -83,6 +83,7 @@ const MAX_EDGE = 1600;
  * starts to break up, which is exactly the text an OCR provider needs.
  */
 const JPEG_QUALITY = 0.82;
+const FRONT_OCR_JPEG_QUALITY = 0.92;
 
 export type IdUploadResult = {
   front: File;
@@ -106,6 +107,8 @@ export type IdUploadResult = {
 
 export type IdUploadProps = {
   disabled?: boolean;
+  /** Account whose enrolled face must match the portrait on the ID. */
+  accountId: string;
   /** Called with null whenever the selection is not yet uploadable. */
   onReady: (result: IdUploadResult | null) => void;
 };
@@ -125,13 +128,13 @@ const SLOT_COPY: Record<Slot, { label: string; hint: string; required: boolean }
   },
   photo: {
     label: "Photo of the person",
-    hint: "A clear photo of the applicant, looking at the camera. Without one the portrait cannot be compared.",
+    hint: "The account's enrolled face photo is used automatically; a separate upload is not accepted.",
     required: false,
   },
 };
 
 /** Downscale an image file to a bounded JPEG. */
-async function downscale(file: File): Promise<File> {
+async function downscale(file: File, enhanceForOcr = false): Promise<File> {
   let bitmap: ImageBitmap;
   try {
     bitmap = await createImageBitmap(file);
@@ -142,7 +145,8 @@ async function downscale(file: File): Promise<File> {
   }
 
   try {
-    const scale = Math.min(1, MAX_EDGE / Math.max(bitmap.width, bitmap.height));
+    const maxEdge = enhanceForOcr ? FRONT_OCR_MAX_EDGE : MAX_EDGE;
+    const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
     const width = Math.max(1, Math.round(bitmap.width * scale));
     const height = Math.max(1, Math.round(bitmap.height * scale));
 
@@ -153,10 +157,16 @@ async function downscale(file: File): Promise<File> {
     const ctx = canvas.getContext("2d");
     if (!ctx) return file;
 
-    ctx.drawImage(bitmap, 0, 0, width, height);
+    if (enhanceForOcr) {
+      ctx.filter = "contrast(1.12) saturate(0.92) brightness(1.03)";
+      ctx.drawImage(bitmap, 0, 0, width, height);
+      ctx.filter = "none";
+    } else {
+      ctx.drawImage(bitmap, 0, 0, width, height);
+    }
 
     const blob = await new Promise<Blob | null>((resolve) =>
-      canvas.toBlob(resolve, "image/jpeg", JPEG_QUALITY)
+      canvas.toBlob(resolve, "image/jpeg", enhanceForOcr ? FRONT_OCR_JPEG_QUALITY : JPEG_QUALITY)
     );
     if (!blob) return file;
 
@@ -170,7 +180,7 @@ async function downscale(file: File): Promise<File> {
 }
 
 /** A canvas holding an already-decoded image, ready for the face model. */
-async function toCanvas(file: File): Promise<HTMLCanvasElement | null> {
+async function toCanvas(file: File | Blob): Promise<HTMLCanvasElement | null> {
   let bitmap: ImageBitmap;
   try {
     bitmap = await createImageBitmap(file);
@@ -191,7 +201,29 @@ async function toCanvas(file: File): Promise<HTMLCanvasElement | null> {
   }
 }
 
-export default function IdUpload({ disabled, onReady }: IdUploadProps) {
+/** One bounded recovery attempt for a portrait SFace rejected only as too dark. */
+function brightenCanvas(source: HTMLCanvasElement): HTMLCanvasElement | null {
+  const canvas = document.createElement("canvas");
+  canvas.width = source.width;
+  canvas.height = source.height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return null;
+  ctx.filter = "brightness(1.35) contrast(1.12)";
+  ctx.drawImage(source, 0, 0);
+  ctx.filter = "none";
+  return canvas;
+}
+
+async function readFaceWithRecovery(source: HTMLCanvasElement): Promise<SfaceRead> {
+  const first = await readFaceSface(source);
+  if (first.ok || first.reason !== "too-dark") return first;
+
+  const brighter = brightenCanvas(source);
+  if (!brighter) return first;
+  return readFaceSface(brighter);
+}
+
+export default function IdUpload({ disabled, accountId, onReady }: IdUploadProps) {
   const [files, setFiles] = useState<Partial<Record<Slot, File>>>({});
   const [previews, setPreviews] = useState<Partial<Record<Slot, string>>>({});
   const [embeddings, setEmbeddings] = useState<{
@@ -271,6 +303,7 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
    */
   const published = useRef<IdUploadResult | null>(null);
   const urls = useRef<string[]>([]);
+  const faceReadVersion = useRef(0);
 
   useEffect(() => {
     const held = urls.current;
@@ -310,6 +343,9 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
    */
   const readFaces = useCallback(
     async (front: File | undefined, photo: File | undefined) => {
+      const version = ++faceReadVersion.current;
+      const current = () => version === faceReadVersion.current;
+
       if (!front) {
         setEmbeddings({ cardEmbedding: null, photoEmbedding: null });
         setReading(false);
@@ -317,6 +353,7 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
       }
 
       setReading(true);
+      setEmbeddings({ cardEmbedding: null, photoEmbedding: null });
       const warnings: string[] = [];
 
       /*
@@ -328,10 +365,11 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
        * once, plainly, instead of surfacing the same ONNX failure twice.
        */
       if (!(await sfaceModelsPresent().catch(() => false))) {
+        if (!current()) return;
         setEmbeddings({ cardEmbedding: null, photoEmbedding: null });
         setNote(
-          "The face-matching model is not installed, so the portrait will not be compared. " +
-            "Everything else still runs. Run `npm run setup:face:sface` to install it."
+          "The face-matching model is not installed. Install it with " +
+            "`npm run setup:face:sface`; both faces must be readable before the ID can be uploaded."
         );
         setReading(false);
         return;
@@ -340,21 +378,57 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
       let cardEmbedding: number[] | null = null;
       let photoEmbedding: number[] | null = null;
 
+      try {
+        const accountPhoto = await fetch(
+          `/api/users/${encodeURIComponent(accountId)}/face`,
+          { cache: "no-store", credentials: "same-origin" }
+        );
+        if (!accountPhoto.ok) {
+          warnings.push(
+            "The account has no enrolled face photo. Enrol the staff member's face before uploading an ID."
+          );
+        } else {
+          const blob = await accountPhoto.blob();
+          const accountCanvas = await toCanvas(blob);
+          if (!current()) return;
+          if (!accountCanvas) {
+            warnings.push("The account's enrolled face photo could not be opened as an image.");
+          } else {
+            try {
+              const read = await readFaceWithRecovery(accountCanvas);
+              if (!current()) return;
+              if (read.ok) photoEmbedding = read.embedding;
+              else warnings.push(
+                `The account's enrolled face photo could not be read: ${read.message}`
+              );
+            } catch {
+              warnings.push("The account's enrolled face photo could not be processed.");
+            }
+          }
+        }
+      } catch {
+        warnings.push("The account's enrolled face photo could not be loaded.");
+      }
+
       const frontCanvas = await toCanvas(front);
+      if (!current()) return;
       if (!frontCanvas) {
         warnings.push("The front of the ID could not be opened as an image.");
       } else {
         try {
-          const read = await readFaceSface(frontCanvas);
+          const read = await readFaceWithRecovery(frontCanvas);
+          if (!current()) return;
           if (read.ok) {
             cardEmbedding = read.embedding;
           } else {
             warnings.push(
-              "No face could be read from the card image, so the printed portrait will not be " +
-                "compared. Check the card is large enough and evenly lit in the photo."
+              read.reason === "too-dark"
+                ? "The printed portrait on the card is still too dark to read after a brightness recovery attempt."
+                : `The face reader could not find the printed portrait on the card: ${read.message}`
             );
           }
         } catch {
+          if (!current()) return;
           warnings.push(
             "The face-matching model failed on the card image, so the printed portrait was not " +
               "compared."
@@ -362,26 +436,7 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
         }
       }
 
-      if (photo) {
-        const photoCanvas = await toCanvas(photo);
-        if (!photoCanvas) {
-          warnings.push("The photo of the person could not be opened as an image.");
-        } else {
-          try {
-            const read = await readFaceSface(photoCanvas);
-            if (read.ok) {
-              photoEmbedding = read.embedding;
-            } else {
-              warnings.push("No face could be read from the photo, so nothing will be compared.");
-            }
-          } catch {
-            warnings.push(
-              "The face-matching model failed on the photo of the person, so nothing was compared."
-            );
-          }
-        }
-      }
-
+      if (!current()) return;
       setEmbeddings({ cardEmbedding, photoEmbedding });
       setNote(warnings.length ? warnings.join(" ") : null);
       setReading(false);
@@ -394,7 +449,7 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
      * would observe, so the array was describing a dependency that does not
      * exist.
      */
-    []
+    [accountId]
   );
   const pick = useCallback(
     async (slot: Slot, file: File | undefined) => {
@@ -406,8 +461,13 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
       }
 
       setNote(null);
+      faceReadVersion.current++;
+      const selectionVersion = faceReadVersion.current;
+      setReading(true);
+      setEmbeddings({ cardEmbedding: null, photoEmbedding: null });
 
-      const small = await downscale(file);
+      const small = await downscale(file, slot === "front");
+      if (selectionVersion !== faceReadVersion.current) return;
 
       setFiles((prev) => {
         const next = { ...prev, [slot]: small };
@@ -531,6 +591,9 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
 
   const clearSlot = useCallback(
     (slot: Slot) => {
+      faceReadVersion.current++;
+      setReading(true);
+      setEmbeddings({ cardEmbedding: null, photoEmbedding: null });
       setFiles((prev) => {
         const next = { ...prev };
         delete next[slot];
@@ -561,7 +624,23 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
   // Publish only when the selection actually differs from what was last handed
   // up, so the parent's state is not replaced on every unrelated render.
   useEffect(() => {
+    if (reading) {
+      if (published.current !== null) {
+        published.current = null;
+        onReady(null);
+      }
+      return;
+    }
+
     if (!files.front) {
+      if (published.current !== null) {
+        published.current = null;
+        onReady(null);
+      }
+      return;
+    }
+
+    if (!embeddings.cardEmbedding || !embeddings.photoEmbedding) {
       if (published.current !== null) {
         published.current = null;
         onReady(null);
@@ -593,14 +672,13 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
 
     published.current = next;
     onReady(next);
-  }, [files, embeddings, cardHash, onReady]);
+  }, [files, embeddings, cardHash, onReady, reading]);
 
   // Fingerprint the front whenever it changes.
   //
-  // On the file rather than inside readFaces, because readFaces is skipped when
-  // there is no photo of the person to compare against — and a card with no
-  // accompanying photo is exactly the case where an admin most needs to know
-  // whether that card is already on file somewhere else.
+  // Keep duplicate-card checking independent from face extraction so a
+  // face-reading failure cannot hide whether the same card is already attached
+  // to another account.
   useEffect(() => {
     const front = files.front;
     if (!front) {
@@ -642,7 +720,7 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
 
   return (
     <div className="space-y-4">
-      {(Object.keys(SLOT_COPY) as Slot[]).map((slot) => (
+      {(Object.keys(SLOT_COPY) as Slot[]).filter((slot) => slot !== "photo").map((slot) => (
         <section
           key={slot}
           aria-labelledby={`id-${slot}-label`}
@@ -847,9 +925,7 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
                 <img
                   src={previews[slot]}
                   alt={`Preview of ${SLOT_COPY[slot].label}`}
-                  className={`h-full w-full ${
-                    slot === "photo" ? "object-cover" : "object-contain"
-                  }`}
+                  className="h-full w-full object-contain"
                 />
               ) : (
                 <span className="flex h-full w-full items-center justify-center px-1 text-center text-[10px] text-cocoa-400">

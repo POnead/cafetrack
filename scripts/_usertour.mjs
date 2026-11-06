@@ -672,12 +672,12 @@ try {
 
   // --- the ids have to be unique across the two rendered copies ----------
   // Regression guard: the restock line used to emit the same id twice, which
-  // left the "New expiry date" label pointing at the copy hidden by the
+  // left the "Expiration date" label pointing at the copy hidden by the
   // current breakpoint, so clicking it did nothing on a desktop.
   const dupes = await duplicateIds(admin);
   check("no id on the restock cart is duplicated", dupes.length === 0, dupes.slice(0, 4).join(", "));
 
-  const visibleLabel = admin.getByText(/^new expiry date$/i).filter({ visible: true }).first();
+  const visibleLabel = admin.getByText(/^expiration date$/i).filter({ visible: true }).first();
   await visibleLabel.click();
   await admin.waitForTimeout(400);
   const focusedIsVisible = await admin.evaluate((s) => {
@@ -696,7 +696,7 @@ try {
   // A batch that is too close to its date is warned about before the commit.
   const tooSoon = day(3);
   const expField = admin.locator(`input[id^="exp-${sku}-"]:visible`).first();
-  check("the restock line offers a new expiry date", await expField.isVisible());
+  check("the restock line offers an expiration date", await expField.isVisible());
   await expField.fill(tooSoon);
   await admin.waitForTimeout(800);
   check(

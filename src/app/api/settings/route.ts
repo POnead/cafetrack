@@ -222,7 +222,7 @@ const TEXT_SETTINGS: Record<
 const TOGGLES: Record<string, string> = {
   email_enabled: "Email notifications",
   face_verification_enabled: "Duty face verification",
-  face_login_enabled: "Sign in with a face",
+  face_login_enabled: "Staff login face check",
   /*
    * Whether a duty check asks for the two turned-head photos as well as the
    * straight-on one.

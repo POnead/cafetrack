@@ -2,6 +2,10 @@ import { db } from "./supabase";
 import { fmtQty, fmtDate, daysUntil } from "./format";
 import { stockStatus } from "./status";
 import type { PdfReport } from "./report-pdf";
+import {
+  isMissingTransactionNoteColumn,
+  TRANSACTION_NOTE_SCHEMA_WARNING,
+} from "./transaction-note-schema";
 
 export type StockReportFilters = {
   from: string;
@@ -40,7 +44,7 @@ export function parseStockReportFilters(input: unknown): StockReportFilters {
 }
 
 export async function buildStockReportData(filters: StockReportFilters): Promise<PdfReport> {
-  const [itemRows, movements] = await Promise.all([
+  const [itemRows, movementResult] = await Promise.all([
     db()
       .from("items")
       .select(
@@ -55,6 +59,7 @@ export async function buildStockReportData(filters: StockReportFilters): Promise
   ]);
 
   if (itemRows.error) throw new Error(itemRows.error.message);
+  const movements = movementResult.transactions;
 
   const categoryName = filters.categoryId
     ? (await db()
@@ -137,6 +142,9 @@ export async function buildStockReportData(filters: StockReportFilters): Promise
       timeStyle: "short",
     }),
     filterDescription: describeFilters(filters, categoryName),
+    warnings: movementResult.transactionNotesAvailable
+      ? []
+      : [TRANSACTION_NOTE_SCHEMA_WARNING],
     tiles: [
       { label: "Items tracked", value: items.length },
       {
@@ -187,48 +195,87 @@ export async function buildStockReportData(filters: StockReportFilters): Promise
           itemName: line.item_name,
           category: itemsBySku.get(line.sku)?.category?.name ?? "Uncategorized",
           quantity: fmtQty(line.quantity),
-          note: transaction.note ?? "—",
+          note: [transaction.note, line.note].filter(Boolean).join("\n") || "—",
         }))
     ),
   };
 }
 
-async function fetchMovements(filters: StockReportFilters): Promise<any[]> {
+async function fetchMovements(
+  filters: StockReportFilters
+): Promise<{ transactions: any[]; transactionNotesAvailable: boolean }> {
   const all: any[] = [];
   const pageSize = 500;
   const cap = 5000;
   let offset = 0;
+  let transactionNoteAvailable = true;
+  let itemNoteAvailable = true;
 
   while (all.length < cap) {
-    let query = db()
-      .from("transactions")
-      .select(
-        `id, type, actor_id, actor_name, note, created_at,
-         transaction_items(id, sku, item_name, quantity)`
-      )
-      .order("created_at", { ascending: false })
-      .order("id", { ascending: true })
-      .range(offset, offset + pageSize - 1);
+    const selections: { transactionNote: boolean; itemNote: boolean }[] = [
+      { transactionNote: transactionNoteAvailable, itemNote: itemNoteAvailable },
+      { transactionNote: false, itemNote: itemNoteAvailable },
+      { transactionNote: transactionNoteAvailable, itemNote: false },
+      { transactionNote: false, itemNote: false },
+    ];
+    const triedSelections = new Set<string>();
+    let data: any[] | null = null;
+    let error: { message: string } | null = null;
 
-    if (filters.type) query = query.eq("type", filters.type);
-    if (filters.from) query = query.gte("created_at", `${filters.from}T00:00:00.000Z`);
-    if (filters.to) query = query.lte("created_at", `${filters.to}T23:59:59.999Z`);
-    if (filters.staff) {
-      query = /^[0-9a-f-]{36}$/i.test(filters.staff)
-        ? query.eq("actor_id", filters.staff)
-        : query.eq("actor_name", filters.staff);
+    for (const selection of selections) {
+      const selectionKey = `${selection.transactionNote}:${selection.itemNote}`;
+      if (triedSelections.has(selectionKey)) continue;
+      triedSelections.add(selectionKey);
+
+      let query = db()
+        .from("transactions")
+        .select(
+          `${selection.transactionNote ? "id, type, actor_id, actor_name, note, created_at" : "id, type, actor_id, actor_name, created_at"},
+           transaction_items(id, sku, item_name, quantity${selection.itemNote ? ", note" : ""})`
+        )
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: true })
+        .range(offset, offset + pageSize - 1);
+
+      if (filters.type) query = query.eq("type", filters.type);
+      if (filters.from) query = query.gte("created_at", `${filters.from}T00:00:00.000Z`);
+      if (filters.to) query = query.lte("created_at", `${filters.to}T23:59:59.999Z`);
+      if (filters.staff) {
+        query = /^[0-9a-f-]{36}$/i.test(filters.staff)
+          ? query.eq("actor_id", filters.staff)
+          : query.eq("actor_name", filters.staff);
+      }
+
+      const result = await query;
+      if (!result.error) {
+        data = result.data;
+        transactionNoteAvailable = selection.transactionNote;
+        itemNoteAvailable = selection.itemNote;
+        error = null;
+        break;
+      }
+
+      error = result.error;
+      if (!isMissingTransactionNoteColumn(result.error)) break;
     }
 
-    const { data, error } = await query;
     if (error) throw new Error(error.message);
 
     const page = (data ?? []) as any[];
     all.push(...page);
-    if (page.length < pageSize) return all;
+    if (page.length < pageSize) {
+      return {
+        transactions: all,
+        transactionNotesAvailable: transactionNoteAvailable && itemNoteAvailable,
+      };
+    }
     offset += page.length;
   }
 
-  return all;
+  return {
+    transactions: all,
+    transactionNotesAvailable: transactionNoteAvailable && itemNoteAvailable,
+  };
 }
 
 function wasteByItem(movements: any[]) {

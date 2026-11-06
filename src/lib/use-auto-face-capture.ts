@@ -36,8 +36,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
 
-import { FACE_POSES, poseRefusal, type FacePose } from "./face";
-import { detectFaceFor, poseStateOfRead, useFaceEngine } from "./face-engine";
+import { poseRefusal, type FacePose } from "./face";
+import { capturePoseStateOfRead, detectFaceFor, useFaceEngine } from "./face-engine";
 import type { PoseState } from "./head-pose";
 import { useFacePoses, type PoseFrame } from "./use-face-poses";
 
@@ -162,7 +162,7 @@ export function useAutoFaceCapture({
   sequence,
   videoRef,
   active,
-  poses = FACE_POSES,
+  poses,
   onComplete,
   intervalMs = 350,
   stableReads = 3,
@@ -174,6 +174,7 @@ export function useAutoFaceCapture({
   onFrame,
 }: AutoFaceCaptureOptions): AutoFaceCapture {
   const engine = useFaceEngine();
+  const promptPoses = poses ?? sequence.steps;
   const [phase, setPhase] = useState<AutoCapturePhase>("idle");
   const [message, setMessage] = useState<string | null>(null);
 
@@ -376,7 +377,7 @@ export function useAutoFaceCapture({
       noFaceSinceRef.current = null;
 
       const expected = sequenceRef.current.activePose;
-      const state = poseStateOfRead(detected);
+      const state = capturePoseStateOfRead(detected, engineRef.current);
       const seen = state.pose;
       setLiveState(state);
 
@@ -403,7 +404,7 @@ export function useAutoFaceCapture({
       }
 
       // 2. Pose gate: do not pay for the descriptor until the head matches.
-      if (seen !== expected) {
+      if (!sequenceRef.current.acceptsPose(expected, seen)) {
         stableRef.current = 0;
         setHoldProgress(0);
         /*
@@ -506,7 +507,7 @@ export function useAutoFaceCapture({
         angleSinceRef.current = Date.now();
         lastExpectedRef.current = null;
         setHoldProgress(0);
-        flash(requested);
+        flash(accepted?.pose ?? requested);
         setPhase("prompt");
         schedule();
       } catch {
@@ -644,10 +645,10 @@ export function useAutoFaceCapture({
   return {
     phase,
     activePose: sequence.activePose,
-    poses,
+    poses: promptPoses,
     frames: sequence.frames,
     progress: sequence.frames.length,
-    total: poses.length,
+    total: promptPoses.length,
     message,
     liveState,
     holdProgress,

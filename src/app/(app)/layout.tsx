@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
-import { getSessionMinutes } from "@/lib/settings";
+import { getRoleIdleMinutes } from "@/lib/settings";
 import { AppShell } from "@/components/AppShell";
 
 /**
@@ -30,13 +30,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const session = await getSession();
   if (!session) redirect("/login");
 
-  // The idle window is admin-configurable, so the browser is told what it is
-  // rather than hardcoding 15 minutes on both sides. settings.ts caches this
-  // in-process for a minute, so it is not a query per navigation.
-  const sessionMinutes = await getSessionMinutes();
+  const idleMinutes = await getRoleIdleMinutes(session.role);
 
   return (
-    <AppShell user={session} idleLimitMs={sessionMinutes * 60 * 1000}>
+    <AppShell user={session} idleLimitMs={idleMinutes * 60 * 1000}>
       {children}
     </AppShell>
   );

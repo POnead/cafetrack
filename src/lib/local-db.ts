@@ -160,6 +160,12 @@ const RELATIONS: Record<
     foreignKey: "transaction_id",
     many: true,
   },
+  "items.inventory_batches": {
+    table: "inventory_batches",
+    localKey: "id",
+    foreignKey: "item_id",
+    many: true,
+  },
   "email_notifications.email_recipients": {
     table: "email_recipients",
     localKey: "recipient_id",
@@ -380,14 +386,15 @@ async function seedIfEmpty(pg: PGlite) {
     await pg.query(
       `insert into items
          (sku, name, category_id, location_id, physical_form, unit,
-          quantity, low_stock_threshold, expiration_date)
+          quantity, low_stock_threshold, expiration_date, expirable)
        values (
          'CT-' || upper(substr(regexp_replace($1, '[^A-Za-z]', '', 'g'), 1, 3))
                 || '-' || upper(substr(md5(random()::text), 1, 4)),
          $1,
          (select id from categories where name = $2),
          (select id from locations where name = $3),
-         $4, $5, $6, $7, $8
+         $4, $5, $6, $7, $8,
+         case when $1 in ('16oz Paper Cups', 'Cup Lids') then false else true end
        )`,
       [name, cat, loc, form, unit, qty, low, exp]
     );
@@ -997,6 +1004,16 @@ const RPC: Record<
       p.p_actor_id ?? null,
       p.p_decision,
       p.p_note ?? null,
+    ],
+  },
+  correct_item_batch_counts: {
+    sql: `select to_jsonb(x) as out from correct_item_batch_counts($1,$2,$3::jsonb,$4::jsonb,$5) as x`,
+    args: (p) => [
+      p.p_item_id,
+      p.p_expected_version,
+      JSON.stringify(p.p_patch ?? {}),
+      JSON.stringify(p.p_batch_adjustments ?? []),
+      p.p_reason,
     ],
   },
   enqueue_daily_summary: {

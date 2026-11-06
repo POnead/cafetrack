@@ -10,6 +10,7 @@
  * would close an import cycle. Routes read the value here and pass it in.
  */
 import { db } from "./supabase";
+import { SESSION_IDLE_TIMEOUT_MINUTES, type SessionRole } from "./session-policy";
 import {
   DEFAULT_DUTY_HOURS,
   DEFAULT_FACE_ENGINE,
@@ -69,6 +70,11 @@ export async function getSessionMinutes(): Promise<number> {
   return clampInt(await getSetting("session_timeout_minutes"), DEFAULT_SESSION_MINUTES, 1, 480);
 }
 
+/** Idle timeout in minutes, capped by the role-specific security limit. */
+export async function getRoleIdleMinutes(role: SessionRole): Promise<number> {
+  return Math.min(await getSessionMinutes(), SESSION_IDLE_TIMEOUT_MINUTES[role]);
+}
+
 /** Days before expiry that an item starts warning (settings.expiry_warning_days). */
 export async function getExpiryWarningDays(): Promise<number> {
   return clampInt(await getSetting("expiry_warning_days"), DEFAULT_EXPIRY_WARNING_DAYS, 1, 365);
@@ -107,31 +113,12 @@ async function readToggle(key: string): Promise<boolean> {
   return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
 }
 
-/**
- * Is duty verification switched on (settings.face_verification_enabled)?
- *
- * The master switch. While this is off nothing face-related loads, no camera is
- * asked for, and every staff member walks straight in.
- */
+/** Legacy duty checks are disabled; staff login verification uses face_login_enabled. */
 export async function getFaceVerificationEnabled(): Promise<boolean> {
-  return readToggle("face_verification_enabled");
+  return false;
 }
 
-/**
- * May staff sign in with their face instead of a password
- * (settings.face_login_enabled)?
- *
- * Deliberately a *different* switch from duty verification, and the two must not
- * be folded together. They answer unrelated questions — "prove it is you at the
- * start of this shift" and "let this person in without typing a password" — and a
- * cafe may reasonably want the first, the second, both or neither. Folding them
- * together would mean that trialling face sign-in silently also switches every
- * member of staff over to duty checks, which is a far larger change than anyone
- * asking for face login has agreed to.
- *
- * Off by default. A sign-in method is the front door of the app, and nothing
- * about this one should be switched on without an admin deciding it.
- */
+/** Whether staff password sign-in requires the enrolled-face second step. */
 export async function getFaceLoginEnabled(): Promise<boolean> {
   return readToggle("face_login_enabled");
 }

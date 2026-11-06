@@ -13,7 +13,7 @@ import {
   DataField,
 } from "@/components/ui";
 import { BarcodeView, printBarcodeLabelsAsync } from "@/components/BarcodeView";
-import { fmtDateTime } from "@/lib/format";
+import { fmtDate, fmtDateTime } from "@/lib/format";
 import { accountStatus } from "@/lib/status";
 
 /**
@@ -88,6 +88,18 @@ type StaffUser = {
   face_enabled: boolean;
   face_enrolled_at: string | null;
   last_face_verified_at: string | null;
+  /**
+   * Whether the duty window is open right now, computed by the list endpoint
+   * from the admin's duty-hours setting. Optional because the PATCH response
+   * does not carry it; the override merge fills it in.
+   */
+  duty_window_open?: boolean;
+  /** Whether access is open through an administrator-approved bypass today. */
+  duty_bypassed?: boolean;
+  /** Whether duty checks are switched on at all, from the same list read. */
+  duty_check_enabled?: boolean;
+  /** When the open window closes, or null when a check is owed. */
+  duty_next_due_at?: string | null;
   /** Angles with stored reference photos, from the staff-list endpoint. */
   face_poses?: FacePose[];
   /**
@@ -237,12 +249,17 @@ export default function UsersPage() {
   // The per-account panel holds the barcode and item-management grant. One modal
   // for both table and cards keeps the permission action available at every size.
   const [detailsUser, setDetailsUser] = useState<StaffUser | null>(null);
+  const [profileReturnUser, setProfileReturnUser] = useState<StaffUser | null>(null);
   const [resetting, setResetting] = useState<StaffUser | null>(null);
   const [newPassword, setNewPassword] = useState("");
 
   // Deactivating asks for a reason first, so it is behind a confirmation modal.
   const [disabling, setDisabling] = useState<StaffUser | null>(null);
   const [reason, setReason] = useState("");
+  const [deleting, setDeleting] = useState<StaffUser | null>(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState("");
+  const [dutyOverride, setDutyOverride] = useState<StaffUser | null>(null);
+  const [dutyOverrideReason, setDutyOverrideReason] = useState("");
 
   /*
    * Re-activating asks the admin to type their own password.
@@ -284,7 +301,7 @@ export default function UsersPage() {
 
   const [toast, setToast] = useState<{
     msg: string;
-    tone: "info" | "error" | "success";
+    tone: "info" | "error" | "success" | "warning";
   } | null>(null);
 
   const inFlight = useRef(false);
@@ -384,6 +401,31 @@ export default function UsersPage() {
     setEditing(user);
   }
 
+  function openEditFromProfile(user: StaffUser) {
+    setProfileReturnUser(user);
+    setDetailsUser(null);
+    setPhotoMenuOpen(false);
+    openEdit(user);
+  }
+
+  function restoreProfile(user = profileReturnUser) {
+    if (!user) return;
+    setDetailsUser(user);
+    setProfileReturnUser(null);
+  }
+
+  function closeEditing() {
+    if (saving) return;
+    setEditing(null);
+    restoreProfile();
+  }
+
+  function closePasswordReset() {
+    if (saving) return;
+    setResetting(null);
+    restoreProfile();
+  }
+
   /**
    * Save the edited details.
    *
@@ -430,6 +472,7 @@ export default function UsersPage() {
       setEditing(null);
       setFaceShot(null);
       setSaving(false);
+      restoreProfile(updated);
       setToast({ msg: "Account updated", tone: "success" });
       return;
     }
@@ -449,11 +492,16 @@ export default function UsersPage() {
       await load();
       setEditing(null);
       setFaceShot(null);
+      restoreProfile({
+        ...updated,
+        face_enabled: true,
+        face_needs_enrolment: false,
+      });
       // Says which of the two things happened. A single "Account updated" for a
       // save that also stored a face is what made the photo's fate unclear.
       setToast({
         msg: data.warning ?? "Reference photo saved — this person can now confirm their face",
-        tone: data.warning ? "error" : "success",
+        tone: data.warning ? "warning" : "success",
       });
     } catch (e: any) {
       // The details were saved; the photo was not. Say which.
@@ -522,7 +570,9 @@ export default function UsersPage() {
 
   async function create() {
     if (createShot && !hasCompleteFaceSet(createShot.shots)) {
-      setFormError("Straight-on, left-turn, and right-turn photos are all required to save face verification.");
+      setFormError(
+        "Straight-on, left-turn, and right-turn photos are all required to save face verification."
+      );
       return;
     }
 
@@ -540,27 +590,39 @@ export default function UsersPage() {
       if (!res.ok) throw new Error(data.error || "Could not create the account");
 
       const created = data.user as StaffUser;
-      setCreating(false);
-      setFaceShot(null);
-      await load();
-      setToast({ msg: `Account ${created.username} created`, tone: "success" });
+      let enrolledUser: StaffUser | null = null;
+      let enrollmentWarning: string | null = null;
 
       /*
-       * The photo is a second, separate call.
-       *
-       * The account is already created by the time a photo can fail, so this
-       * cannot be one transaction. It is reported honestly instead: the account
-       * exists, the photo did not, and the edit panel is opened so the photo can
-       * be retried without creating a duplicate account.
+       * The account and face are stored by separate endpoints. Keep the create
+       * dialog open until both have succeeded, and if the second call fails,
+       * open the edit dialog with its error visible so the account can be
+       * corrected without attempting to create a duplicate.
        */
-      if (createShot) {
-        const fd = new FormData();
-        appendFaceShots(fd, createShot.shots);
+      if (form.role === "staff" && createShot) {
+        try {
+          const fd = new FormData();
+          appendFaceShots(fd, createShot.shots);
 
-        const faceRes = await fetch(`/api/users/${created.id}/face`, { method: "POST", body: fd });
-        const faceData = await faceRes.json();
+          const faceRes = await fetch(`/api/users/${created.id}/face`, {
+            method: "POST",
+            body: fd,
+          });
+          const faceData = await faceRes.json();
 
-        if (!faceRes.ok) {
+          if (!faceRes.ok) {
+            throw new Error(faceData.error || "The photo could not be saved");
+          }
+
+          enrolledUser = {
+            ...created,
+            ...faceData.user,
+            face_enabled: true,
+            face_needs_enrolment: false,
+            face_poses: faceData.angles,
+          } as StaffUser;
+          enrollmentWarning = faceData.warning ?? null;
+        } catch (e: any) {
           await load();
           setEditForm({
             first_name: firstNameOf(created),
@@ -568,21 +630,34 @@ export default function UsersPage() {
             position: created.position ?? "",
             start_date: (created.start_date ?? "").slice(0, 10),
           });
-          setEditing(created);
-          setFormError(
-            `The account was created, but the photo could not be saved: ${faceData.error}. ` +
-              "Add it here."
+          setEditError(
+            `The account was created, but the face photo was not saved: ${
+              e.message || "the upload failed"
+            }. Capture the face again and save it here.`
           );
+          setCreateShot(null);
+          setCreating(false);
+          setEditing(created);
           return;
         }
-
-        await load();
-        setToast({ msg: `Account ${created.username} created with a reference photo`, tone: "success" });
       }
+
+      setCreating(false);
+      setCreateShot(null);
+      setFaceShot(null);
+      await load();
+      setToast({
+        msg:
+          enrollmentWarning ??
+          (enrolledUser
+            ? `Account ${created.username} created with a reference photo`
+            : `Account ${created.username} created`),
+        tone: enrollmentWarning ? "warning" : "success",
+      });
 
       // Staff sign in with this code — show the panel straight away so the label
       // can be printed without another trip back to the list.
-      if (created.qr_token) setDetailsUser(created);
+      if (created.qr_token) setDetailsUser(enrolledUser ?? created);
     } catch (e: any) {
       setFormError(e.message);
     } finally {
@@ -609,6 +684,9 @@ export default function UsersPage() {
       // value would have the admin copy down a code that no longer works.
       const updated = data.user as StaffUser;
       setDetailsUser((open) =>
+        open && open.id === updated.id ? { ...open, ...updated } : open
+      );
+      setProfileReturnUser((open) =>
         open && open.id === updated.id ? { ...open, ...updated } : open
       );
 
@@ -697,6 +775,85 @@ async function toggleItemPermission(user: StaffUser) {
         tone: "success",
       });
     }
+
+  }
+
+  async function confirmDelete() {
+    if (!deleting) return;
+
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/users/${deleting.id}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm_username: deleteConfirmation.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not delete the account");
+
+      const deletedName = deleting.full_name;
+      setDeleting(null);
+      setDeleteConfirmation("");
+      setDetailsUser(null);
+      setPhotoMenuOpen(false);
+      await load();
+      setToast({ msg: `${deletedName}'s account was deleted`, tone: "success" });
+    } catch (e: unknown) {
+      setToast({
+        msg: e instanceof Error ? e.message : "Could not delete the account",
+        tone: "error",
+      });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function confirmDutyOverride() {
+    if (!dutyOverride) return;
+
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/users/${dutyOverride.id}/face`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: dutyOverrideReason.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not grant the duty override");
+
+      await load();
+      const updated = data.user as StaffUser;
+      setDetailsUser((open) =>
+        open && open.id === updated.id
+          ? {
+              ...open,
+              ...updated,
+              /*
+               * The PATCH stamps a fresh window, so the computed fields from
+               * the list read would be stale for one render. Say so explicitly:
+               * otherwise the card shows the new "last passed" time next to
+               * "a check is owed", which is exactly the kind of contradiction
+               * that made the old panel look like nothing had happened.
+               */
+              duty_window_open: true,
+              duty_next_due_at: data.next_due ?? open.duty_next_due_at ?? null,
+              duty_bypassed: false,
+            }
+          : open
+      );
+      setDutyOverride(null);
+      setDutyOverrideReason("");
+      setToast({
+        msg: data.next_due
+          ? `Duty face check waived for ${updated.full_name} — no check needed until ${fmtDateTime(data.next_due)}`
+          : `Duty face check waived for ${updated.full_name} for this duty`,
+        tone: "success",
+      });
+    } catch (e: any) {
+      setToast({ msg: e.message || "Could not grant the duty override", tone: "error" });
+    } finally {
+      setSaving(false);
+    }
   }
 
   /**
@@ -727,15 +884,33 @@ async function toggleItemPermission(user: StaffUser) {
     if (updated) {
       setResetting(null);
       setNewPassword("");
+      restoreProfile(updated);
       setToast({ msg: `Password reset for ${updated.username}`, tone: "success" });
     }
   }
 
   async function printToken(user: StaffUser) {
     if (!user.qr_token) return;
-    await printBarcodeLabelsAsync([
-      { value: user.qr_token, title: user.full_name, subtitle: user.username },
-    ]);
+    try {
+      await printBarcodeLabelsAsync([
+        { value: user.qr_token, title: user.full_name, subtitle: user.username },
+      ]);
+    } catch (error: any) {
+      setToast({
+        msg: error.message || "Could not open the barcode print preview.",
+        tone: "error",
+      });
+    }
+  }
+
+  async function copyToClipboard(value: string, label: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      setToast({ msg: `${label} copied`, tone: "success" });
+    } catch (error) {
+      console.error(`Could not copy ${label.toLowerCase()}`, error);
+      setToast({ msg: `Could not copy ${label.toLowerCase()}`, tone: "error" });
+    }
   }
 
   /** Open the upload form, seeded from whatever is already on the account. */
@@ -745,6 +920,32 @@ async function toggleItemPermission(user: StaffUser) {
     setIdShot(null);
     setVerifyingError(null);
     setVerifying(user);
+  }
+
+  function startIdVerification(user: StaffUser) {
+    setProfileReturnUser(user);
+    setDetailsUser(null);
+    setPhotoMenuOpen(false);
+    openVerify(user);
+  }
+
+  function closeIdVerification() {
+    if (saving) return;
+    setVerifying(null);
+    setIdShot(null);
+    restoreProfile();
+  }
+
+  function closeIdReview() {
+    setReviewing(null);
+    restoreProfile();
+  }
+
+  function startIdReview(user: StaffUser) {
+    setProfileReturnUser(user);
+    setDetailsUser(null);
+    setPhotoMenuOpen(false);
+    setReviewing(user);
   }
 
   /**
@@ -1253,6 +1454,9 @@ async function toggleItemPermission(user: StaffUser) {
             <section className="space-y-3 rounded-2xl border border-cream-200 bg-white p-4 sm:p-5">
               <div>
                 <h4 className="text-sm font-semibold text-cocoa-800">Face verification</h4>
+                <p className="mt-1 text-xs leading-relaxed text-cocoa-500">
+                  Complete the live front, left, and right views to save face verification.
+                </p>
               </div>
               <FaceCapture disabled={saving} onCapture={(result) => setCreateShot(result)} />
             </section>
@@ -1268,9 +1472,7 @@ async function toggleItemPermission(user: StaffUser) {
       {/* ---------- reset password ---------- */}
       <Modal
         open={!!resetting}
-        onClose={() => {
-          if (!saving) setResetting(null);
-        }}
+        onClose={closePasswordReset}
         title={resetting ? `Reset password — ${resetting.full_name}` : ""}
         width="max-w-sm"
       >
@@ -1287,7 +1489,7 @@ async function toggleItemPermission(user: StaffUser) {
           <div className="flex justify-end gap-2">
             <button
               className="btn-ghost"
-              onClick={() => setResetting(null)}
+              onClick={closePasswordReset}
               disabled={saving}
             >
               Cancel
@@ -1308,15 +1510,18 @@ async function toggleItemPermission(user: StaffUser) {
         open={!!detailsUser}
         onClose={() => {
           setDetailsUser(null);
+          setProfileReturnUser(null);
           setPhotoMenuOpen(false);
         }}
-        title={detailsUser ? `${detailsUser.full_name}` : ""}
-        width="max-w-md"
+        title="Staff profile"
+        width="max-w-2xl"
+        scrollable
       >
         {detailsUser && (
           <div className="space-y-4">
             {/* ---------- identity: photo on the left, details on the right ---------- */}
-            <div className="flex gap-4">
+            <section className="rounded-2xl border border-cream-200 bg-cream-50/70 p-4">
+              <div className="flex flex-col gap-4 sm:flex-row">
               {/*
                 `self-start` is load-bearing, not tidying.
 
@@ -1335,7 +1540,7 @@ async function toggleItemPermission(user: StaffUser) {
                   onClick={() => setPhotoMenuOpen((o) => !o)}
                   aria-label="Photo options"
                   aria-expanded={photoMenuOpen}
-                  className="group relative block h-24 w-24 overflow-hidden rounded-2xl border-2 border-cream-200 bg-cream-100 transition hover:border-ochre-400 focus:outline-none focus:ring-2 focus:ring-ochre-400"
+                  className="group relative block h-20 w-20 overflow-hidden rounded-2xl border-2 border-cream-200 bg-cream-100 transition hover:border-ochre-400 focus:outline-none focus:ring-2 focus:ring-ochre-400 sm:h-24 sm:w-24"
                 >
                   {detailsUser.face_enabled ? (
                     // eslint-disable-next-line @next/next/no-img-element
@@ -1375,9 +1580,7 @@ async function toggleItemPermission(user: StaffUser) {
                         <button
                           className="block w-full px-3 py-2 text-left text-xs text-cocoa-700 hover:bg-cream-100"
                           onClick={() => {
-                            setPhotoMenuOpen(false);
-                            setDetailsUser(null);
-                            openEdit(detailsUser);
+                            openEditFromProfile(detailsUser);
                           }}
                         >
                           Replace photo
@@ -1398,9 +1601,7 @@ async function toggleItemPermission(user: StaffUser) {
                         <button
                           className="block w-full px-3 py-2 text-left text-xs text-cocoa-700 hover:bg-cream-100"
                           onClick={() => {
-                            setPhotoMenuOpen(false);
-                            setDetailsUser(null);
-                            openEdit(detailsUser);
+                            openEditFromProfile(detailsUser);
                           }}
                         >
                           Add photo
@@ -1415,80 +1616,74 @@ async function toggleItemPermission(user: StaffUser) {
                 )}
               </div>
 
-              <div className="min-w-0 flex-1 space-y-2">
-                <div className="flex items-start justify-between gap-2">
-                  <dl className="min-w-0 space-y-1.5">
-                    <div className="flex gap-2">
-                      <dt className="w-[4.5rem] shrink-0 font-mono text-[11px] uppercase text-cocoa-400">
-                        Name
-                      </dt>
-                      <dd className="truncate text-sm font-semibold text-cocoa-800">
-                        {firstNameOf(detailsUser)}
-                      </dd>
-                    </div>
-                    <div className="flex gap-2">
-                      <dt className="w-[4.5rem] shrink-0 font-mono text-[11px] uppercase text-cocoa-400">
-                        Surname
-                      </dt>
-                      <dd className="truncate text-sm font-semibold text-cocoa-800">
-                        {lastNameOf(detailsUser) || (
-                          <span className="font-normal text-cocoa-400">—</span>
-                        )}
-                      </dd>
-                    </div>
-                    <div className="flex gap-2">
-                      <dt className="w-[4.5rem] shrink-0 font-mono text-[11px] uppercase text-cocoa-400">
-                        Position
-                      </dt>
-                      <dd className="truncate text-sm text-cocoa-700">
-                        {detailsUser.position || (
-                          <span className="text-cocoa-400">Not recorded</span>
-                        )}
-                      </dd>
-                    </div>
-                    <div className="flex gap-2">
-                      <dt className="w-[4.5rem] shrink-0 font-mono text-[11px] uppercase text-cocoa-400">
-                        Added
-                      </dt>
-                      <dd className="text-sm text-cocoa-700">
-                        {fmtDateTime(detailsUser.created_at)}
-                      </dd>
-                    </div>
-                    {detailsUser.start_date && (
-                      <div className="flex gap-2">
-                        <dt className="w-[4.5rem] shrink-0 font-mono text-[11px] uppercase text-cocoa-400">
-                          Started
-                        </dt>
-                        <dd className="text-sm text-cocoa-700">
-                          {fmtDateTime(detailsUser.start_date)}
-                        </dd>
-                      </div>
-                    )}
-                  </dl>
-
-                  <Badge
-                    tone={accountStatus(detailsUser.is_active).tone}
-                    variant="tag"
-                    dot
-                  >
+              <div className="min-w-0 flex-1 space-y-3">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <h2 className="truncate text-lg font-bold text-cocoa-900">
+                      {detailsUser.full_name}
+                    </h2>
+                    <p className="mt-0.5 text-sm text-cocoa-500">
+                      {detailsUser.position || "Position not recorded"}
+                    </p>
+                  </div>
+                  <Badge tone={accountStatus(detailsUser.is_active).tone} variant="tag" dot>
                     {accountStatus(detailsUser.is_active).label}
                   </Badge>
                 </div>
 
-                <div className="flex flex-wrap gap-1.5 pt-1">
+                <dl className="grid grid-cols-1 gap-x-4 gap-y-2 sm:grid-cols-2">
+                  <div className="min-w-0">
+                    <dt className="text-[10px] font-bold uppercase tracking-wider text-cocoa-400">
+                      Username
+                    </dt>
+                    <dd className="flex items-center gap-2">
+                      <span className="truncate text-sm font-medium text-cocoa-800">
+                        {detailsUser.username}
+                      </span>
+                      <button
+                        type="button"
+                        className="shrink-0 text-xs font-semibold text-ochre-700 hover:text-ochre-800"
+                        onClick={() => void copyToClipboard(detailsUser.username, "Username")}
+                      >
+                        Copy
+                      </button>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-[10px] font-bold uppercase tracking-wider text-cocoa-400">
+                      Added
+                    </dt>
+                    <dd className="text-sm text-cocoa-700">
+                      {fmtDateTime(detailsUser.created_at)}
+                    </dd>
+                  </div>
+                  {detailsUser.start_date && (
+                    <div>
+                      <dt className="text-[10px] font-bold uppercase tracking-wider text-cocoa-400">
+                        Started
+                      </dt>
+                      <dd className="text-sm text-cocoa-700">
+                        {fmtDate(detailsUser.start_date)}
+                      </dd>
+                    </div>
+                  )}
+                </dl>
+              </div>
+              </div>
+
+              <div className="mt-4 flex flex-wrap gap-2 border-t border-cream-200 pt-3">
                   <button
-                    className="btn-ghost min-h-[36px] !px-2.5 !py-1 text-xs"
-                    onClick={() => {
-                      setDetailsUser(null);
-                      openEdit(detailsUser);
-                    }}
+                    className="btn-ghost min-h-[40px] flex-1 !px-3 !py-2 text-sm sm:flex-none"
+                    onClick={() => openEditFromProfile(detailsUser)}
                   >
                     Edit
                   </button>
                   <button
-                    className="btn-ghost min-h-[36px] !px-2.5 !py-1 text-xs"
+                    className="btn-ghost min-h-[40px] flex-1 !px-3 !py-2 text-sm sm:flex-none"
                     onClick={() => {
+                      setProfileReturnUser(detailsUser);
                       setDetailsUser(null);
+                      setPhotoMenuOpen(false);
                       setNewPassword("");
                       setResetting(detailsUser);
                     }}
@@ -1498,20 +1693,16 @@ async function toggleItemPermission(user: StaffUser) {
                   <button
                     className={
                       detailsUser.is_active
-                        ? "btn-danger min-h-[36px] !px-2.5 !py-1 text-xs"
-                        : "btn-primary min-h-[36px] !px-2.5 !py-1 text-xs"
+                        ? "btn-danger min-h-[40px] flex-1 !px-3 !py-2 text-sm sm:flex-none"
+                        : "btn-primary min-h-[40px] flex-1 !px-3 !py-2 text-sm sm:flex-none"
                     }
                     disabled={busyId === detailsUser.id}
-                    onClick={() => {
-                      setDetailsUser(null);
-                      toggleActive(detailsUser);
-                    }}
+                    onClick={() => toggleActive(detailsUser)}
                   >
                     {detailsUser.is_active ? "Deactivate" : "Reactivate"}
                   </button>
-                </div>
               </div>
-            </div>
+            </section>
 
             {/*
               Why the account was switched off.
@@ -1588,19 +1779,69 @@ async function toggleItemPermission(user: StaffUser) {
               </div>
             )}
 
-            {/* Duty check state, only once someone has actually been checked. */}
-            {detailsUser.face_enabled && (
-              <div className="rounded-xl bg-cream-50 px-3.5 py-2.5 text-xs text-cocoa-600">
-                <span className="font-semibold text-cocoa-800">Duty face check</span>
-                <p className="mt-0.5">
-                  {detailsUser.last_face_verified_at
-                    ? `Last passed ${fmtDateTime(detailsUser.last_face_verified_at)}`
-                    : "Has not passed a duty check yet"}
-                  {detailsUser.face_enrolled_at
-                    ? ` · enrolled ${fmtDateTime(detailsUser.face_enrolled_at)}`
-                    : ""}
+            <div className="grid gap-3 md:grid-cols-2">
+            {detailsUser.role === "staff" && (
+              <section className="rounded-2xl border border-cream-200 bg-white p-4">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <h3 className="text-sm font-bold text-cocoa-800">Duty access</h3>
+                    <p className="mt-1 text-xs text-cocoa-500">
+                      {detailsUser.last_face_verified_at
+                        ? `Last passed ${fmtDateTime(detailsUser.last_face_verified_at)}`
+                        : "No duty face check recorded yet"}
+                    </p>
+                  </div>
+                  <Badge
+                    tone={
+                      detailsUser.duty_check_enabled === false
+                        ? "blue"
+                        : detailsUser.duty_window_open
+                          ? "green"
+                          : "amber"
+                    }
+                    variant="tag"
+                  >
+                    {detailsUser.duty_check_enabled === false
+                      ? "Checks off"
+                      : detailsUser.duty_window_open
+                        ? detailsUser.duty_bypassed
+                          ? "Admin bypass"
+                          : "Cleared"
+                        : "Check owed"}
+                  </Badge>
+                </div>
+                <p className="mt-3 text-xs leading-relaxed text-cocoa-600">
+                  {detailsUser.duty_check_enabled === false
+                    ? "Duty checks are switched off in Settings."
+                    : detailsUser.duty_window_open
+                      ? `${detailsUser.duty_bypassed ? "Admin-approved face-check bypass" : "Cleared for this duty"}${
+                          detailsUser.duty_next_due_at
+                            ? ` · ${detailsUser.duty_bypassed ? "bypass ends" : "next check due"} ${fmtDateTime(detailsUser.duty_next_due_at)}`
+                            : ""
+                        }.`
+                      : "A face check is owed before this person starts work."}
                 </p>
-              </div>
+                {detailsUser.face_enrolled_at && (
+                  <p className="mt-1 text-[11px] text-cocoa-400">
+                    Face enrolled {fmtDateTime(detailsUser.face_enrolled_at)}
+                  </p>
+                )}
+                {detailsUser.role === "staff" &&
+                  detailsUser.is_active &&
+                  detailsUser.duty_check_enabled !== false &&
+                  !detailsUser.duty_window_open && (
+                    <button
+                      className="btn-ghost mt-3 w-full !py-2 text-sm"
+                      disabled={busyId === detailsUser.id}
+                      onClick={() => {
+                        setDutyOverrideReason("");
+                        setDutyOverride(detailsUser);
+                      }}
+                    >
+                      Let them in for this duty
+                    </button>
+                  )}
+              </section>
             )}
 
             {/*
@@ -1615,126 +1856,141 @@ async function toggleItemPermission(user: StaffUser) {
               thing that makes an admin click the wrong one.
             */}
             {detailsUser.role === "staff" && (
-              <DataField label="ID verification">
+              <section className="rounded-2xl border border-cream-200 bg-white p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm font-bold text-cocoa-800">ID verification</h3>
+                  {(() => {
+                    const s =
+                      VERIFICATION_STATUS[detailsUser.verification_status ?? "unverified"];
+                    return s ? (
+                      <Badge tone={s.tone} variant="tag" dot>
+                        {s.label}
+                      </Badge>
+                    ) : null;
+                  })()}
+                </div>
                 <div className="space-y-1.5">
                   <div className="flex flex-wrap items-center gap-2">
-                    {(() => {
-                      const s = VERIFICATION_STATUS[
-                        detailsUser.verification_status ?? "unverified"
-                      ];
-                      return s ? (
-                        <Badge tone={s.tone} variant="tag" dot>
-                          {s.label}
-                        </Badge>
-                      ) : null;
-                    })()}
                     {detailsUser.verified_at && (
-                      <span className="text-[11px] text-cocoa-400">
-                        {fmtDateTime(detailsUser.verified_at)}
+                      <span className="text-xs text-cocoa-500">
+                        Reviewed {fmtDateTime(detailsUser.verified_at)}
                       </span>
                     )}
                   </div>
 
-                  <div className="flex flex-wrap gap-2 pt-0.5">
+                  <div className="flex flex-wrap gap-2 pt-1">
                     <button
-                      className="btn-ghost min-h-[40px] !px-3 !py-1.5 text-xs"
+                      className="btn-ghost min-h-[40px] flex-1 !px-3 !py-2 text-sm"
                       disabled={busyId === detailsUser.id}
-                      onClick={() => {
-                        setDetailsUser(null);
-                        openVerify(detailsUser);
-                      }}
+                      onClick={() => startIdVerification(detailsUser)}
                     >
                       {detailsUser.id_doc_type ? "Replace ID" : "Verify ID"}
                     </button>
                     <button
-                      className="btn-ghost min-h-[40px] !px-3 !py-1.5 text-xs"
+                      className="btn-ghost min-h-[40px] flex-1 !px-3 !py-2 text-sm"
                       disabled={busyId === detailsUser.id}
-                      onClick={() => {
-                        setDetailsUser(null);
-                        setReviewing(detailsUser);
-                      }}
+                      onClick={() => startIdReview(detailsUser)}
                     >
                       View &amp; decide
                     </button>
                   </div>
 
-                  <p className="text-[11px] text-cocoa-400">
-                    Photograph the person&apos;s ID and a photo of them. The checks compare the two
-                    faces and look for signs of a doctored card — whether the card is genuine is
-                    yours to decide.
-                  </p>
+                  <details className="pt-1 text-[11px] text-cocoa-400">
+                    <summary className="cursor-pointer font-medium text-cocoa-500">
+                      About this check
+                    </summary>
+                    <p className="mt-1 leading-relaxed">
+                      Compare the person&apos;s ID with their photo. Automated checks
+                      compare faces and look for signs of alteration; an admin makes
+                      the final decision about authenticity.
+                    </p>
+                  </details>
                 </div>
-              </DataField>
+              </section>
             )}
+            </div>
 
             {/* ---------- barcode ---------- */}
-            {detailsUser.qr_token ? (
-              <div className="flex flex-col items-center gap-3 rounded-xl border border-cream-200 bg-cream-50 p-4">
-                <BarcodeView
-                  value={detailsUser.qr_token}
-                  width={240}
-                  label={`Barcode for ${detailsUser.full_name}`}
-                />
-                <div className="flex w-full gap-2">
+            <div className="grid gap-3 md:grid-cols-2">
+            {detailsUser.qr_token && (
+              <section className="rounded-2xl border border-cream-200 bg-white p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-sm font-bold text-cocoa-800">Staff badge</h3>
+                    <p className="mt-0.5 font-mono text-xs text-cocoa-500">
+                      {detailsUser.qr_token}
+                    </p>
+                  </div>
                   <button
-                    className="btn-ghost flex-1 text-xs"
+                    type="button"
+                    className="text-xs font-semibold text-ochre-700 hover:text-ochre-800"
+                    onClick={() => void copyToClipboard(detailsUser.qr_token!, "Badge code")}
+                  >
+                    Copy code
+                  </button>
+                </div>
+                <div className="mt-3 flex justify-center overflow-hidden rounded-xl bg-cream-50 p-2">
+                  <BarcodeView
+                    value={detailsUser.qr_token}
+                    width={240}
+                    label={`Barcode for ${detailsUser.full_name}`}
+                  />
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    className="btn-ghost min-h-[40px] flex-1 !py-2 text-sm"
                     onClick={() => printToken(detailsUser)}
                   >
-                    Print this label
+                    Print label
                   </button>
                   <button
-                    className="btn-ghost flex-1 text-xs"
+                    className="btn-ghost min-h-[40px] flex-1 !py-2 text-sm"
                     disabled={busyId === detailsUser.id}
                     onClick={() => setRotating(detailsUser)}
                   >
                     New barcode
                   </button>
                 </div>
-              </div>
-            ) : (
-              <p className="text-sm text-cocoa-500">
-                Admins sign in with a username and password, so this account has
-                no barcode.
-              </p>
+              </section>
             )}
 
             {/* An admin can always manage items, so the grant is staff-only. */}
             {detailsUser.role === "staff" && (
-              <DataField label="Item management">
-                <div className="space-y-1.5">
+              <section className="rounded-2xl border border-cream-200 bg-white p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-sm font-bold text-cocoa-800">Item management</h3>
+                    <p className="mt-0.5 text-xs text-cocoa-500">
+                      {detailsUser.can_manage_items
+                        ? "Changes take effect immediately."
+                        : "Changes are submitted for approval."}
+                    </p>
+                  </div>
                   <button
-                    className="btn-ghost min-h-[40px] !px-3 !py-1.5 text-xs"
+                    className="btn-ghost min-h-[40px] !px-4 !py-2 text-sm"
                     disabled={busyId === detailsUser.id}
                     onClick={() => toggleItemPermission(detailsUser)}
                   >
                     {detailsUser.can_manage_items ? "Granted" : "Not granted"}
                   </button>
-                  <p className="text-[11px] text-cocoa-400">
-                    {detailsUser.can_manage_items
-                      ? "Their item changes take effect immediately, without waiting for approval."
-                      : "New ingredients and edits are submitted and wait on the Approvals page."}
-                  </p>
                 </div>
-              </DataField>
+              </section>
             )}
+            </div>
 
-            {/* No "Added" field down here — the identity block at the top already carries it,
-                and the two sat far enough apart on a phone to read as two different
-                dates belonging to two different things. */}
-
-            {/* The manager override — the only action left down here. Edit,
-                Reset password and Deactivate moved up into the identity block,
-                so the panel reads left to right: who they are, then what you
-                can do about it. */}
-            {detailsUser.role === "staff" && detailsUser.is_active && (
+            {detailsUser.role === "staff" && !detailsUser.is_active && (
               <button
-                className="btn-ghost w-full"
+                className="btn-danger w-full"
                 disabled={busyId === detailsUser.id}
-                onClick={() => toggleActive(detailsUser)}
+                onClick={() => {
+                  setDeleteConfirmation("");
+                  setDeleting(detailsUser);
+                }}
               >
-                Let them in for this duty without a face check
+                Delete inactive account
               </button>
             )}
+
           </div>
         )}
       </Modal>
@@ -1812,7 +2068,7 @@ async function toggleItemPermission(user: StaffUser) {
 
           <div>
             <label className="label" htmlFor="deactivation-reason">
-              Reason (optional) — shown to them when they try to sign in
+              Reason (required) — shown to them when they try to sign in
             </label>
             <textarea
               id="deactivation-reason"
@@ -1855,6 +2111,122 @@ async function toggleItemPermission(user: StaffUser) {
             </button>
           </div>
         </div>
+      </Modal>
+
+      {/* ---------- delete inactive staff account ---------- */}
+      <Modal
+        open={!!deleting}
+        onClose={() => {
+          if (!saving) {
+            setDeleting(null);
+            setDeleteConfirmation("");
+          }
+        }}
+        title={deleting ? `Delete — ${deleting.full_name}` : ""}
+        width="max-w-md"
+      >
+        {deleting && (
+          <div className="space-y-4">
+            <p className="text-sm text-cocoa-600">
+              This permanently removes{" "}
+              <span className="font-semibold text-cocoa-800">{deleting.full_name}</span>
+              &apos;s inactive account and face samples. Transaction history and audit
+              entries are retained.
+            </p>
+            <div>
+              <label className="label" htmlFor="delete-account-confirmation">
+                Type <span className="font-semibold">{deleting.username}</span> to confirm
+              </label>
+              <input
+                id="delete-account-confirmation"
+                className="input"
+                autoComplete="off"
+                autoFocus
+                value={deleteConfirmation}
+                onChange={(e) => setDeleteConfirmation(e.target.value)}
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                className="btn-ghost"
+                onClick={() => {
+                  setDeleting(null);
+                  setDeleteConfirmation("");
+                }}
+                disabled={saving}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn-danger"
+                onClick={confirmDelete}
+                disabled={saving || deleteConfirmation.trim() !== deleting.username}
+              >
+                {saving ? "Deleting..." : "Delete account"}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ---------- one-duty face-check override ---------- */}
+      <Modal
+        open={!!dutyOverride}
+        onClose={() => {
+          if (!saving) {
+            setDutyOverride(null);
+            setDutyOverrideReason("");
+          }
+        }}
+        title={dutyOverride ? `Face-check override — ${dutyOverride.full_name}` : ""}
+        width="max-w-md"
+      >
+        {dutyOverride && (
+          <div className="space-y-4">
+            <p className="text-sm text-cocoa-600">
+              This lets {dutyOverride.full_name} pass the face check for this duty
+              only. Their account stays active, and they will need a face check
+              again for a later duty.
+            </p>
+            <div>
+              <label className="label" htmlFor="duty-override-reason">
+                Reason (required — recorded in the audit log)
+              </label>
+              <textarea
+                id="duty-override-reason"
+                className="input min-h-[84px] resize-y"
+                rows={3}
+                maxLength={300}
+                autoFocus
+                value={dutyOverrideReason}
+                placeholder="e.g. Camera is temporarily unavailable"
+                onChange={(e) => setDutyOverrideReason(e.target.value)}
+              />
+              <div className="mt-1 text-[11px] text-cocoa-400">
+                Enter at least 3 characters. This reason is recorded for review.
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                className="btn-ghost"
+                onClick={() => {
+                  setDutyOverride(null);
+                  setDutyOverrideReason("");
+                }}
+                disabled={saving}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn-primary"
+                onClick={confirmDutyOverride}
+                disabled={saving || dutyOverrideReason.trim().length < 3}
+              >
+                {saving ? "Allowing..." : "Allow for this duty"}
+              </button>
+            </div>
+          </div>
+        )}
       </Modal>
 
       {/* ---------- reactivate ---------- */}
@@ -1948,9 +2320,7 @@ async function toggleItemPermission(user: StaffUser) {
       {/* ---------- edit ---------- */}
       <Modal
         open={!!editing}
-        onClose={() => {
-          if (!saving) setEditing(null);
-        }}
+        onClose={closeEditing}
         title={editing ? `Edit — ${editing.username}` : ""}
         width="max-w-3xl"
         scrollable
@@ -1958,7 +2328,7 @@ async function toggleItemPermission(user: StaffUser) {
           <div className="flex justify-end gap-2">
             <button
               className="btn-ghost"
-              onClick={() => setEditing(null)}
+              onClick={closeEditing}
               disabled={saving}
             >
               Cancel
@@ -2067,12 +2437,7 @@ async function toggleItemPermission(user: StaffUser) {
       {/* ---------- attach an ID ---------- */}
       <Modal
         open={!!verifying}
-        onClose={() => {
-          if (!saving) {
-            setVerifying(null);
-            setIdShot(null);
-          }
-        }}
+        onClose={closeIdVerification}
         title={verifying ? `Verify ID — ${verifying.full_name}` : ""}
         width="max-w-lg"
       >
@@ -2119,7 +2484,11 @@ async function toggleItemPermission(user: StaffUser) {
               </div>
             </div>
 
-            <IdUpload disabled={saving} onReady={setIdShot} />
+            <IdUpload
+              accountId={verifying.id}
+              disabled={saving}
+              onReady={setIdShot}
+            />
 
             {verifyingError && (
               <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
@@ -2130,10 +2499,7 @@ async function toggleItemPermission(user: StaffUser) {
             <div className="flex justify-end gap-2 pt-1">
               <button
                 className="btn-ghost"
-                onClick={() => {
-                  setVerifying(null);
-                  setIdShot(null);
-                }}
+                onClick={closeIdVerification}
                 disabled={saving}
               >
                 Cancel
@@ -2153,17 +2519,17 @@ async function toggleItemPermission(user: StaffUser) {
       {/* ---------- review and decide ---------- */}
       <Modal
         open={!!reviewing}
-        onClose={() => setReviewing(null)}
+        onClose={closeIdReview}
         title={reviewing ? `ID check — ${reviewing.full_name}` : ""}
         width="max-w-2xl"
       >
         {reviewing && (
           <IdReview
             userId={reviewing.id}
-            onClose={() => setReviewing(null)}
+            onClose={closeIdReview}
             onDone={async (message) => {
               await load();
-              setReviewing(null);
+              closeIdReview();
               setToast({ msg: message, tone: "success" });
             }}
           />

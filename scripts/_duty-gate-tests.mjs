@@ -1,33 +1,21 @@
 /**
- * The duty check is a gate on the server, not a screen.
+ * Legacy duty checks stay disabled; staff login verification uses its own switch.
  *
  *   npm run dev:test       (terminal 1)
  *   npm run test:duty-gate (terminal 2)
  *
  * ## What this suite exists to prove
  *
- * The feature's whole claim is "you cannot move stock until you have shown your
- * face". A redirect in the browser cannot make that true: `/api/transactions` is
- * one fetch away. So the assertion that matters is not that the verify screen
- * appears â€” it is that the *routes* refuse a session that still owes a check,
- * and then stop refusing once the check has happened.
+ * The legacy duty setting must not force staff into `/verify` or block stock
+ * routes. The separate login setting controls whether password entry creates a
+ * face-check ticket or a normal session.
  *
  * The three steps below are that sentence in order:
  *
- *   1. A live staff session, inside the app, with a check owed, is refused a
- *      `403` by every route that moves stock or changes the catalogue â€” and is
- *      still allowed to read.
- *   2. The refusal is the duty message, not a permission error, so the shell can
- *      send the person to the camera rather than to their manager.
- *   3. An admin override opens the window, and the *same session* gets through.
- *
- * ## Why re-enrolling is what makes a check owed
- *
- * There is no "expire the window now" endpoint, and adding one for a test would
- * be a hole. Enrolment already does the job on purpose: a fresh photograph is
- * not a pass, so it clears `last_face_verified_at` (see the comment in the
- * enrolment route). That is exactly the mid-shift state this suite needs â€” a
- * session that was fine a moment ago and is not any more.
+ *   1. With the login check off, password sign-in succeeds even if the old duty
+ *      setting is on, and stock routes do not return a duty-check refusal.
+ *   2. With the login check on, password sign-in returns a ticket and no session,
+ *      even if the old duty setting is off.
  *
  * ## The fixtures
  *
@@ -136,28 +124,23 @@ async function enrollFace(staff, front) {
   });
 }
 
-/** Step one and step two, with the face the account has on file. */
-async function staffSession(staff, embedding) {
-  const step1 = await fetch(`${BASE}/api/auth/staff`, {
+/** Return the password-step result without assuming a session was created. */
+async function passwordSignIn(staff) {
+  const response = await fetch(`${BASE}/api/auth/staff`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username: staff.username, password: staff.password }),
   });
-  const ticket = (await json(step1))?.ticket;
-  if (!ticket) throw new Error(`step one failed for ${staff.username}: ${step1.status}`);
+  const body = await json(response);
+  const cookie = cookieOf(response);
+  return { response, body, cookie };
+}
 
-  const step2 = await fetch(`${BASE}/api/auth/staff/confirm`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      ticket,
-      face_embedding: embedding,
-      face_evidence: "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////",
-    }),
-  });
-  const cookie = cookieOf(step2);
+/** Password sign-in creates a session when no face check is currently due. */
+async function staffSession(staff) {
+  const { response, body, cookie } = await passwordSignIn(staff);
   if (!cookie.includes("cafetrack_session")) {
-    throw new Error(`step two failed: ${step2.status} ${await step2.text()}`);
+    throw new Error(`password sign-in failed: ${response.status} ${JSON.stringify(body)}`);
   }
   return cookie;
 }
@@ -195,47 +178,68 @@ let staff = null;
 try {
   /* ---------------------------------------------------------------- */
 
-  section("a staff member with a check owed");
+  section("login face check is independent from legacy duty verification");
 
-  ok("face verification is switched on", (await patchSetting("face_verification_enabled", "1")).status === 200);
+  ok("duty verification is switched on", (await patchSetting("face_verification_enabled", "1")).status === 200);
+  ok("the login face check is off", (await patchSetting("face_login_enabled", "0")).status === 200);
 
   staff = await makeStaff();
   const enrolled = await enrollFace(staff, storedFace);
   ok("the fixture enrolled a face", enrolled.status === 200, `got ${enrolled.status}`);
 
-  // Signing in passes the check and opens a window, as it should.
-  const cookie = await staffSession(staff, storedFace);
-  ok("the staff member can sign in", Boolean(cookie));
+  const passwordOnly = await passwordSignIn(staff);
+  ok("turning the login face check off allows password sign-in", passwordOnly.cookie.includes("cafetrack_session"));
+  ok("the duty setting does not trigger the login face scan", passwordOnly.body?.step2_required !== true);
+
+  ok("duty verification can be off independently", (await patchSetting("face_verification_enabled", "0")).status === 200);
+  ok("the login face check can be turned on", (await patchSetting("face_login_enabled", "1")).status === 200);
+  const faceLogin = await passwordSignIn(staff);
+  ok("the enabled login check requires the automatic face scan", faceLogin.body?.step2_required === true);
+  ok("password alone does not create a session when login face check is on", !faceLogin.cookie.includes("cafetrack_session"));
+  const preflight = await post(
+    "/api/auth/staff/confirm",
+    { ticket: faceLogin.body?.ticket, preflight: true },
+    ""
+  );
+  const preflightBody = await json(preflight);
+  ok("the login face scan is required even with duty verification off", preflight.status === 200 && preflightBody?.face_required === true);
+  ok("preflight cannot issue a staff session before the face scan", !cookieOf(preflight).includes("cafetrack_session"));
+
+  ok("turning off the login face check bypasses the scan", (await patchSetting("face_login_enabled", "0")).status === 200);
+  ok("duty verification can still be enabled separately", (await patchSetting("face_verification_enabled", "1")).status === 200);
+  const cookie = await staffSession(staff);
+  ok("password sign-in is controlled by the login face setting, not duty check", Boolean(cookie));
+
+  const status = await json(
+    await fetch(`${BASE}/api/auth/me`, { headers: { Cookie: cookie } })
+  );
+  ok("the legacy duty setting does not report a required check", status?.face?.required === false);
 
   const readOk = await fetch(`${BASE}/api/transactions?limit=1`, { headers: { Cookie: cookie } });
   ok("reading movements is allowed", readOk.status === 200, `got ${readOk.status}`);
 
+  const initialWrite = await post("/api/transactions", { type: "nope" }, cookie);
+  ok("stock routes are not blocked by the legacy duty setting", initialWrite.status === 400, `got ${initialWrite.status}`);
+
   /* ---------------------------------------------------------------- */
 
-  section("a fresh photograph is not a pass");
+  section("re-enrolling does not turn the legacy duty gate back on");
 
   /*
-   * The state the feature is about: the person is signed in, the account has a
-   * face, and the duty window is not open â€” because the photo they are checked
-   * against is newer than the last time they looked at the camera.
+   * A new reference photo is not permission to re-enable the removed post-login
+   * duty gate. Login face checks remain controlled by their dedicated setting.
    */
   const reEnrolled = await enrollFace(staff, storedFace);
   ok("re-enrolling is accepted", reEnrolled.status === 200, `got ${reEnrolled.status}`);
 
   const owed = await post("/api/transactions", { type: "nope" }, cookie);
-  const owedBody = await json(owed);
-  ok("moving stock is refused", owed.status === 403, `got ${owed.status}`);
-  ok(
-    "and the refusal is the duty message, not a permission error",
-    /Confirm your face for this duty/.test(owedBody?.error ?? ""),
-    owedBody?.error
-  );
+  ok("moving stock reaches route validation, not a duty-face refusal", owed.status === 400, `got ${owed.status}`);
 
   const owedItem = await post("/api/items", { name: "Gate Probe Item" }, cookie);
-  ok("adding an ingredient is refused", owedItem.status === 403, `got ${owedItem.status}`);
+  ok("catalogue routes are not blocked by the legacy duty setting", owedItem.status === 400, `got ${owedItem.status}`);
 
   const stillReads = await fetch(`${BASE}/api/transactions?limit=1`, { headers: { Cookie: cookie } });
-  ok("reading is still allowed while a check is owed", stillReads.status === 200, `got ${stillReads.status}`);
+  ok("reading movements remains allowed", stillReads.status === 200, `got ${stillReads.status}`);
 
   /* ---------------------------------------------------------------- */
 
@@ -250,28 +254,25 @@ try {
 
   /* ---------------------------------------------------------------- */
 
-  section("the override opens the window for the same session");
+  section("the old duty setting cannot force a face scan at the next sign-in");
 
-  const override = await fetch(`${BASE}/api/users/${staff.id}/face`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json", Cookie: admin },
-    body: JSON.stringify({ reason: "duty gate suite" }),
-  });
-  ok("the override is accepted", override.status === 200, `got ${override.status}`);
-
-  const afterOverride = await post("/api/transactions", { type: "nope" }, cookie);
-  ok(
-    "the same session now reaches the body validation",
-    afterOverride.status === 400,
-    `got ${afterOverride.status}`
+  const nextCookie = await staffSession(staff);
+  ok("password sign-in still succeeds with login face check off", Boolean(nextCookie));
+  const nextStatus = await json(
+    await fetch(`${BASE}/api/auth/me`, { headers: { Cookie: nextCookie } })
   );
+  ok("the old duty setting still does not require /verify", nextStatus?.face?.required === false);
 
-  const itemAfter = await post("/api/items", { name: "" }, cookie);
-  ok(
-    "and adding an ingredient reaches its own validation too",
-    itemAfter.status === 400,
-    `got ${itemAfter.status}`
-  );
+  /* ---------------------------------------------------------------- */
+
+  section("the login face-check setting is editable");
+
+  const faceLoginSetting = await patchSetting("face_login_enabled", "1");
+  ok("the login face-check option can be enabled", faceLoginSetting.status === 200);
+  const faceLoginStatus = await json(await fetch(`${BASE}/api/auth/face-login`));
+  ok("the face-login endpoint reports enabled", faceLoginStatus?.enabled === true);
+  const loginOff = await patchSetting("face_login_enabled", "0");
+  ok("the login face-check option can be disabled", loginOff.status === 200);
 
   /* ---------------------------------------------------------------- */
 
@@ -288,12 +289,7 @@ try {
   const nonsense = await patchSetting("face_require_profile_angles", "banana");
   ok("a non-boolean value is refused", nonsense.status === 400, `got ${nonsense.status}`);
 } finally {
-  /*
-   * Leave the shared isolated database as it was found. Every later suite in
-   * `test:all` runs against the same one, and duty verification left switched on
-   * would refuse `test:journeys` its staff sessions for reasons that have
-   * nothing to do with what it is testing.
-   */
+  /* Leave the shared isolated database as it was found for later suites. */
   if (staff) {
     await fetch(`${BASE}/api/users/${staff.id}`, {
       method: "PATCH",
@@ -302,6 +298,7 @@ try {
     }).catch(() => {});
   }
   await patchSetting("face_verification_enabled", before.face_verification_enabled ?? "0").catch(() => {});
+  await patchSetting("face_login_enabled", before.face_login_enabled ?? "0").catch(() => {});
   await patchSetting("face_duty_hours", before.face_duty_hours ?? "9").catch(() => {});
   await patchSetting("face_require_profile_angles", before.face_require_profile_angles ?? "1").catch(() => {});
 }

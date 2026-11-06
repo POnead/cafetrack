@@ -39,6 +39,9 @@ const PUBLIC_PATHS = [
   // nothing to check here that it is not already unable to check for the other
   // three.
   "/api/auth/staff/confirm",
+  // The face-bypass request only carries a password-verified, short-lived
+  // step-two ticket; it must work before the caller has a session cookie.
+  "/api/auth/staff/duty-bypass",
   // The health check (FR-20). Public on purpose: a check that needs a session
   // cookie expires at the same moment the thing it is checking breaks — a
   // restart clears every cookie — so it would report a healthy system as down.
@@ -139,6 +142,11 @@ export const config = {
   // browser console says nothing about a sign-in page. Same class of mistake,
   // so it is excluded here rather than discovered later.
   //
+  // `mediapipe/` contains the local Face Landmarker wasm runtime used during
+  // login. Redirecting these files to /login makes both GPU and CPU setup fail
+  // with an unhelpful resource-load event, even though the model under
+  // `models/` is already public.
+  //
   // `_next/hmr` (and its webpack-mode name) is the dev live-reload socket. It
   // carries no application data, but it is fetched before anyone signs in — and
   // a redirect to /login makes the websocket handshake fail. The page still
@@ -147,6 +155,6 @@ export const config = {
   // deliberately narrow elsewhere so an RSC payload for a protected page is
   // still gated; only the socket is excluded.
   matcher: [
-    "/((?!_next/static|_next/image|_next/hmr|_next/webpack-hmr|favicon.ico|icon.svg|brand/|models/|onnx/).*)",
+    "/((?!_next/static|_next/image|_next/hmr|_next/webpack-hmr|favicon.ico|icon.svg|brand/|models/|onnx/|mediapipe/).*)",
   ],
 };

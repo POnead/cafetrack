@@ -8,6 +8,10 @@ import {
 } from "node:crypto";
 import type { DbFacade } from "./supabase";
 import { resolveAuthSecret } from "./secret";
+import {
+  SESSION_IDLE_TIMEOUT_MINUTES,
+  type SessionRole,
+} from "./session-policy";
 
 /*
  * The signing key, resolved on first use rather than at import time.
@@ -39,7 +43,11 @@ export const COOKIE_NAME = "cafetrack_session";
  */
 export const SESSION_MINUTES = 15;
 
-export type Role = "admin" | "staff";
+export type Role = SessionRole;
+
+export function sessionIdleLimitMs(role: Role): number {
+  return SESSION_IDLE_TIMEOUT_MINUTES[role] * 60_000;
+}
 
 export type SessionUser = {
   id: string;
@@ -95,6 +103,24 @@ export async function readSessionToken(token: string): Promise<SessionUser | nul
   } catch {
     return null;
   }
+}
+
+export async function hasActiveSession(
+  token: string | null | undefined,
+  lastActiveAt: string | Date | null | undefined
+): Promise<boolean> {
+  if (!token || !lastActiveAt) return false;
+  const user = await readSessionToken(token);
+  if (!user) return false;
+
+  const lastActive = timestampMilliseconds(lastActiveAt);
+  const idleFor = Date.now() - lastActive;
+  return Number.isFinite(lastActive) && idleFor >= 0 && idleFor < sessionIdleLimitMs(user.role);
+}
+
+function timestampMilliseconds(value: unknown): number {
+  if (value instanceof Date) return value.getTime();
+  return typeof value === "string" ? Date.parse(value) : Number.NaN;
 }
 
 // Next 15 made `cookies()` async. Every caller of this (getSession, and the
@@ -161,22 +187,29 @@ export async function getSession(): Promise<SessionUser | null> {
     const { db } = await import("@/lib/supabase");
     const { data: row, error } = await db()
       .from("users")
-      .select("session_token, is_active")
+      .select("session_token, is_active, session_last_active_at")
       .eq("id", user.id)
       .maybeSingle();
 
     if (error) {
       // Infrastructure failure, not an authentication decision. Log it so the
-      // failure is visible, then fall back to the JWT's own expiry rather than
-      // turning a transient database blip into a cafe-wide logout.
+      // failure is visible, then fall back to JWT expiry for transient outages.
+      // A missing idle-tracking column is different: enforcement is impossible
+      // until the migration is applied, so refuse the session instead.
       console.error("session revocation check failed:", error.message);
+      if (error.message.includes("session_last_active_at")) return null;
       return user;
     }
 
+    const lastActive = timestampMilliseconds(row?.session_last_active_at);
+    const idleFor = Date.now() - lastActive;
     const ok =
       Boolean(row) &&
       row.is_active !== false &&
-      row.session_token === token;
+      row.session_token === token &&
+      Number.isFinite(lastActive) &&
+      idleFor >= 0 &&
+      idleFor < sessionIdleLimitMs(user.role);
 
     rememberSessionCheck(key, ok);
     return ok ? user : null;
@@ -265,7 +298,10 @@ export async function setSessionCookie(
     try {
       await dbClient
         .from("users")
-        .update({ session_token: token })
+        .update({
+          session_token: token,
+          session_last_active_at: new Date().toISOString(),
+        })
         .eq("id", userId);
     } catch (e) {
       console.error("Failed to set session_token:", e instanceof Error ? e.message : String(e));
@@ -291,7 +327,7 @@ export async function clearSessionCookie(userId?: string, dbClient?: DbFacade) {
     try {
       await dbClient
         .from("users")
-        .update({ session_token: null })
+        .update({ session_token: null, session_last_active_at: null })
         .eq("id", userId);
     } catch (e) {
       console.error("Failed to clear session_token:", e instanceof Error ? e.message : String(e));

@@ -117,6 +117,7 @@ export type PdfReport = {
   movementSummary: PdfMovementSummary[];
   waste: { sku: string; name: string; qty: string; count: number }[];
   movementLines: PdfMovementLine[];
+  warnings: string[];
 };
 
 /**
@@ -231,6 +232,14 @@ function writeHeader(doc: PDFKit.PDFDocument, report: PdfReport) {
       `Generated ${report.generated}  ·  ${report.items.length} items  ·  ${report.filterDescription}`,
       { lineGap: 1 }
     );
+
+  for (const warning of report.warnings) {
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(8)
+      .fillColor(TERRACOTTA)
+      .text(warning, { lineGap: 1 });
+  }
 
   doc.moveDown(0.6);
 }

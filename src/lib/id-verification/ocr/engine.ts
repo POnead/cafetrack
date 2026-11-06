@@ -312,8 +312,44 @@ export const MIN_OCR_WIDTH = 240;
 
 export async function runOcr(bytes: Uint8Array): Promise<OcrRun> {
   const w = await getWorker();
+  let preparedBytes = bytes;
+  try {
+    const sharp = (await import("sharp")).default;
+    preparedBytes = await sharp(Buffer.from(bytes))
+      .resize({
+        width: 2400,
+        height: 2400,
+        fit: "inside",
+        withoutEnlargement: false,
+      })
+      .grayscale()
+      .normalize()
+      .sharpen({ sigma: 1.2 })
+      .png()
+      .toBuffer() as Uint8Array;
+  } catch {
+    preparedBytes = bytes;
+  }
 
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  const recognizeWithinTimeout = (
+    imageBytes: Uint8Array,
+    options: Record<string, unknown> = {}
+  ): Promise<{ data: { text: string; confidence: number; blocks: unknown } }> =>
+    new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(
+          new Error(
+            lastWorkerError
+              ? `The text reader failed: ${lastWorkerError}`
+              : `The text reader did not finish within ${OCR_TIMEOUT_MS / 1000}s.`
+          )
+        );
+      }, OCR_TIMEOUT_MS);
+
+      void Promise.resolve(w.recognize(imageBytes, options, { blocks: true }))
+        .then(resolve, reject)
+        .finally(() => clearTimeout(timer));
+    });
 
   try {
     /*
@@ -323,31 +359,70 @@ export async function runOcr(bytes: Uint8Array): Promise<OcrRun> {
      * rather than occupying the single shared worker and blocking every later
      * request behind it.
      */
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        // Surface the worker's own complaint if it made one, because "it hung" and
-        // "its worker script is missing" need different fixes and the second is
-        // the one that actually happens.
-        reject(
-          new Error(
-            lastWorkerError
-              ? `The text reader failed: ${lastWorkerError}`
-              : `The text reader did not finish within ${OCR_TIMEOUT_MS / 1000}s.`
-          )
-        );
-      }, OCR_TIMEOUT_MS);
-    });
+    const original = await recognizeWithinTimeout(bytes);
+    let recognised = original;
+    if (preparedBytes !== bytes) {
+      try {
+        const prepared = await recognizeWithinTimeout(preparedBytes);
+        const originalWords = flattenWords(original.data.blocks).length;
+        const preparedWords = flattenWords(prepared.data.blocks).length;
+        if (
+          preparedWords > originalWords ||
+          (preparedWords === originalWords && prepared.data.confidence > original.data.confidence)
+        ) {
+          recognised = prepared;
+        }
+      } catch {
+        // The original recognition remains usable when preprocessing makes OCR fail.
+      }
+    }
+    let result = recognised.data;
 
-    const { data } = await Promise.race([
-      w.recognize(bytes, {}, { blocks: true }),
-      timeout,
-    ]);
+    if (
+      typeof result.confidence === "number" &&
+      typeof result.text === "string" &&
+      (
+        (result.confidence < 60 && result.text.trim().length < 160) ||
+        flattenWords(result.blocks).length < 8
+      )
+    ) {
+      let currentWords = flattenWords(result.blocks).length;
+      for (const pageSegmentationMode of ["11", "6"]) {
+        let candidate;
+        try {
+          candidate = await recognizeWithinTimeout(preparedBytes, {
+            tessedit_pageseg_mode: pageSegmentationMode,
+          });
+        } catch {
+          try {
+            candidate = await recognizeWithinTimeout(bytes, {
+              tessedit_pageseg_mode: pageSegmentationMode,
+            });
+          } catch {
+            continue;
+          }
+        }
+        const nextWords = flattenWords(candidate.data.blocks);
+        const nextConfidence =
+          typeof candidate.data.confidence === "number"
+            ? candidate.data.confidence
+            : 0;
+        if (
+          nextWords.length > currentWords ||
+          (nextWords.length === currentWords &&
+            nextConfidence > (result.confidence ?? 0))
+        ) {
+          result = candidate.data;
+          currentWords = nextWords.length;
+        }
+      }
+    }
     lastUsedAt = Date.now();
 
     return {
-      text: data.text ?? "",
-      confidence: typeof data.confidence === "number" ? data.confidence : 0,
-      words: flattenWords(data.blocks),
+      text: result.text ?? "",
+      confidence: typeof result.confidence === "number" ? result.confidence : 0,
+      words: flattenWords(result.blocks),
     };
   } catch (cause) {
     /*
@@ -359,7 +434,6 @@ export async function runOcr(bytes: Uint8Array): Promise<OcrRun> {
     void disposeWorker();
     throw cause;
   } finally {
-    if (timer) clearTimeout(timer);
     reapIfIdle();
   }
 }

@@ -5,6 +5,7 @@ import {
   verifyPassword,
   signSession,
   setSessionCookie,
+  hasActiveSession,
   deactivatedMessage,
 } from "@/lib/auth";
 import { audit } from "@/lib/audit";
@@ -23,7 +24,7 @@ export const runtime = "nodejs";
  */
 const LOGIN_COLUMNS =
   "id, username, password_hash, full_name, role, is_active, " +
-  "deactivation_reason, deactivated_at, session_token";
+  "deactivation_reason, deactivated_at, session_token, session_last_active_at";
 
 /**
  * Record a rejected admin sign-in and queue the email, without ever changing
@@ -157,7 +158,10 @@ export const POST = handler(async (req: Request) => {
   });
 
   // Check if there was a previous session — notify client to show the conflict popup.
-  const hadPreviousSession = Boolean(user.session_token);
+  const hadPreviousSession = await hasActiveSession(
+    user.session_token,
+    user.session_last_active_at
+  );
 
   return ok({ user: session, session_conflict: hadPreviousSession });
 });

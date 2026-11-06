@@ -27,6 +27,7 @@ type Item = {
   quantity: number;
   low_stock_threshold: number;
   expiration_date: string | null;
+  expirable: boolean | null;
   item_status: string;
   submitted_at: string | null;
   reviewed_at: string | null;
@@ -35,9 +36,28 @@ type Item = {
   location: { id: string; name: string } | null;
 };
 
+type BatchAdjustment = {
+  batch_id: string;
+  batch_code?: string;
+  previous_quantity?: number;
+  quantity: number;
+  expiration_date?: string | null;
+};
+
+type DutyBypassRequest = {
+  id: string;
+  requested_by: string;
+  requester_name: string;
+  requester_username: string;
+  reason: string;
+  photo_data: string | null;
+  requested_at: string;
+};
+
 export default function ApprovalsPage() {
   const [items, setItems] = useState<Item[]>([]);
   const [changeRequests, setChangeRequests] = useState<any[]>([]);
+  const [dutyBypassRequests, setDutyBypassRequests] = useState<DutyBypassRequest[]>([]);
   const [mine, setMine] = useState<Item[]>([]);
   const [myRequests, setMyRequests] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -56,20 +76,35 @@ export default function ApprovalsPage() {
     if (inFlight.current) return;
     inFlight.current = true;
     try {
-      const [me, res, cr, mv, mr] = await Promise.all([
-        fetch("/api/auth/me").then((r) => r.json()).catch(() => ({})),
+      const meResponse = await fetch("/api/auth/me");
+      const me = await meResponse.json();
+      const admin = me?.user?.role === "admin";
+      const [res, cr, mv, mr, bypassResponse] = await Promise.all([
         fetch("/api/items?status=pending").then((r) => r.json()),
         fetch("/api/change-requests?status=pending").then((r) => r.json()),
         fetch("/api/items?submitted_by=me&status=all").then((r) => r.json()),
         fetch("/api/change-requests?requested_by=me&status=all").then((r) => r.json()),
+        admin
+          ? fetch("/api/duty-bypass-requests?status=pending")
+          : Promise.resolve(null),
       ]);
 
-      setIsAdmin(me?.user?.role === "admin");
+      setIsAdmin(admin);
       if (res.error) throw new Error(res.error);
+      if (bypassResponse && !bypassResponse.ok) {
+        const data = await bypassResponse.json();
+        throw new Error(data.error || "Could not load face-check requests");
+      }
       setItems(res.items ?? []);
       setChangeRequests(cr.requests ?? []);
       setMine(mv.items ?? []);
       setMyRequests(mr.requests ?? []);
+      if (bypassResponse) {
+        const data = await bypassResponse.json();
+        setDutyBypassRequests(data.requests ?? []);
+      } else {
+        setDutyBypassRequests([]);
+      }
       setError(null);
     } catch (e: any) {
       setError(e.message || "Could not load submissions");
@@ -134,6 +169,30 @@ export default function ApprovalsPage() {
     }
   }
 
+  async function decideDutyBypass(
+    request: DutyBypassRequest,
+    decision: "approve" | "reject"
+  ) {
+    setBusy(request.id);
+    setError(null);
+    try {
+      const response = await fetch("/api/duty-bypass-requests/review", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: request.id, decision }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "Could not save this decision");
+
+      setToast({ msg: data.message || "Decision saved", tone: "success" });
+      await load();
+    } catch (e: any) {
+      setError(e.message || "Could not save this decision");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function resubmit(item: Item) {
     setBusy(item.id);
     setError(null);
@@ -185,6 +244,108 @@ export default function ApprovalsPage() {
         <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
           {error}
         </div>
+      )}
+
+      {isAdmin && (
+        <section className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="deco-title text-xl">Face-check requests</h2>
+            {dutyBypassRequests.length > 0 && (
+              <Badge tone="amber" variant="tag">
+                {dutyBypassRequests.length} awaiting review
+              </Badge>
+            )}
+          </div>
+          {dutyBypassRequests.length === 0 ? (
+            <Card>
+              <p className="text-sm text-cocoa-500">No face-check requests are waiting.</p>
+            </Card>
+          ) : (
+            dutyBypassRequests.map((request) => (
+              <Card key={request.id} className="space-y-3">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <h3 className="font-semibold text-cocoa-900">
+                      {request.requester_name}
+                    </h3>
+                    <p className="font-mono text-xs text-cocoa-500">
+                      {request.requester_username}
+                    </p>
+                  </div>
+                  <Badge tone="amber" variant="tag">Awaiting decision</Badge>
+                </div>
+
+                <div className="text-xs text-cocoa-400">
+                  Requested {fmtDate(request.requested_at)}
+                </div>
+
+                <div className="rounded-xl bg-cream-50 px-3.5 py-3">
+                  <div className="label">Reason</div>
+                  <p className="whitespace-pre-wrap text-sm leading-relaxed text-cocoa-700">
+                    {request.reason}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="mb-2 text-xs font-semibold text-cocoa-600">
+                    Compare the live request photo with the staff account photo
+                  </p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      {request.photo_data ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={request.photo_data}
+                          alt={`Live request photo from ${request.requester_name}`}
+                          className="aspect-[4/5] max-h-64 w-full rounded-xl border border-cream-200 bg-cream-50 object-cover"
+                        />
+                      ) : (
+                        <div className="flex aspect-[4/5] max-h-64 items-center justify-center rounded-xl bg-cream-100 text-xs text-cocoa-400">
+                          Request photo unavailable
+                        </div>
+                      )}
+                      <p className="text-center text-[11px] text-cocoa-400">Request photo</p>
+                    </div>
+                    <div className="space-y-1">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={`/api/users/${request.requested_by}/face`}
+                        alt={`Reference photo for ${request.requester_name}`}
+                        className="aspect-[4/5] max-h-64 w-full rounded-xl border border-cream-200 bg-cream-50 object-cover"
+                        onError={(event) => {
+                          event.currentTarget.style.visibility = "hidden";
+                        }}
+                      />
+                      <p className="text-center text-[11px] text-cocoa-400">Account photo</p>
+                    </div>
+                  </div>
+                </div>
+
+                <p className="text-xs leading-relaxed text-cocoa-500">
+                  Approving allows this staff member to skip the face check until
+                  midnight today. Declining does not grant access.
+                </p>
+
+                <div className="flex gap-2">
+                  <button
+                    className="btn-primary flex-1"
+                    disabled={busy === request.id || !request.photo_data}
+                    onClick={() => void decideDutyBypass(request, "approve")}
+                  >
+                    {busy === request.id ? "Working..." : "Approve for today"}
+                  </button>
+                  <button
+                    className="btn-ghost flex-1"
+                    disabled={busy === request.id}
+                    onClick={() => void decideDutyBypass(request, "reject")}
+                  >
+                    Decline
+                  </button>
+                </div>
+              </Card>
+            ))
+          )}
+        </section>
       )}
 
       {items.length === 0 ? (
@@ -322,7 +483,21 @@ export default function ApprovalsPage() {
                 {r.units_per_box !== null && <li>Units per box → {r.units_per_box}</li>}
                 {r.quantity !== null && <li>Quantity → {r.quantity}{r.correction_reason ? ` (${r.correction_reason})` : ""}</li>}
                 {r.low_stock_threshold !== null && <li>Low-stock threshold → {r.low_stock_threshold}</li>}
+                {r.expirable !== null && <li>Expirable → {r.expirable ? "Yes" : "No"}</li>}
                 {r.expiration_date !== null && <li>Expires → {fmtDate(r.expiration_date)}</li>}
+                {(r.batch_adjustments as BatchAdjustment[] | null)?.map((adjustment) => (
+                  <li key={adjustment.batch_id}>
+                    Batch {adjustment.batch_code ?? adjustment.batch_id}:{" "}
+                    {fmtQty(adjustment.previous_quantity ?? 0, r.item?.unit ?? "units")} →{" "}
+                    {fmtQty(adjustment.quantity, r.item?.unit ?? "units")}
+                    {adjustment.expiration_date
+                      ? ` · expires ${fmtDate(adjustment.expiration_date)}`
+                      : ""}
+                  </li>
+                ))}
+                {r.batch_adjustments?.length > 0 && r.correction_reason && (
+                  <li>Correction reason → {r.correction_reason}</li>
+                )}
               </ul>
               <div className="text-xs text-cocoa-400">{fmtDate(r.requested_at)}</div>
               {isAdmin && (

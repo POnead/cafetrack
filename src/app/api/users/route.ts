@@ -4,6 +4,7 @@ import { hashPassword, newStaffToken, requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { currentSampleUserIds } from "@/lib/face-samples";
 import { getFaceEngine } from "@/lib/settings";
+import { getDutyWindow } from "@/lib/face-gate";
 import { FACE_POSES, type FacePose } from "@/lib/face";
 
 export const runtime = "nodejs";
@@ -76,8 +77,29 @@ export const GET = handler(async () => {
     posesByUser.set(sample.user_id, poses);
   }
 
+  /*
+   * Whether each person is inside their duty window right now.
+   *
+   * Derived here rather than left to the browser, because the answer depends on
+   * the admin-configured duty hours and on the server's clock. The panel used to
+   * show only "last passed", which reads identically whether the check is still
+   * good or ran out hours ago — and an override that stamps a fresh timestamp
+   * then looked like no change at all. Settings are cached in-process, so this
+   * is arithmetic per row, not a query per row.
+   */
+  const duty = await Promise.all(
+    users.map((u) =>
+      getDutyWindow({
+        userId: String(u.id),
+        role: String(u.role),
+        faceEnabled: u.face_enabled === true,
+        lastVerifiedAt: (u.last_face_verified_at as string | null) ?? null,
+      })
+    )
+  );
+
   return ok({
-    users: users.map((u) => ({
+    users: users.map((u, i) => ({
       ...u,
       face_needs_enrolment: Boolean(u.face_enabled) && !current.has(String(u.id)),
       face_poses: u.face_enabled
@@ -85,6 +107,10 @@ export const GET = handler(async () => {
             (pose) => pose === "front" || posesByUser.get(String(u.id))?.has(pose)
           )
         : [],
+      duty_window_open: duty[i].open,
+      duty_check_enabled: duty[i].enabled,
+      duty_next_due_at: duty[i].until,
+      duty_bypassed: duty[i].bypassed,
     })),
   });
 });

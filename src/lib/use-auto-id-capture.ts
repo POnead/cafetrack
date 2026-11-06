@@ -5,6 +5,7 @@ import type { RefObject } from "react";
 import { captureIdFrame } from "./id-camera";
 import {
   captureRectifiedIdFrame,
+  cardDistanceState,
   detectIdCard,
   type CardCorners,
 } from "./id-card-scanner";
@@ -15,7 +16,10 @@ type FrameSample = {
   luminance: Uint8Array;
   mean: number;
   edgeRatio: number;
+  highlightRatio: number;
 };
+
+export type IdDistanceState = ReturnType<typeof cardDistanceState>;
 
 type AutoIdCaptureOptions = {
   videoRef: RefObject<HTMLVideoElement | null>;
@@ -55,6 +59,7 @@ function sampleCardArea(video: HTMLVideoElement): FrameSample | null {
   const luminance = new Uint8Array(SAMPLE_WIDTH * SAMPLE_HEIGHT);
   let total = 0;
   let edges = 0;
+  let highlights = 0;
 
   for (let y = 0; y < SAMPLE_HEIGHT; y++) {
     for (let x = 0; x < SAMPLE_WIDTH; x++) {
@@ -65,6 +70,7 @@ function sampleCardArea(video: HTMLVideoElement): FrameSample | null {
       );
       luminance[pixel] = value;
       total += value;
+      if (value >= 248) highlights++;
 
       if (x > 0 && Math.abs(value - luminance[pixel - 1]) > 22) edges++;
       if (y > 0 && Math.abs(value - luminance[pixel - SAMPLE_WIDTH]) > 22) edges++;
@@ -75,6 +81,7 @@ function sampleCardArea(video: HTMLVideoElement): FrameSample | null {
     luminance,
     mean: total / luminance.length,
     edgeRatio: edges / (SAMPLE_WIDTH * SAMPLE_HEIGHT * 2),
+    highlightRatio: highlights / luminance.length,
   };
 }
 
@@ -97,6 +104,7 @@ export function useAutoIdCapture({
   const [phase, setPhase] = useState<IdCapturePhase>("waiting");
   const [holdProgress, setHoldProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [distanceState, setDistanceState] = useState<IdDistanceState>("too-small");
   const [attempt, setAttempt] = useState(0);
   const callbackRef = useRef(onCapture);
   const capturingRef = useRef(false);
@@ -183,28 +191,38 @@ export function useAutoIdCapture({
           return;
         }
 
-        const wellLit = sample.mean >= 28 && sample.mean <= 238;
+        const sufficientlyLit = sample.mean >= 18;
         const hasDetail = sample.edgeRatio >= DETAIL_THRESHOLD;
+        const hasExcessiveGlare = sample.highlightRatio >= 0.68;
         const steady =
           previous !== null && frameDelta(previous, sample.luminance) <= STABLE_DELTA;
         previous = sample.luminance;
 
-        if (!corners || !wellLit || !hasDetail) {
+        if (!corners || !sufficientlyLit || !hasDetail || hasExcessiveGlare) {
+          setDistanceState(corners ? cardDistanceState(corners) : "too-small");
           steadyCount = 0;
           setPhase("adjust");
           setHoldProgress(0);
-        } else if (!steady) {
-          steadyCount = 0;
-          setPhase("hold");
-          setHoldProgress(0);
         } else {
-          steadyCount++;
-          const progress = Math.min(1, steadyCount / stableFrames);
-          setHoldProgress(progress);
-          setPhase(progress >= 1 ? "capturing" : "hold");
-          if (progress >= 1) {
-            await capture(true, corners);
-            return;
+          const distance = cardDistanceState(corners);
+          setDistanceState(distance);
+          if (distance !== "ok") {
+            steadyCount = 0;
+            setPhase("adjust");
+            setHoldProgress(0);
+          } else if (!steady) {
+            steadyCount = 0;
+            setPhase("hold");
+            setHoldProgress(0);
+          } else {
+            steadyCount++;
+            const progress = Math.min(1, steadyCount / stableFrames);
+            setHoldProgress(progress);
+            setPhase(progress >= 1 ? "capturing" : "hold");
+            if (progress >= 1) {
+              await capture(true, corners);
+              return;
+            }
           }
         }
       }
@@ -228,7 +246,11 @@ export function useAutoIdCapture({
     (phase === "waiting"
       ? "Looking for the whole ID card. Center all four edges inside the guide."
       : phase === "adjust"
-        ? "Card not detected yet. Show the whole card and keep all four edges inside the guide."
+        ? distanceState === "too-close"
+          ? "The card is too close or cropped. Move the camera back until all four edges have clear space inside the guide."
+          : distanceState === "too-small"
+            ? "The card is too far away. Move closer until it fills at least half the guide, without touching the edges."
+            : "Card not detected yet. Show the whole card and keep all four edges inside the guide."
         : phase === "hold"
           ? "ID card detected. Hold the card still."
           : phase === "capturing"

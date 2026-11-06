@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   Card,
+  ConfirmDialog,
   Modal,
   Spinner,
   Empty,
@@ -18,6 +19,17 @@ import { stockStatus, expiryStatus } from "@/lib/status";
 import { useLiveRefresh } from "@/lib/use-live-refresh";
 
 type Me = { id: string; username: string; fullName: string; role: "admin" | "staff" };
+
+type InventoryBatch = {
+  id: string;
+  batch_code: string;
+  received_quantity: number;
+  remaining_quantity: number;
+  expiration_date: string | null;
+  received_at: string;
+  source_type?: "opening" | "restock" | "adjustment";
+  adjustment_reason?: string | null;
+};
 
 type Item = {
   id: string;
@@ -37,6 +49,15 @@ type Item = {
   category: { id: string; name: string } | null;
   location: { id: string; name: string; min_shelf_life_days: number | null } | null;
   supplier: { id: string; name: string } | null;
+  batches?: InventoryBatch[];
+};
+
+type PendingConfirmation = {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  tone?: "warning" | "danger";
+  onConfirm: () => void;
 };
 
 type SupplierRef = { id: string; name: string };
@@ -89,6 +110,92 @@ const EMPTY_FORM = {
   target_days: "",
   unit_price: "",
 };
+
+function activeBatchLabels(item: Item) {
+  return [...(item.batches ?? [])]
+    .filter((batch) => Number(batch.remaining_quantity) > 0)
+    .sort((a, b) => {
+      if (!a.expiration_date) return b.expiration_date ? 1 : 0;
+      if (!b.expiration_date) return -1;
+      return a.expiration_date.localeCompare(b.expiration_date);
+    })
+    .map((batch) => ({
+      batch,
+      label: {
+        value: batch.batch_code,
+        title: item.name,
+        subtitle: `${fmtQty(batch.remaining_quantity, item.unit)} remaining · ${
+          batch.expiration_date
+            ? `expires ${fmtDate(batch.expiration_date)}`
+            : "no expiry date"
+        }`,
+      },
+    }));
+}
+
+function expirySummary(item: Item): { text: string; tone: "expired" | "soon" | "normal" } {
+  const activeBatches = (item.batches ?? []).filter(
+    (batch) => Number(batch.remaining_quantity) > 0
+  );
+  if (activeBatches.length === 0) {
+    if (Number(item.quantity) <= 0) {
+      return { text: "No stock", tone: "normal" };
+    }
+    const status = expiryStatus(item.expiration_date);
+    if (!item.expiration_date) return { text: "—", tone: "normal" };
+    return {
+      text: `${fmtDate(item.expiration_date)}${
+        status.key === "expired"
+          ? " (expired)"
+          : status.key === "soon"
+            ? ` (${status.days}d)`
+            : ""
+      }`,
+      tone: status.key === "expired" ? "expired" : status.key === "soon" ? "soon" : "normal",
+    };
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const expiredBatches = activeBatches.filter(
+    (batch) =>
+      batch.expiration_date !== null &&
+      batch.expiration_date.slice(0, 10) < today
+  );
+  const expiredQuantity = expiredBatches.reduce(
+    (total, batch) => total + Number(batch.remaining_quantity),
+    0
+  );
+  if (expiredQuantity > 0) {
+    const usableQuantity = activeBatches.reduce(
+      (total, batch) =>
+        !batch.expiration_date || batch.expiration_date.slice(0, 10) >= today
+          ? total + Number(batch.remaining_quantity)
+          : total,
+      0
+    );
+    return {
+      text: `${fmtQty(expiredQuantity, item.unit)} expired in ${expiredBatches.length} batch${
+        expiredBatches.length === 1 ? "" : "es"
+      }${usableQuantity > 0 ? ` · ${fmtQty(usableQuantity, item.unit)} still usable` : ""}`,
+      tone: "expired",
+    };
+  }
+
+  const nextExpiry = activeBatches
+    .filter((batch) => batch.expiration_date)
+    .sort((a, b) =>
+      String(a.expiration_date).localeCompare(String(b.expiration_date))
+    )[0];
+  if (!nextExpiry?.expiration_date) return { text: "No expiring batches", tone: "normal" };
+  const nextStatus = expiryStatus(nextExpiry.expiration_date);
+  return {
+    text: `Next ${fmtDate(nextExpiry.expiration_date)} · ${fmtQty(
+      nextExpiry.remaining_quantity,
+      item.unit
+    )}${nextStatus.key === "soon" ? ` · ${nextStatus.days}d` : ""}`,
+    tone: nextStatus.key === "soon" ? "soon" : "normal",
+  };
+}
 
 /**
  * Maps each unit to its most likely physical form. When the user picks a unit,
@@ -214,16 +321,22 @@ export default function ItemsPage() {
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({ ...EMPTY_FORM });
   const [correctionReason, setCorrectionReason] = useState("");
+  const [batchCounts, setBatchCounts] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
   const [labelItem, setLabelItem] = useState<Item | null>(null);
   const [toast, setToast] = useState<{ msg: string; tone: any } | null>(null);
+  const [confirmation, setConfirmation] = useState<PendingConfirmation | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<Item | null>(null);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Stock count mode
   const [stockCountMode, setStockCountMode] = useState(false);
-  const [countedQty, setCountedQty] = useState<Record<string, string>>({});
+  const [countedBatchQty, setCountedBatchQty] = useState<Record<string, string>>({});
   const [savingCounts, setSavingCounts] = useState(false);
 
   const inFlight = useRef(false);
@@ -374,6 +487,8 @@ export default function ItemsPage() {
   function openCreate() {
     setForm({ ...EMPTY_FORM });
     setFormError(null);
+    setCorrectionReason("");
+    setBatchCounts({});
     setCreating(true);
     setEditing(null);
   }
@@ -390,11 +505,19 @@ export default function ItemsPage() {
       quantity: String(item.quantity),
       low_stock_threshold: String(item.low_stock_threshold),
       expiration_date: item.expiration_date ?? "",
-      expirable: item.expirable,
+      expirable: item.expirable ?? true,
       par_level: item.par_level == null ? "" : String(item.par_level),
       target_days: item.target_days == null ? "" : String(item.target_days),
       unit_price: item.unit_price == null ? "" : String(item.unit_price),
     });
+    setBatchCounts(
+      Object.fromEntries(
+        (item.batches ?? []).map((batch) => [
+          batch.id,
+          String(batch.remaining_quantity),
+        ])
+      )
+    );
     setCorrectionReason("");
     setFormError(null);
     setEditing(item);
@@ -405,6 +528,7 @@ export default function ItemsPage() {
     setCreating(false);
     setEditing(null);
     setCorrectionReason("");
+    setBatchCounts({});
     setFormError(null);
   }
 
@@ -417,9 +541,35 @@ export default function ItemsPage() {
       // round-tripping to the API. `Number("")` is 0, which would otherwise
       // save a fully stocked item as empty.
       const qty = Number(form.quantity);
-      if (form.quantity.trim() === "" || !Number.isFinite(qty) || qty < 0) {
+      if (!editing && (form.quantity.trim() === "" || !Number.isFinite(qty) || qty < 0)) {
         setFormError("Enter a quantity of 0 or more");
         return;
+      }
+      const batchAdjustments: {
+        batch_id: string;
+        quantity: number;
+        batch_code: string;
+        previous_quantity: number;
+        expiration_date: string | null;
+      }[] = [];
+      if (editing) {
+        for (const batch of editing.batches ?? []) {
+          const raw = batchCounts[batch.id] ?? String(batch.remaining_quantity);
+          const count = Number(raw);
+          if (raw.trim() === "" || !Number.isFinite(count) || count < 0) {
+            setFormError(`Enter a valid non-negative count for batch ${batch.batch_code}`);
+            return;
+          }
+          if (count !== Number(batch.remaining_quantity)) {
+            batchAdjustments.push({
+              batch_id: batch.id,
+              quantity: count,
+              batch_code: batch.batch_code,
+              previous_quantity: Number(batch.remaining_quantity),
+              expiration_date: batch.expiration_date,
+            });
+          }
+        }
       }
       const low = Number(form.low_stock_threshold);
       if (form.low_stock_threshold.trim() !== "" && (!Number.isFinite(low) || low < 0)) {
@@ -455,9 +605,8 @@ export default function ItemsPage() {
         setFormError(formErr);
         return;
       }
-      const quantityChanged = editing !== null && qty !== Number(editing.quantity);
-      if (quantityChanged && !correctionReason.trim()) {
-        setFormError("Enter a reason for the stock correction");
+      if (batchAdjustments.length > 0 && !correctionReason.trim()) {
+        setFormError("Enter a reason for the batch stock correction");
         return;
       }
 
@@ -483,7 +632,7 @@ export default function ItemsPage() {
         physical_form: form.physical_form,
         unit: form.unit,
         units_per_box: perBox,
-        quantity: qty,
+        ...(!editing ? { quantity: qty } : {}),
         low_stock_threshold:
           form.low_stock_threshold.trim() === "" ? 5 : Math.round(low),
         expiration_date: form.expirable ? form.expiration_date || null : null,
@@ -491,7 +640,12 @@ export default function ItemsPage() {
         par_level: parLevel,
         target_days: targetDays,
         unit_price: unitPrice,
-        ...(quantityChanged ? { correction_reason: correctionReason.trim() } : {}),
+        ...(batchAdjustments.length > 0
+          ? {
+              batch_adjustments: batchAdjustments,
+              correction_reason: correctionReason.trim(),
+            }
+          : {}),
       };
 
       const res = await fetch(editing ? `/api/items/${editing.id}` : "/api/items", {
@@ -525,16 +679,39 @@ export default function ItemsPage() {
     }
   }
 
-  async function remove(item: Item) {
-    if (!confirm(`Delete "${item.name}"? This cannot be undone.`)) return;
-    const res = await fetch(`/api/items/${item.id}`, { method: "DELETE" });
-    const data = await res.json();
-    if (!res.ok) {
-      setToast({ msg: data.error || "Delete failed", tone: "error" });
-      return;
+  function remove(item: Item) {
+    setPendingDelete(item);
+    setDeletePassword("");
+    setDeleteError(null);
+  }
+
+  async function confirmDelete(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!pendingDelete || !deletePassword || deleting) return;
+
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      const res = await fetch(`/api/items/${pendingDelete.id}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: deletePassword }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setDeleteError(data.error || "Delete failed");
+        return;
+      }
+
+      setPendingDelete(null);
+      setDeletePassword("");
+      setToast({ msg: "Item deleted", tone: "success" });
+      load();
+    } catch (e: any) {
+      setDeleteError(e.message || "Delete failed. Check your connection and try again.");
+    } finally {
+      setDeleting(false);
     }
-    setToast({ msg: "Item deleted", tone: "success" });
-    load();
   }
 
   /**
@@ -545,56 +722,91 @@ export default function ItemsPage() {
    * Printing 500 labels without asking would be a paper jam and a lost afternoon,
    * so this prints the current view and tells the admin how to get the rest.
    */
-  async function printAll() {
+  function printAll() {
     if (filtered.length === 0) return;
-    if (total > filtered.length) {
-      const proceed = confirm(
-        `Print labels for the ${filtered.length} items on this page?\n\n` +
-          `There are ${total} in total. Clear the search and filters, or narrow ` +
-          `to a category, to print a different set.`
+    const printCurrentPage = async () =>
+      printLabels(
+        filtered.flatMap((item) => {
+          const batchLabels = activeBatchLabels(item).map(({ label }) => label);
+          return batchLabels.length > 0
+            ? batchLabels
+            : [
+                {
+                  value: item.sku,
+                  title: item.name,
+                  subtitle: item.category?.name ?? "",
+                },
+              ];
+        })
       );
-      if (!proceed) return;
+
+    if (total > filtered.length) {
+      setConfirmation({
+        title: "Print this page's labels?",
+        message:
+          `Print labels for the ${filtered.length} items on this page?\n\n` +
+          `There are ${total} in total. Clear the search and filters, or narrow ` +
+          `to a category, to print a different set.`,
+        confirmLabel: "Print labels",
+        onConfirm: () => {
+          void printCurrentPage();
+        },
+      });
+      return;
     }
-    await printBarcodeLabelsAsync(
-      filtered.map((i) => ({
-        value: i.expiration_date ? `${i.sku}-${i.expiration_date}` : i.sku,
-        title: i.name,
-        subtitle: i.expiration_date
-          ? `${i.category?.name ?? ""} · expires ${fmtDate(i.expiration_date)}`
-          : i.category?.name ?? "",
-      }))
-    );
+    void printCurrentPage();
+  }
+
+  async function printLabels(labels: Parameters<typeof printBarcodeLabelsAsync>[0]) {
+    try {
+      await printBarcodeLabelsAsync(labels);
+    } catch (e: any) {
+      setToast({
+        msg: e.message || "Could not open the barcode print preview.",
+        tone: "error",
+      });
+    }
   }
 
   /** Enter stock count mode — reset any previous counts. */
   function enterStockCountMode() {
-    setCountedQty({});
+    setCountedBatchQty({});
     setStockCountMode(true);
   }
 
   /** Exit stock count mode — discard any counts entered. */
   function exitStockCountMode() {
-    setCountedQty({});
+    setCountedBatchQty({});
     setStockCountMode(false);
   }
 
   /**
-   * Save stock counts: find items where counted quantity differs from system,
-   * confirm with the user, then PATCH each correction.
+   * Save stock counts per batch so one batch's count cannot silently change
+   * another batch's remaining stock.
    */
   async function saveCounts() {
-    const diffs = countableItems
-      .map((item) => {
-        const counted = countedQty[item.id];
-        if (counted === undefined || counted.trim() === "") return null;
+    const diffs: {
+      item: Item;
+      batch: InventoryBatch;
+      countedNum: number;
+    }[] = [];
+    for (const item of countableItems) {
+      for (const batch of item.batches ?? []) {
+        const counted = countedBatchQty[batch.id];
+        if (counted === undefined || counted.trim() === "") continue;
         const countedNum = Number(counted);
-        if (!Number.isFinite(countedNum) || countedNum < 0) return null;
-        if (countedNum !== Number(item.quantity)) {
-          return { item, countedNum };
+        if (!Number.isFinite(countedNum) || countedNum < 0) {
+          setToast({
+            msg: `Enter a valid non-negative count for ${batch.batch_code}.`,
+            tone: "error",
+          });
+          return;
         }
-        return null;
-      })
-      .filter(Boolean) as { item: Item; countedNum: number }[];
+        if (countedNum !== Number(batch.remaining_quantity)) {
+          diffs.push({ item, batch, countedNum });
+        }
+      }
+    }
 
     if (diffs.length === 0) {
       setToast({ msg: "No differences found — nothing to save.", tone: "info" });
@@ -603,40 +815,57 @@ export default function ItemsPage() {
 
     const diffLines = diffs.map(
       (d) =>
-        `• ${d.item.name}: system ${fmtQty(d.item.quantity, d.item.unit)} → counted ${fmtQty(d.countedNum, d.item.unit)}`
+        `• ${d.item.name} — ${d.batch.batch_code}: system ${fmtQty(d.batch.remaining_quantity, d.item.unit)} → counted ${fmtQty(d.countedNum, d.item.unit)}`
     );
-    const proceed = confirm(
-      `Apply ${diffs.length} stock count correction(s)?\n\n${diffLines.join("\n")}\n\nThis will update the system quantities to match the physical counts.`
-    );
-    if (!proceed) return;
-
-    setSavingCounts(true);
-    try {
-      await Promise.all(
-        diffs.map(async (d) => {
-          const res = await fetch(`/api/items/${d.item.id}`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              quantity: d.countedNum,
-              correction_reason: "Stock count",
-            }),
+    setConfirmation({
+      title: `Apply ${diffs.length} stock count correction(s)?`,
+      message:
+        `${diffLines.join("\n")}\n\n` +
+        "This will update the system quantities to match the physical counts.",
+      confirmLabel: "Apply corrections",
+      onConfirm: async () => {
+        setSavingCounts(true);
+        try {
+          const byItem = new Map<string, typeof diffs>();
+          for (const diff of diffs) {
+            const group = byItem.get(diff.item.id) ?? [];
+            group.push(diff);
+            byItem.set(diff.item.id, group);
+          }
+          await Promise.all(
+            [...byItem.values()].map(async (itemDiffs) => {
+              const { item } = itemDiffs[0];
+              const res = await fetch(`/api/items/${item.id}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  batch_adjustments: itemDiffs.map(({ batch, countedNum }) => ({
+                    batch_id: batch.id,
+                    batch_code: batch.batch_code,
+                    previous_quantity: Number(batch.remaining_quantity),
+                    quantity: countedNum,
+                    expiration_date: batch.expiration_date,
+                  })),
+                  correction_reason: "Stock count",
+                }),
+              });
+              const data = await res.json();
+              if (!res.ok) throw new Error(data.error || `Failed to update ${item.name}`);
+            })
+          );
+          setToast({
+            msg: `${diffs.length} batch(es) corrected from stock count.`,
+            tone: "success",
           });
-          const data = await res.json();
-          if (!res.ok) throw new Error(data.error || `Failed to update ${d.item.name}`);
-        })
-      );
-      setToast({
-        msg: `${diffs.length} item(s) updated from stock count.`,
-        tone: "success",
-      });
-      exitStockCountMode();
-      load();
-    } catch (e: any) {
-      setToast({ msg: e.message || "Failed to save stock counts.", tone: "error" });
-    } finally {
-      setSavingCounts(false);
-    }
+          exitStockCountMode();
+          load();
+        } catch (e: any) {
+          setToast({ msg: e.message || "Failed to save stock counts.", tone: "error" });
+        } finally {
+          setSavingCounts(false);
+        }
+      },
+    });
   }
 
   /* In stock count mode, show all filtered items. Previously-visited rows stay
@@ -645,6 +874,19 @@ export default function ItemsPage() {
   const countableItems = filtered;
 
   if (loading) return <Spinner />;
+
+  const hasBatchCountChanges = Boolean(
+    editing?.batches?.some(
+      (batch) =>
+        Number(batchCounts[batch.id] ?? batch.remaining_quantity) !==
+        Number(batch.remaining_quantity)
+    )
+  );
+  const batchCountTotal = editing?.batches?.reduce((total, batch) => {
+    const raw = batchCounts[batch.id] ?? String(batch.remaining_quantity);
+    const quantity = Number(raw);
+    return total + (raw.trim() !== "" && Number.isFinite(quantity) && quantity >= 0 ? quantity : 0);
+  }, 0);
 
   return (
     <div className="space-y-5">
@@ -755,7 +997,7 @@ export default function ItemsPage() {
           <div className="space-y-2.5 lg:hidden">
             {filtered.map((i) => {
               const status = stockStatus(i.quantity, i.low_stock_threshold);
-              const expiry = expiryStatus(i.expiration_date);
+              const expiry = expirySummary(i);
               return (
                 <DataCard
                   key={i.id}
@@ -804,19 +1046,17 @@ export default function ItemsPage() {
                     <span className="capitalize">{i.physical_form}</span>
                   </DataField>
                   <DataField label="Expiry">
-                    {i.expiration_date ? (
+                    {expiry.text !== "—" ? (
                       <span
                         className={
-                          expiry.key === "expired"
+                          expiry.tone === "expired"
                             ? "font-semibold text-terracotta-700"
-                            : expiry.key === "soon"
+                            : expiry.tone === "soon"
                             ? "text-ochre-700"
                             : ""
                         }
                       >
-                        {fmtDate(i.expiration_date)}
-                        {expiry.key === "expired" && " (expired)"}
-                        {expiry.key === "soon" && ` (${expiry.days}d)`}
+                        {expiry.text}
                       </span>
                     ) : (
                       <span className="text-cocoa-200">—</span>
@@ -875,7 +1115,7 @@ export default function ItemsPage() {
               <tbody>
                 {filtered.map((i) => {
                   const status = stockStatus(i.quantity, i.low_stock_threshold);
-                  const expiry = expiryStatus(i.expiration_date);
+                  const expiry = expirySummary(i);
                   return (
                     <tr
                       key={i.id}
@@ -916,19 +1156,17 @@ export default function ItemsPage() {
                         )}
                       </td>
                       <td className="td">
-                        {i.expiration_date ? (
+                        {expiry.text !== "—" ? (
                           <span
                             className={
-                              expiry.key === "expired"
+                              expiry.tone === "expired"
                                 ? "font-semibold text-terracotta-700"
-                                : expiry.key === "soon"
+                                : expiry.tone === "soon"
                                 ? "text-ochre-700"
                                 : "text-cocoa-500"
                             }
                           >
-                            {fmtDate(i.expiration_date)}
-                            {expiry.key === "expired" && " (expired)"}
-                            {expiry.key === "soon" && ` (${expiry.days}d)`}
+                            {expiry.text}
                           </span>
                         ) : (
                           <span className="text-cocoa-200">—</span>
@@ -976,133 +1214,91 @@ export default function ItemsPage() {
         <Card className="!p-0">
           <div className="border-b border-cream-200 bg-cream-50 p-4">
             <h2 className="text-lg font-semibold text-cocoa-800">Stock Count</h2>
+            <p className="mt-1 text-xs text-cocoa-500">
+              Enter counts by batch. Leave unchanged batches blank; the item total is calculated
+              from its batches.
+            </p>
           </div>
           {countableItems.length > 0 && (
-            <div className="hidden overflow-x-auto lg:block">
-              <table className="w-full">
-                <thead>
-                  <tr className="bg-cream-100/60">
-                    <th className="th">Item Name</th>
-                    <th className="th">Unit</th>
-                    <th className="th text-right">System Quantity</th>
-                    <th className="th text-right">Actual Counted</th>
-                    <th className="th text-center">Accuracy</th>
-                  </tr>
-                </thead>
-                <tbody>
-                {countableItems.map((i) => {
-                  const systemQty = Number(i.quantity);
-                    const counted = countedQty[i.id];
-                    const countedNum = counted !== undefined && counted !== "" ? Number(counted) : null;
-                    let accuracy: string | null = null;
-                    let accuracyTone: "slate" | "green" | "amber" | "red" | "blue" = "slate";
-                    if (countedNum !== null && systemQty > 0) {
-                      const diff = Math.abs(countedNum - systemQty);
-                      const pct = (diff / systemQty) * 100;
-                      if (pct <= 5) { accuracy = "Accurate"; accuracyTone = "green"; }
-                      else if (pct <= 15) { accuracy = "Close"; accuracyTone = "amber"; }
-                      else { accuracy = "Mismatch"; accuracyTone = "red"; }
-                    } else if (countedNum !== null && systemQty === 0) {
-                      accuracy = countedNum > 0 ? "Found stock" : "OK";
-                      accuracyTone = countedNum > 0 ? "green" : "blue";
-                    }
-
-                    return (
-                      <tr key={i.id} className="transition-colors hover:bg-cream-50">
-                        <td className="td font-semibold text-cocoa-800">{i.name}</td>
-                        <td className="td text-cocoa-500">{i.unit}</td>
-                        <td className="td text-right tabular-nums">
-                          {fmtQty(systemQty, i.unit)}
-                        </td>
-                        <td className="td text-right">
-                          <input
-                            type="number"
-                            min="0"
-                            step="1"
-                            className="input max-w-[120px] text-right"
-                            placeholder="—"
-                            value={countedQty[i.id] ?? ""}
-                            onChange={(e) =>
-                              setCountedQty((prev) => ({
-                                ...prev,
-                                [i.id]: e.target.value,
-                              }))
-                            }
-                          />
-                        </td>
-                        <td className="td text-center">
-                          {accuracy !== null ? (
-                        <Badge tone={accuracyTone} variant="tag" className="text-[10px] font-medium">
-                          {accuracy}
-                        </Badge>
-                      ) : (
-                        <span className="text-xs text-cocoa-300">—</span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-                </tbody>
-              </table>
-            </div>
-          )}
-          {countableItems.length > 0 && (
-            <div className="space-y-2.5 p-4 lg:hidden">
-              {countableItems.map((i) => {
-                const systemQty = Number(i.quantity);
-                const counted = countedQty[i.id];
-                const countedNum = counted !== undefined && counted !== "" ? Number(counted) : null;
-                let accuracy: string | null = null;
-                let accuracyTone: "slate" | "green" | "amber" | "red" | "blue" = "slate";
-                if (countedNum !== null && systemQty > 0) {
-                  const diff = Math.abs(countedNum - systemQty);
-                  const pct = (diff / systemQty) * 100;
-                  if (pct <= 5) { accuracy = "Accurate"; accuracyTone = "green"; }
-                  else if (pct <= 15) { accuracy = "Close"; accuracyTone = "amber"; }
-                  else { accuracy = "Mismatch"; accuracyTone = "red"; }
-                } else if (countedNum !== null && systemQty === 0) {
-                  accuracy = countedNum > 0 ? "Found stock" : "OK";
-                  accuracyTone = countedNum > 0 ? "green" : "blue";
-                }
-
-                return (
-                  <div key={i.id} className="rounded-lg border border-cream-200 p-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="font-semibold text-cocoa-800">{i.name}</div>
-                        <div className="mt-0.5 text-xs text-cocoa-400">
-                          Unit: {i.unit} · System: {fmtQty(systemQty, i.unit)}
-                        </div>
-                      </div>
-                      {accuracy !== null && (
-                        <Badge tone={accuracyTone} variant="tag" className="text-[9px] font-medium">
-                          {accuracy}
-                        </Badge>
-                      )}
-                    </div>
-                    <div className="mt-2">
-                      <label className="label text-xs" htmlFor={`counted-${i.id}`}>
-                        Actual Counted (what you physically counted)
-                      </label>
-                      <input
-                        id={`counted-${i.id}`}
-                        type="number"
-                        min="0"
-                        step="1"
-                        className="input"
-                        placeholder="Enter counted quantity"
-                        value={countedQty[i.id] ?? ""}
-                        onChange={(e) =>
-                          setCountedQty((prev) => ({
-                            ...prev,
-                            [i.id]: e.target.value,
-                          }))
-                        }
-                      />
-                    </div>
+            <div className="space-y-3 p-4">
+              {countableItems.map((item) => (
+                <section key={item.id} className="rounded-lg border border-cream-200 p-3">
+                  <div className="mb-2 flex items-baseline justify-between gap-3">
+                    <h3 className="font-semibold text-cocoa-800">{item.name}</h3>
+                    <span className="text-xs text-cocoa-500">
+                      Total {fmtQty(item.quantity, item.unit)} {item.unit}
+                    </span>
                   </div>
-                );
-              })}
+                  {(item.batches ?? []).length === 0 ? (
+                    <p className="text-xs text-cocoa-500">
+                      No batch records. Restock this item to add stock as a batch.
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      {(item.batches ?? []).map((batch) => {
+                        const rawCount = countedBatchQty[batch.id] ?? "";
+                        const counted = rawCount.trim() === "" ? null : Number(rawCount);
+                        const systemQuantity = Number(batch.remaining_quantity);
+                        const difference =
+                          counted === null || !Number.isFinite(counted)
+                            ? null
+                            : counted - systemQuantity;
+                        return (
+                          <div
+                            key={batch.id}
+                            className="grid grid-cols-1 items-center gap-2 rounded-md bg-cream-50 p-2 sm:grid-cols-[minmax(0,1fr)_8rem_auto]"
+                          >
+                            <div className="min-w-0">
+                              <div className="truncate text-xs font-medium text-cocoa-700">
+                                {batch.batch_code}
+                              </div>
+                              <div className="text-[11px] text-cocoa-400">
+                                System {fmtQty(systemQuantity, item.unit)} {item.unit}
+                                {" · "}Expires{" "}
+                                {batch.expiration_date
+                                  ? fmtDate(batch.expiration_date)
+                                  : "no date recorded"}
+                              </div>
+                            </div>
+                            <label className="flex items-center gap-2 text-xs text-cocoa-500">
+                              <span className="sr-only">
+                                Actual count for {item.name}, batch {batch.batch_code}
+                              </span>
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.001"
+                                className="input !py-2 text-right tabular-nums"
+                                placeholder="Count"
+                                value={rawCount}
+                                onChange={(e) =>
+                                  setCountedBatchQty((previous) => ({
+                                    ...previous,
+                                    [batch.id]: e.target.value,
+                                  }))
+                                }
+                              />
+                              {item.unit}
+                            </label>
+                            {difference !== null ? (
+                              <span
+                                className={`text-xs tabular-nums ${
+                                  difference === 0 ? "text-cocoa-400" : "font-semibold text-cocoa-700"
+                                }`}
+                              >
+                                {difference > 0 ? "+" : ""}
+                                {fmtQty(difference, item.unit)}
+                              </span>
+                            ) : (
+                              <span className="text-xs text-cocoa-300">—</span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+              ))}
             </div>
           )}
           {countableItems.length === 0 && (
@@ -1128,8 +1324,27 @@ export default function ItemsPage() {
         open={creating || !!editing}
         onClose={closeForm}
         title={editing ? `Edit — ${editing.name}` : "Add item"}
+        width="max-w-3xl"
+        scrollable
+        footer={
+          <div className="flex justify-end gap-2">
+            <button className="btn-ghost" onClick={closeForm} disabled={saving}>
+              Cancel
+            </button>
+            <button className="btn-primary" onClick={save} disabled={saving}>
+              {saving ? "Saving..." : editing ? "Save changes" : "Create item"}
+            </button>
+          </div>
+        }
       >
-        <div className="space-y-4">
+        <div className="space-y-5">
+          <section className="space-y-4 rounded-2xl border border-cream-200 bg-white p-4 sm:p-5">
+            <div>
+              <h4 className="text-sm font-semibold text-cocoa-800">Item details</h4>
+              <p className="mt-1 text-xs leading-relaxed text-cocoa-500">
+                Keep the item name and storage information up to date.
+              </p>
+            </div>
           <div>
             <label className="label" htmlFor="item-name">
               Item name
@@ -1143,7 +1358,7 @@ export default function ItemsPage() {
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
             <div>
               <label className="label" htmlFor="item-category">
                 Category
@@ -1220,8 +1435,16 @@ export default function ItemsPage() {
               </select>
             </div>
           </div>
+          </section>
 
-          <div className="grid grid-cols-2 gap-3">
+          <section className="space-y-4 rounded-2xl border border-cream-200 bg-white p-4 sm:p-5">
+            <div>
+              <h4 className="text-sm font-semibold text-cocoa-800">Product details</h4>
+              <p className="mt-1 text-xs leading-relaxed text-cocoa-500">
+                Set how this item is measured and represented in inventory.
+              </p>
+            </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
             <div>
               <label className="label" htmlFor="item-physical-form">
                 Physical form
@@ -1309,25 +1532,43 @@ export default function ItemsPage() {
               </select>
             </div>
           </div>
+          </section>
 
-          <div className="grid grid-cols-2 gap-3">
+          <section className="space-y-4 rounded-2xl border border-cream-200 bg-white p-4 sm:p-5">
             <div>
-              {/* Associated with htmlFor rather than merely sitting beside the
-                  input: an unassociated label is announced as unlabelled by a
-                  screen reader, and it is the only thing that lets the browser
-                  test find this exact field instead of guessing by position. */}
-              <label className="label" htmlFor="item-quantity">
-                {editing ? "Quantity on hand (correction)" : "Starting quantity"}
-              </label>
-              <input
-                id="item-quantity"
-                className="input"
-                type="number"
-                min="0"
-                step="0.001"
-                value={form.quantity}
-                onChange={(e) => setForm({ ...form, quantity: e.target.value })}
-              />
+              <h4 className="text-sm font-semibold text-cocoa-800">Stock levels</h4>
+              <p className="mt-1 text-xs leading-relaxed text-cocoa-500">
+                The item total is calculated from its batches. Correct a physical count on the
+                specific batch below.
+              </p>
+            </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
+            <div>
+              {editing ? (
+                <>
+                  <span className="label">Total on hand</span>
+                  <div className="input flex items-center bg-cream-50 tabular-nums">
+                    {batchCountTotal === undefined
+                      ? fmtQty(editing.quantity, editing.unit)
+                      : fmtQty(batchCountTotal, editing.unit)}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <label className="label" htmlFor="item-quantity">
+                    Starting quantity
+                  </label>
+                  <input
+                    id="item-quantity"
+                    className="input"
+                    type="number"
+                    min="0"
+                    step="0.001"
+                    value={form.quantity}
+                    onChange={(e) => setForm({ ...form, quantity: e.target.value })}
+                  />
+                </>
+              )}
             </div>
             <div>
               <label className="label" htmlFor="item-threshold">
@@ -1347,10 +1588,77 @@ export default function ItemsPage() {
             </div>
           </div>
 
-          {editing && Number(form.quantity) !== Number(editing.quantity) && (
+          {editing && (
+            <div className="space-y-3 rounded-xl border border-cream-200 bg-cream-50/60 p-4">
+              <div>
+                <h3 className="text-sm font-semibold text-cocoa-800">Correct stock by batch</h3>
+                <p className="mt-1 text-xs text-cocoa-500">
+                  An increase is recorded as a separate adjustment batch with the same expiry
+                  date.
+                </p>
+              </div>
+              {(editing.batches ?? []).length === 0 ? (
+                <p className="text-xs text-cocoa-500">
+                  No batches are recorded for this item. Use Restock to add stock as a new batch.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {(editing.batches ?? []).map((batch) => (
+                    <div
+                      key={batch.id}
+                      className="grid grid-cols-1 items-center gap-2 rounded-lg border border-cream-200 bg-white p-3 sm:grid-cols-[minmax(0,1fr)_8rem]"
+                    >
+                      <div className="min-w-0">
+                        <div className="truncate text-xs font-semibold text-cocoa-700">
+                          {batch.batch_code}
+                        </div>
+                        <div className="mt-0.5 text-[11px] text-cocoa-400">
+                          Expires {batch.expiration_date ? fmtDate(batch.expiration_date) : "no date recorded"}
+                          {" · "}Received {fmtDate(batch.received_at)}
+                          {" · "}Current {fmtQty(batch.remaining_quantity, editing.unit)}
+                        </div>
+                        {batch.source_type === "adjustment" && (
+                          <div className="mt-0.5 text-[11px] text-cocoa-500">
+                            Stock correction adjustment
+                            {batch.adjustment_reason ? `: ${batch.adjustment_reason}` : ""}
+                          </div>
+                        )}
+                      </div>
+                      <label className="flex items-center gap-2 text-xs text-cocoa-500">
+                        <span className="sr-only">Corrected quantity for {batch.batch_code}</span>
+                        <input
+                          className="input !py-2 text-right tabular-nums"
+                          type="number"
+                          min="0"
+                          step="0.001"
+                          value={batchCounts[batch.id] ?? String(batch.remaining_quantity)}
+                          onChange={(e) =>
+                            setBatchCounts((current) => ({
+                              ...current,
+                              [batch.id]: e.target.value,
+                            }))
+                          }
+                        />
+                        <span className="shrink-0">{editing.unit}</span>
+                      </label>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          </section>
+
+          {editing && hasBatchCountChanges && (
+            <section className="rounded-2xl border border-ochre-200 bg-ochre-50/40 p-4 sm:p-5">
             <div>
+              <h4 className="text-sm font-semibold text-cocoa-800">Why is the stock changing?</h4>
+              <p className="mt-1 text-xs text-cocoa-500">
+                A reason is required and will be saved with this correction.
+              </p>
+            </div>
               <label className="label" htmlFor="item-correction-reason">
-                Stock correction reason
+                Batch stock correction reason
               </label>
               <textarea
                 id="item-correction-reason"
@@ -1361,9 +1669,16 @@ export default function ItemsPage() {
                 placeholder="Explain why the recorded quantity is being corrected"
                 required
               />
-            </div>
+            </section>
           )}
 
+        <section className="space-y-4 rounded-2xl border border-cream-200 bg-white p-4 sm:p-5">
+          <div>
+            <h4 className="text-sm font-semibold text-cocoa-800">Ordering details</h4>
+            <p className="mt-1 text-xs leading-relaxed text-cocoa-500">
+              Optional supplier and planning values for purchasing and forecasting.
+            </p>
+          </div>
         <div>
           <label className="label" htmlFor="item-units-per-box">
             Units per box (optional)
@@ -1384,7 +1699,7 @@ export default function ItemsPage() {
           </p>
         </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
             <div>
               <label className="label" htmlFor="item-unit-price">
                 <Tooltip label="Unit Price (optional)" tip="Cost per unit in PHP. Used for waste cost tracking in monthly analytics." />
@@ -1439,8 +1754,15 @@ export default function ItemsPage() {
               />
             </div>
           </div>
+        </section>
 
-          <div className="space-y-3">
+          <section className="space-y-3 rounded-2xl border border-cream-200 bg-white p-4 sm:p-5">
+            <div>
+              <h4 className="text-sm font-semibold text-cocoa-800">Expiration tracking</h4>
+              <p className="mt-1 text-xs leading-relaxed text-cocoa-500">
+                Choose whether this item needs expiration tracking.
+              </p>
+            </div>
             <div className="flex items-center gap-2">
               <input
                 id="item-expirable"
@@ -1475,7 +1797,7 @@ export default function ItemsPage() {
                 </p>
               </div>
             )}
-          </div>
+          </section>
 
           {editing && (
             <p className="text-[11px] text-cocoa-400">
@@ -1490,14 +1812,6 @@ export default function ItemsPage() {
             </div>
           )}
 
-          <div className="flex justify-end gap-2 pt-1">
-            <button className="btn-ghost" onClick={closeForm} disabled={saving}>
-              Cancel
-            </button>
-            <button className="btn-primary" onClick={save} disabled={saving}>
-              {saving ? "Saving..." : editing ? "Save changes" : "Create item"}
-            </button>
-          </div>
         </div>
       </Modal>
 
@@ -1506,48 +1820,171 @@ export default function ItemsPage() {
         open={!!labelItem}
         onClose={() => setLabelItem(null)}
         title={labelItem ? `Barcode label — ${labelItem.name}` : ""}
-        width="max-w-sm"
+        width="max-w-lg"
+        scrollable
       >
         {labelItem && (
           <div className="flex flex-col items-center gap-4">
-            <BarcodeView
-              value={labelItem.expiration_date ? `${labelItem.sku}-${labelItem.expiration_date}` : labelItem.sku}
-              width={260}
-              label={`Barcode for ${labelItem.name}`}
-            />
             <div className="text-center">
               <div className="text-sm font-semibold text-cocoa-800">{labelItem.name}</div>
               <div className="text-xs text-cocoa-400">
                 {labelItem.category?.name ?? "Uncategorized"} ·{" "}
                 {fmtQty(labelItem.quantity, labelItem.unit)} on hand
               </div>
-              {labelItem.expiration_date && (
-                <div className="mt-1 text-xs text-cocoa-400">
-                  Expires: {fmtDate(labelItem.expiration_date)}
-                </div>
-              )}
             </div>
-            <button
-              className="btn-primary w-full"
-              onClick={() =>
-                printBarcodeLabelsAsync([
-                  {
-                    value: labelItem.expiration_date
-                      ? `${labelItem.sku}-${labelItem.expiration_date}`
-                      : labelItem.sku,
-                    title: labelItem.name,
-                    subtitle: labelItem.expiration_date
-                      ? `${labelItem.category?.name ?? "Uncategorized"} · expires ${fmtDate(labelItem.expiration_date)}`
-                      : labelItem.category?.name ?? "",
-                  },
-                ])
-              }
-            >
-              Print this label
-            </button>
+            {activeBatchLabels(labelItem).length > 0 ? (
+              <div className="w-full space-y-3">
+                <p className="text-center text-xs text-cocoa-500">
+                  Each barcode below identifies one exact batch and its expiry.
+                </p>
+                {activeBatchLabels(labelItem).map(({ batch, label }) => (
+                  <div
+                    key={batch.id}
+                    className="flex flex-col items-center gap-3 rounded-xl border border-cream-200 bg-cream-50 p-3"
+                  >
+                    <BarcodeView
+                      value={label.value}
+                      width={300}
+                      label={`Barcode for ${labelItem.name}, ${
+                        batch.expiration_date
+                          ? `expires ${fmtDate(batch.expiration_date)}`
+                          : "no expiry date"
+                      }`}
+                    />
+                    <div className="text-center text-xs text-cocoa-500">
+                      {label.subtitle}
+                    </div>
+                    <button
+                      type="button"
+                      className="btn-ghost min-h-[40px] w-full !py-2 text-sm"
+                      onClick={() => void printLabels([label])}
+                    >
+                      Print this batch
+                    </button>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  className="btn-primary w-full"
+                  onClick={() =>
+                    void printLabels(activeBatchLabels(labelItem).map(({ label }) => label))
+                  }
+                >
+                  Print all active batch labels
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-col items-center gap-3">
+                <BarcodeView
+                  value={labelItem.sku}
+                  width={260}
+                  label={`Product barcode for ${labelItem.name}`}
+                />
+                <p className="text-center text-xs text-cocoa-400">
+                  Product barcode only; there are no active batches to label.
+                </p>
+                <button
+                  type="button"
+                  className="btn-primary w-full"
+                  onClick={() =>
+                    void printLabels([
+                      {
+                        value: labelItem.sku,
+                        title: labelItem.name,
+                        subtitle: labelItem.category?.name ?? "",
+                      },
+                    ])
+                  }
+                >
+                  Print product label
+                </button>
+              </div>
+            )}
           </div>
         )}
       </Modal>
+
+      <Modal
+        open={!!pendingDelete}
+        onClose={() => {
+          if (deleting) return;
+          setPendingDelete(null);
+          setDeletePassword("");
+          setDeleteError(null);
+        }}
+        title="Confirm item deletion"
+        tone="danger"
+        footer={
+          <div className="flex justify-center gap-2">
+            <button
+              type="button"
+              className="btn-ghost"
+              disabled={deleting}
+              onClick={() => {
+                setPendingDelete(null);
+                setDeletePassword("");
+                setDeleteError(null);
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              form="delete-item-form"
+              className="btn-danger"
+              disabled={deleting || !deletePassword}
+            >
+              {deleting ? "Deleting..." : "Confirm deletion"}
+            </button>
+          </div>
+        }
+      >
+        {pendingDelete && (
+          <form id="delete-item-form" className="space-y-4" onSubmit={confirmDelete}>
+            <p className="text-sm leading-relaxed text-cocoa-600">
+              Deleting <strong>{pendingDelete.name}</strong> cannot be undone. Enter your
+              password to confirm this sensitive action.
+            </p>
+            <div>
+              <label className="label" htmlFor="delete-item-password">
+                Your password
+              </label>
+              <input
+                autoFocus
+                id="delete-item-password"
+                className="input"
+                type="password"
+                autoComplete="current-password"
+                value={deletePassword}
+                onChange={(event) => {
+                  setDeletePassword(event.target.value);
+                  setDeleteError(null);
+                }}
+                required
+              />
+            </div>
+            {deleteError && (
+              <p role="alert" className="text-sm font-medium text-terracotta-700">
+                {deleteError}
+              </p>
+            )}
+          </form>
+        )}
+      </Modal>
+
+      <ConfirmDialog
+        open={!!confirmation}
+        title={confirmation?.title ?? ""}
+        message={confirmation?.message ?? ""}
+        confirmLabel={confirmation?.confirmLabel}
+        tone={confirmation?.tone}
+        onCancel={() => setConfirmation(null)}
+        onConfirm={() => {
+          const confirm = confirmation?.onConfirm;
+          setConfirmation(null);
+          confirm?.();
+        }}
+      />
 
       <Toast
         message={toast?.msg ?? null}

@@ -9,7 +9,7 @@ import numpy as np
 from ai_edge_litert.interpreter import Interpreter
 
 
-MAX_FRAMES = 3
+MAX_FRAMES = 6
 MAX_IMAGE_BYTES = 180_000
 FACE_SIZE = 80
 
@@ -90,7 +90,7 @@ def main():
     if len(sys.argv) != 4:
         fail("Liveness runtime was not configured.")
 
-    payload = json.loads(sys.stdin.buffer.read(800_000))
+    payload = json.loads(sys.stdin.buffer.read(1_000_000))
     frames = payload.get("frames")
     engine = payload.get("engine")
     if not isinstance(frames, list) or not 1 <= len(frames) <= MAX_FRAMES:

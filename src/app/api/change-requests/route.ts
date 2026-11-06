@@ -19,14 +19,25 @@ export const GET = handler(async (req: Request) => {
   const status = searchParams.get("status") ?? "pending";
   const mine = searchParams.get("requested_by") === "me";
 
+  if (searchParams.get("pending_count") === "1") {
+    const { count, error } = await db()
+      .from("item_change_requests")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "pending");
+    if (error) return fail(error.message, 500);
+
+    return ok({ pendingCount: count ?? 0 });
+  }
+
   let query = db()
     .from("item_change_requests")
     .select(
       `id, item_id, requested_by, requested_at, status, reviewed_by, reviewed_at,
        review_note, base_version, name, category_id, location_id, physical_form,
        supplier_id, supplier:suppliers(id, name), unit, units_per_box, quantity,
-       low_stock_threshold, expiration_date, correction_reason,
-       item:items(id, sku, name)`
+       low_stock_threshold, expiration_date, expirable, batch_adjustments,
+       correction_reason,
+       item:items(id, sku, name, unit)`
     )
     .order("requested_at", { ascending: false });
 

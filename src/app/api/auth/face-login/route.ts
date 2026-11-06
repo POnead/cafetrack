@@ -3,13 +3,24 @@ import { handler, ok, fail, readBody, clientIp } from "@/lib/api";
 import {
   signSession,
   setSessionCookie,
+  hasActiveSession,
   deactivatedMessage,
 } from "@/lib/auth";
 import { audit } from "@/lib/audit";
-import { getSessionMinutes, getFaceEngine, getFaceLoginEnabled, getFaceMatchThreshold, getFaceRequireProfileAngles } from "@/lib/settings";
-import { PRIMARY_POSE, parseEmbedding, parseFaceEvidence, parseFaceFrames } from "@/lib/face";
-import { evaluatePresentation } from "@/lib/face-samples";
-import { verifyFacePresentation } from "@/lib/face-liveness";
+import { getSessionMinutes, getFaceEngine, getFaceLoginEnabled, getFaceMatchThreshold } from "@/lib/settings";
+import {
+  PRIMARY_POSE,
+  type FacePose,
+  parseEmbedding,
+  parseFaceBlinkEvidence,
+  parseFaceEvidence,
+  parseFaceFrames,
+  type FaceFrameInput,
+} from "@/lib/face";
+import {
+  facePlusPlusMode,
+  verifyFacePlusPlusLogin,
+} from "@/lib/facepp";
 import { recordFaceVerification } from "@/lib/face-gate";
 import { getIdGate } from "@/lib/id-gate";
 import {
@@ -39,14 +50,20 @@ export const runtime = "nodejs";
  * to draw is this one.
  */
 export const GET = handler(async () => {
-  return ok({ enabled: await getFaceLoginEnabled() });
+  return ok({
+    enabled: await getFaceLoginEnabled(),
+    facePlusPlusConfigured: facePlusPlusMode() === "enabled",
+  });
 });
 
 /**
  * Sign in with a face instead of a password.
  *
- *   POST { identifier: "CT-STF-…" | "username", embedding: [128 numbers] }
+ *   POST { identifier, face_images, blink_evidence }
  *   ->   { user, session_conflict }
+ *
+ * `face_images` is `{ front, left, right }`. The local test harness may instead
+ * send `face_frames` with embeddings; that path never runs in production.
  *
  * **The identifier is required, and that is the whole design.**
  *
@@ -72,12 +89,12 @@ export const GET = handler(async () => {
  *   2. Unknown account, malformed vector and unrecognised face all return the
  *      *same* answer. Any difference between them is a way to learn which
  *      accounts exist, or whether a particular photograph worked.
- *   3. The threshold comes from settings. Never from the request.
+ *   3. The Face++ confidence cutoff is fixed server-side, never from the request.
  *
- * Note what this endpoint does not do: it does not accept a photo. The browser
- * computes the embedding with the recognition model and sends 128 floats, so a
- * photograph of a staff member is never transmitted here. The one copy on disk
- * is the reference the admin enrolled.
+ * The frames are short-lived camera evidence. In production, Face++ Detect
+ * verifies the pose and the submitted blink sequence, and Face++ Compare checks
+ * the front-facing frame against the account's saved reference. Local matching
+ * and liveness are available only in the isolated test harness.
  */
 export const POST = handler(async (req: Request) => {
   /*
@@ -93,6 +110,23 @@ export const POST = handler(async (req: Request) => {
   }
 
   const body = await readBody(req);
+  const facePlusPlus = facePlusPlusMode();
+  const testLocalMatcher =
+    process.env.CAFETRACK_TEST_FACE_LIVENESS === "1" &&
+    process.env.NODE_ENV !== "production";
+  if (facePlusPlus !== "enabled" && !testLocalMatcher) {
+    if (facePlusPlus === "invalid") {
+      console.error("Face++ credentials are incomplete; refusing face sign-in.");
+      return fail(
+        "Face++ verification is not configured correctly. Use your password or scan your badge.",
+        503
+      );
+    }
+    return fail(
+      "Face++ verification is not configured. Use your password or scan your badge.",
+      503
+    );
+  }
 
   const identifier = String(body.identifier ?? "").trim();
 
@@ -151,68 +185,115 @@ export const POST = handler(async (req: Request) => {
   }
 
   /*
-   * A malformed vector is answered exactly like an unrecognised face.
-   *
-   * It is also a bad request rather than an identity failure, and it would be
-   * reasonable to say so — but "that face could not be read" beside "that face
-   * was not recognised" is a free signal that the submitted vector was well
-   * formed, which is exactly the oracle rule 2 above exists to prevent.
-   *
-   * `face_frames` carries the whole presentation — one frame per angle. A bare
-   * `embedding` is still one straight-on frame, so a page that was already open
-   * when the angles shipped keeps working.
+   * Production sends only images. The local vector path remains isolated to the
+   * test harness so the live identity and blink decisions are made by Face++.
    */
-  const legacy = parseEmbedding(body.embedding);
-  const parsedFrames = parseFaceFrames(body.face_frames);
-  const singleEvidence = parseFaceEvidence(body.face_evidence);
-  const candidateFrames = parsedFrames.ok
-    ? parsedFrames.frames
-    : legacy && singleEvidence
-      ? [{ pose: PRIMARY_POSE, embedding: legacy, evidence: singleEvidence }]
-      : null;
+  const blinkEvidence = parseFaceBlinkEvidence(body.blink_evidence);
+  let frames: FaceFrameInput[] = [];
+  let frontImage: string | null = null;
+  let leftImage: string | null = null;
+  let rightImage: string | null = null;
+  let sidePose: FacePose | null = null;
 
-  if (!candidateFrames) {
-    await recordLoginAttempt(key, FACE_LOGIN_METHOD, false);
-    await audit(
-      null,
-      "LOGIN_FAILED",
-      "user",
-      null,
-      { method: FACE_LOGIN_METHOD, reason: "malformed_embedding" },
-      { critical: false, ip: clientIp(req), outcome: "failed" }
-    );
-    return fail(UNRECOGNISED, 401);
-  }
+  if (testLocalMatcher) {
+    const legacy = parseEmbedding(body.embedding);
+    const parsedFrames = parseFaceFrames(body.face_frames);
+    const singleEvidence = parseFaceEvidence(body.face_evidence);
+    const candidateFrames = parsedFrames.ok
+      ? parsedFrames.frames
+      : legacy && singleEvidence
+        ? [{ pose: PRIMARY_POSE, embedding: legacy, evidence: singleEvidence }]
+        : null;
+    const sideCandidates =
+      candidateFrames?.filter((frame) => frame.pose === "left" || frame.pose === "right") ?? [];
+    const hasFrontAndSide =
+      candidateFrames?.length === 2 &&
+      candidateFrames.some((frame) => frame.pose === PRIMARY_POSE) &&
+      sideCandidates.length === 1;
 
-  const engine = await getFaceEngine();
-  const threshold = await getFaceMatchThreshold(engine);
-  const liveness = await verifyFacePresentation(candidateFrames, engine);
-  if (!liveness.ok) {
-    if (liveness.reason === "unavailable") {
-      return fail(
-        "Face liveness is not available on this server. Use your password or scan your badge.",
-        503
-      );
+    if (!candidateFrames || !blinkEvidence || !hasFrontAndSide) {
+      await recordLoginAttempt(key, FACE_LOGIN_METHOD, false);
+      return fail(UNRECOGNISED, 401);
     }
 
+    frames = candidateFrames;
+    sidePose = sideCandidates[0]?.pose ?? null;
+  } else {
+    const images = body.face_images;
+    const imageRecord =
+      images && typeof images === "object" && !Array.isArray(images)
+        ? (images as Record<string, unknown>)
+        : null;
+    frontImage = parseFaceEvidence(imageRecord?.front);
+    leftImage = parseFaceEvidence(imageRecord?.left);
+    rightImage = parseFaceEvidence(imageRecord?.right);
+    if (!frontImage || !leftImage || !rightImage || !blinkEvidence) {
+      await recordLoginAttempt(key, FACE_LOGIN_METHOD, false);
+      return fail(UNRECOGNISED, 401);
+    }
+  }
+
+  if (!blinkEvidence) {
     await recordLoginAttempt(key, FACE_LOGIN_METHOD, false);
     await audit(
       null,
       "LOGIN_FAILED",
       "user",
       null,
-      { method: FACE_LOGIN_METHOD, reason: "liveness_failed" },
+      { method: FACE_LOGIN_METHOD, reason: "malformed_presentation" },
       { critical: false, ip: clientIp(req), outcome: "failed" }
     );
     return fail(UNRECOGNISED, 401);
   }
-  const frames = liveness.frames;
+
+  const engine = testLocalMatcher ? await getFaceEngine() : null;
+  const threshold = engine ? await getFaceMatchThreshold(engine) : 0;
+  if (testLocalMatcher) {
+    const { verifyFacePresentation } = await import("@/lib/face-liveness");
+    const frontFrame = frames.find((frame) => frame.pose === PRIMARY_POSE);
+    if (!frontFrame) {
+      await recordLoginAttempt(key, FACE_LOGIN_METHOD, false);
+      return fail(UNRECOGNISED, 401);
+    }
+    const liveness = await verifyFacePresentation(
+      [
+        ...frames,
+        { ...frontFrame, evidence: blinkEvidence.before },
+        { ...frontFrame, evidence: blinkEvidence.closed },
+        { ...frontFrame, evidence: blinkEvidence.after },
+      ],
+      engine ?? "sface"
+    );
+    if (!liveness.ok) {
+      if (liveness.reason === "unavailable") {
+        return fail(
+          "Face liveness is not available on this server. Use your password or scan your badge.",
+          503
+        );
+      }
+
+      await recordLoginAttempt(key, FACE_LOGIN_METHOD, false);
+      await audit(
+        null,
+        "LOGIN_FAILED",
+        "user",
+        null,
+        { method: FACE_LOGIN_METHOD, reason: "liveness_failed" },
+        { critical: false, ip: clientIp(req), outcome: "failed" }
+      );
+      return fail(UNRECOGNISED, 401);
+    }
+    frames = liveness.frames.slice(0, frames.length);
+  }
+
+  sidePose =
+    sidePose ?? frames.find((frame) => frame.pose === "left" || frame.pose === "right")?.pose ?? null;
 
   const { data: user, error: lookupError } = await db()
     .from("users")
     .select(
       "id, username, full_name, role, is_active, deactivation_reason, " +
-      "deactivated_at, session_token, face_embedding, face_enabled, " +
+      "deactivated_at, session_token, session_last_active_at, face_embedding, face_image, face_enabled, " +
       // For the ID gate. See getIdGate for why these two columns and no more.
       "verification_status, id_doc_front"
     )
@@ -239,31 +320,133 @@ export const POST = handler(async (req: Request) => {
    * exist. Matching first means this branch is only reachable by someone who has
    * already proved they are that person.
    */
-  /*
-   * Matched against every angle on the account, after the lookup and before
-   * anything about the account's state is revealed — see the note above about
-   * the oracle.
-   */
-  const presentation = await evaluatePresentation({
-    userId: user.id,
-    legacyEmbedding: user.face_embedding ?? null,
-    frames,
-    threshold,
-    requireProfileAngles: await getFaceRequireProfileAngles(),
-    engine,
-  });
+  // Match every presented pose before revealing anything about the account.
+  let matched = false;
+  let hasFaceSamples = true;
+  let facePlusPlusUnavailable = false;
+  let facePlusPlusBlinkRejected = false;
+  let facePlusPlusPoseRejected = false;
+  let facePlusPlusFaceRejected = false;
+  let facePlusPlusIdentityRejected = false;
+  let facePlusPlusResponded = false;
+  const matchLocally = async () => {
+    const { evaluatePresentation } = await import("@/lib/face-samples");
+    const presentation = await evaluatePresentation({
+      userId: user.id,
+      legacyEmbedding: user.face_embedding ?? null,
+      frames,
+      threshold,
+      requireProfileAngles: false,
+      requiredPoses: [PRIMARY_POSE, sidePose ?? "left"],
+      engine: engine ?? "sface",
+    });
+    matched = presentation.matched;
+    hasFaceSamples = presentation.samples.length > 0;
+  };
 
-  if (!presentation.matched) {
+  if (facePlusPlus === "enabled") {
+    const referenceImage =
+      typeof user.face_image === "string" && user.face_image.startsWith("data:image/")
+        ? user.face_image
+        : null;
+    hasFaceSamples = referenceImage !== null;
+    if (referenceImage && frontImage && leftImage && rightImage) {
+      const verification = await verifyFacePlusPlusLogin({
+        referenceImage,
+        frontImage,
+        leftImage,
+        rightImage,
+        blinkEvidence,
+      });
+      const { steps } = verification;
+      console.info(
+        `[Face++ face-login] Detect ${steps.detect}; pose ${steps.pose}; blink ${steps.blink}; Compare ${steps.compare}.`
+      );
+      facePlusPlusResponded = Object.values(steps).some(
+        (step) => step === "passed" || step === "failed"
+      );
+      facePlusPlusUnavailable = verification.status === "unavailable";
+      facePlusPlusBlinkRejected = verification.reason === "blink_not_verified";
+      facePlusPlusPoseRejected = verification.reason === "pose_not_verified";
+      facePlusPlusFaceRejected = verification.reason === "face_not_detected";
+      facePlusPlusIdentityRejected = verification.reason === "identity_not_matched";
+      matched = verification.status === "matched";
+      if (verification.status === "unavailable") {
+        console.error(
+          `[Face++ face-login] Provider unavailable (${verification.code ?? "unknown"}).`
+        );
+      }
+    } else if (!referenceImage) {
+      console.info("[Face++ face-login] Compare not run: saved account photo unavailable.");
+    }
+  } else {
+    // The isolated route-test harness explicitly opts into this path; production
+    // face sign-in is blocked above unless Face++ is configured and enabled.
+    await matchLocally();
+  }
+
+  if (facePlusPlusUnavailable) {
+    return fail(
+      "Face++ could not complete verification. Use your password or scan your badge and try face sign-in again later.",
+      503,
+      { facePlusPlus: { status: "unavailable" } }
+    );
+  }
+
+  if (!matched) {
     await recordLoginAttempt(key, FACE_LOGIN_METHOD, false);
     await audit(
       { id: user.id, username: user.username, fullName: user.full_name, role: "staff" },
       "LOGIN_FAILED",
       "user",
       user.id,
-      { method: FACE_LOGIN_METHOD, reason: "no_match" },
+      {
+        method: FACE_LOGIN_METHOD,
+        reason: facePlusPlusBlinkRejected
+          ? "blink_not_verified"
+          : facePlusPlusPoseRejected
+            ? "face_pose_not_verified"
+            : facePlusPlusFaceRejected
+              ? "face_not_detected"
+              : facePlusPlusIdentityRejected
+                ? "identity_not_matched"
+                : "no_match",
+      },
       { critical: false, ip: clientIp(req), outcome: "failed" }
     );
-    return fail(UNRECOGNISED, 401);
+    if (facePlusPlusBlinkRejected) {
+      return fail(
+        "Face++ did not verify an open, closed, open eye sequence. Please capture the blink again.",
+        401,
+        facePlusPlusResponded ? { facePlusPlus: { status: "responded" } } : undefined
+      );
+    }
+    if (facePlusPlusPoseRejected) {
+      return fail(
+        "Face++ could not confirm the straight-on and turned-head poses. Follow the prompts and try again.",
+        401,
+        facePlusPlusResponded ? { facePlusPlus: { status: "responded" } } : undefined
+      );
+    }
+    if (facePlusPlusFaceRejected) {
+      return fail(
+        "Face++ could not find exactly one clear face in every frame. Center your face and retake the scan.",
+        401,
+        facePlusPlusResponded ? { facePlusPlus: { status: "responded" } } : undefined
+      );
+    }
+    if (facePlusPlusIdentityRejected) {
+      return fail(
+        "Face++ compared the live face with the saved account photo but did not find a match. Retake the front-facing photo in good lighting.",
+        401,
+        facePlusPlusResponded ? { facePlusPlus: { status: "responded" } } : undefined
+      );
+    }
+    return fail(
+      UNRECOGNISED,
+      401,
+      facePlusPlusResponded ? { facePlusPlus: { status: "responded" } } : undefined
+    );
   }
 
   if (!user.is_active) {
@@ -316,7 +499,7 @@ export const POST = handler(async (req: Request) => {
    * account's own holder something they need to know, and an admin, rather than
    * silently signing someone in against a face the cafe has since withdrawn.
    */
-  if (!user.face_enabled || presentation.samples.length === 0) {
+  if (!user.face_enabled || !hasFaceSamples) {
     await recordLoginAttempt(key, FACE_LOGIN_METHOD, false);
     return fail(
       "Face sign-in is not available on this account. Ask an administrator, or sign in with your password.",
@@ -360,9 +543,16 @@ export const POST = handler(async (req: Request) => {
     { ip: clientIp(req), outcome: "success" }
   );
 
-  const hadPreviousSession = Boolean(user.session_token);
+  const hadPreviousSession = await hasActiveSession(
+    user.session_token,
+    user.session_last_active_at
+  );
 
-  return ok({ user: session, session_conflict: hadPreviousSession });
+  return ok({
+    user: session,
+    session_conflict: hadPreviousSession,
+    facePlusPlus: facePlusPlus === "enabled" ? { status: "passed" } : undefined,
+  });
 });
 
 /**

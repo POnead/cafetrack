@@ -13,6 +13,7 @@ import {
 } from "@/components/ui";
 import { fmtQty, fmtDate, daysUntil, toCsv } from "@/lib/format";
 import { stockStatus } from "@/lib/status";
+import { TRANSACTION_NOTE_SCHEMA_WARNING } from "@/lib/transaction-note-schema";
 
 const TRANSACTION_PAGE_SIZE = 500;
 
@@ -36,7 +37,12 @@ type Txn = {
   actor_name: string;
   note: string | null;
   created_at: string;
-  transaction_items: { sku: string; item_name: string; quantity: number }[] | null;
+  transaction_items: {
+    sku: string;
+    item_name: string;
+    quantity: number;
+    note: string | null;
+  }[] | null;
 };
 
 const MOVEMENT_LABEL: Record<string, string> = {
@@ -64,6 +70,7 @@ export default function ReportsPage() {
   const [txns, setTxns] = useState<Txn[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [transactionNotesAvailable, setTransactionNotesAvailable] = useState(true);
   const [toast, setToast] = useState<{
     msg: string;
     tone: "info" | "error" | "success";
@@ -115,6 +122,7 @@ export default function ReportsPage() {
       const loadAllTransactions = async () => {
         const all: Txn[] = [];
         let offset = 0;
+        let notesAvailable = true;
 
         while (true) {
           const qs = new URLSearchParams({
@@ -133,8 +141,11 @@ export default function ReportsPage() {
           }
 
           const page: Txn[] = data.transactions ?? [];
+          if (data.transactionNotesAvailable === false) notesAvailable = false;
           all.push(...page);
-          if (page.length < TRANSACTION_PAGE_SIZE) return all;
+          if (page.length < TRANSACTION_PAGE_SIZE) {
+            return { transactions: all, notesAvailable };
+          }
           offset += page.length;
         }
       };
@@ -151,7 +162,8 @@ export default function ReportsPage() {
       if (i.error) throw new Error(i.error);
 
       setItems(i.items ?? []);
-      setTxns(transactionRows);
+      setTxns(transactionRows.transactions);
+      setTransactionNotesAvailable(transactionRows.notesAvailable);
 
       // Advisory only: a failure here must not take the whole report down.
       fetch("/api/settings")
@@ -377,7 +389,7 @@ export default function ReportsPage() {
             Expiry: "",
             Status: "",
             "Days to expiry": "",
-            Note: transaction.note ?? "",
+            Note: [transaction.note, line.note].filter(Boolean).join("\n"),
           };
         })
     );
@@ -712,6 +724,11 @@ export default function ReportsPage() {
       {error && (
         <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
           {error}
+        </div>
+      )}
+      {!transactionNotesAvailable && (
+        <div className="rounded-xl bg-ochre-50 px-3.5 py-2.5 text-sm text-ochre-700">
+          {TRANSACTION_NOTE_SCHEMA_WARNING}
         </div>
       )}
 

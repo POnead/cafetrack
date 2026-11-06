@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 /* ------------------------------------------------------------------ */
 /* Card                                                               */
@@ -28,12 +29,14 @@ export function Card({
 export function DataCard({
   children,
   className = "",
+  ...props
 }: {
   children: ReactNode;
   className?: string;
+  "data-cart-sku"?: string;
 }) {
   return (
-    <div className={`card space-y-2.5 p-4 lg:hidden ${className}`}>
+    <div {...props} className={`card space-y-2.5 p-4 lg:hidden ${className}`}>
       {children}
     </div>
   );
@@ -222,6 +225,7 @@ export function Modal({
   width = "max-w-lg",
   scrollable = false,
   footer,
+  tone = "default",
 }: {
   open: boolean;
   onClose: () => void;
@@ -230,7 +234,19 @@ export function Modal({
   width?: string;
   scrollable?: boolean;
   footer?: ReactNode;
+  tone?: "default" | "warning" | "danger";
 }) {
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (open && mounted && scrollable) contentRef.current?.scrollTo(0, 0);
+  }, [open, mounted, scrollable, title]);
+
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -240,20 +256,37 @@ export function Modal({
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
-  if (!open) return null;
+  if (!open || !mounted) return null;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-cocoa-900/40 p-4 pt-16 backdrop-blur-[2px]">
+  const accent = {
+    default: "bg-cream-500",
+    warning: "bg-ochre-500",
+    danger: "bg-terracotta-500",
+  }[tone];
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-cocoa-900/55 p-4 backdrop-blur-[3px]">
       <div
-        className={`w-full ${width} card overflow-hidden !p-0 shadow-warm-lg ${
-          scrollable ? "flex max-h-[calc(100dvh-5rem)] flex-col" : ""
-        }`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="modal-title"
+        className={`relative my-auto flex max-h-[calc(100dvh-2rem)] w-full ${width} flex-col overflow-hidden rounded-[24px] border border-cream-200 bg-white shadow-[0_24px_70px_rgba(61,43,31,0.24)]`}
       >
-        <div className="flex items-center justify-between border-b border-cream-200 bg-cream-50 px-5 py-3.5">
-          <h3 className="text-sm font-bold text-cocoa-800">{title}</h3>
+        <div className={`h-1 w-full ${accent}`} />
+        <div className="relative flex shrink-0 items-center justify-between border-b border-cream-200 bg-cream-50 px-5 py-4">
+          <h3
+            id="modal-title"
+            className={`text-base font-bold text-cocoa-800 ${
+              tone === "default" ? "" : "mx-auto text-center"
+            }`}
+          >
+            {title}
+          </h3>
           <button
             onClick={onClose}
-            className="rounded-full p-1.5 text-cocoa-300 transition-colors hover:bg-cream-200 hover:text-cocoa-600"
+            className={`rounded-full p-1.5 text-cocoa-300 transition-colors hover:bg-cream-200 hover:text-cocoa-600 ${
+              tone === "default" ? "" : "absolute right-4"
+            }`}
             aria-label="Close"
           >
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -266,7 +299,10 @@ export function Modal({
             </svg>
           </button>
         </div>
-        <div className={`p-5 ${scrollable ? "min-h-0 flex-1 overflow-y-auto" : ""}`}>
+        <div
+          ref={contentRef}
+          className="min-h-0 flex-1 overflow-y-auto p-5"
+        >
           {children}
         </div>
         {footer && (
@@ -275,7 +311,66 @@ export function Modal({
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
+  );
+}
+
+export function ConfirmDialog({
+  open,
+  onCancel,
+  onConfirm,
+  title,
+  message,
+  confirmLabel = "Continue",
+  tone = "warning",
+}: {
+  open: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  tone?: "warning" | "danger";
+}) {
+  return (
+    <Modal
+      open={open}
+      onClose={onCancel}
+      title={title}
+      width="max-w-md"
+      tone={tone}
+      footer={
+        <div className="flex justify-center gap-2">
+          <button type="button" className="btn-ghost" onClick={onCancel}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className={tone === "danger" ? "btn-danger" : "btn-primary"}
+            onClick={onConfirm}
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      }
+    >
+      <div className="space-y-3 text-center">
+        <span
+          aria-hidden="true"
+          className={`mx-auto flex h-14 w-14 items-center justify-center rounded-full text-xl font-bold ${
+            tone === "danger"
+              ? "bg-terracotta-50 text-terracotta-700"
+              : "bg-ochre-50 text-ochre-700"
+          }`}
+        >
+          !
+        </span>
+        <p className="whitespace-pre-line text-sm leading-relaxed text-cocoa-600">
+          {message}
+        </p>
+      </div>
+    </Modal>
   );
 }
 
@@ -289,35 +384,64 @@ export function Toast({
   onDone,
 }: {
   message: string | null;
-  tone?: "info" | "error" | "success";
+  tone?: "info" | "error" | "success" | "warning";
   onDone: () => void;
 }) {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!message) return;
-    timer.current = setTimeout(onDone, 4000);
+    timer.current = setTimeout(onDone, tone === "warning" ? 5200 : 4000);
     return () => {
       if (timer.current) clearTimeout(timer.current);
     };
-  }, [message, onDone]);
+  }, [message, onDone, tone]);
 
   if (!message) return null;
 
-  // 700 steps again — the toast is white text on a solid fill, the same
-  // contrast constraint as the Stat pill above.
   const tones = {
-    info: "bg-cocoa-700",
-    error: "bg-terracotta-700",
-    success: "bg-sage-700",
+    info: "bg-cream-100 text-cocoa-700 ring-cream-300",
+    error: "bg-terracotta-50 text-terracotta-700 ring-terracotta-100",
+    success: "bg-sage-50 text-sage-700 ring-sage-100",
+    warning: "bg-ochre-50 text-ochre-700 ring-ochre-100",
   };
+  const mark = {
+    info: "i",
+    error: "!",
+    success: "✓",
+    warning: "!",
+  }[tone];
 
   return (
-    <div className="fixed bottom-5 left-1/2 z-[60] -translate-x-1/2">
+    <div className="fixed bottom-5 left-1/2 z-[60] w-[calc(100%-2rem)] max-w-md -translate-x-1/2 sm:left-auto sm:right-5 sm:translate-x-0">
       <div
-        className={`${tones[tone]} rounded-full px-5 py-2.5 text-sm font-medium text-white shadow-warm-lg`}
+        role={tone === "error" || tone === "warning" ? "alert" : "status"}
+        aria-live={tone === "error" || tone === "warning" ? "assertive" : "polite"}
+        aria-atomic="true"
+        className={`flex items-center gap-3 rounded-2xl px-4 py-3 text-sm font-semibold shadow-warm-lg ring-1 ${tones[tone]}`}
       >
-        {message}
+        <span
+          aria-hidden="true"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white/80 text-sm font-extrabold"
+        >
+          {mark}
+        </span>
+        <span className="min-w-0 flex-1">{message}</span>
+        <button
+          type="button"
+          onClick={onDone}
+          aria-label="Dismiss notification"
+          className="shrink-0 rounded-full p-1.5 opacity-65 transition hover:bg-black/5 hover:opacity-100"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path
+              d="M4 4l8 8M12 4l-8 8"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+            />
+          </svg>
+        </button>
       </div>
     </div>
   );

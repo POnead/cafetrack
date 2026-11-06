@@ -20,6 +20,7 @@ import { assertTestTarget } from "./_guard.mjs";
 import { stubControl, resolveStubControlUrl, STUB_USER } from "./_smtp-stub.mjs";
 
 const BASE = process.env.BASE_URL || "http://localhost:3101";
+const ADMIN_PASSWORD = process.env.SEED_ADMIN_PASSWORD || "admin123";
 
 /*
  * Where the control API is has to be discovered, not assumed.
@@ -51,6 +52,13 @@ function section(t) {
 }
 
 async function call(method, path, body, cookie) {
+  if (
+    method === "DELETE" &&
+    path.startsWith("/api/items/") &&
+    (body == null || (typeof body === "object" && Object.keys(body).length === 0))
+  ) {
+    body = { password: ADMIN_PASSWORD };
+  }
   const r = await fetch(BASE + path, {
     method,
     headers: {
@@ -162,7 +170,7 @@ try {
 
   const login = await call("POST", "/api/auth/login", {
     username: "admin",
-    password: "admin123",
+    password: ADMIN_PASSWORD,
   });
   const A = (login.headers.getSetCookie?.() ?? []).map((c) => c.split(";")[0]).join("; ");
   check("admin login", login.status === 200);

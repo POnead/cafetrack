@@ -320,6 +320,8 @@ export async function evaluatePresentation(args: {
   frames: readonly FaceFrameInput[];
   threshold: number;
   requireProfileAngles: boolean;
+  /** Override the gallery's required poses for flows with a narrower policy. */
+  requiredPoses?: readonly FacePose[];
   /** Only samples from this engine may be compared against. */
   engine: FaceEngine;
   /**
@@ -332,7 +334,9 @@ export async function evaluatePresentation(args: {
 }): Promise<PresentationResult> {
   const samples = await loadFaceSamples(args.userId, args.legacyEmbedding);
   const gallery = galleryFor(samples, args.engine, args.version ?? descriptorVersionFor(args.engine));
-  const required = posesRequired(gallery, args.requireProfileAngles);
+  const required = args.requiredPoses
+    ? [...args.requiredPoses]
+    : posesRequired(gallery, args.requireProfileAngles);
 
   const result = matchPresentation(args.frames, gallery, required, args.threshold);
 

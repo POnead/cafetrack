@@ -17,7 +17,22 @@ type Item = {
   unit: string;
   low_stock_threshold: number;
   expiration_date: string | null;
+  batches?: {
+    id: string;
+    batch_code: string;
+    remaining_quantity: number;
+    expiration_date: string | null;
+  }[];
   category: { name: string } | null;
+};
+
+type ExpiringBatchRow = {
+  id: string;
+  name: string;
+  batchCode: string | null;
+  quantity: number;
+  unit: string;
+  days: number;
 };
 
 type Txn = {
@@ -154,6 +169,15 @@ export default function DashboardPage() {
     );
     const out = items.filter((i) => Number(i.quantity) <= 0);
     const expired = items.filter((i) => {
+      const activeBatches = (i.batches ?? []).filter(
+        (batch) => Number(batch.remaining_quantity) > 0
+      );
+      if (activeBatches.length > 0) {
+        return activeBatches.some((batch) => {
+          const days = daysUntil(batch.expiration_date);
+          return days !== null && days < 0;
+        });
+      }
       const d = daysUntil(i.expiration_date);
       return d !== null && d < 0;
     });
@@ -199,11 +223,34 @@ export default function DashboardPage() {
   /* Soonest expiries, including already-expired */
   // An unparseable date sorts last rather than being treated as 0 days, which
   // would put it at the top of "soonest expiring" wearing an "Expired" label.
-  const expiring = useMemo(
+  const expiring = useMemo<ExpiringBatchRow[]>(
     () =>
       items
-        .filter((i) => i.expiration_date)
-        .map((i) => ({ ...i, days: daysUntil(i.expiration_date) ?? Number.POSITIVE_INFINITY }))
+        .flatMap((item): ExpiringBatchRow[] => {
+          const batches = (item.batches ?? []).filter(
+            (batch) => Number(batch.remaining_quantity) > 0 && batch.expiration_date
+          );
+          if (batches.length > 0) {
+            return batches.map((batch) => ({
+              id: `${item.id}-${batch.id}`,
+              name: item.name,
+              batchCode: batch.batch_code,
+              quantity: batch.remaining_quantity,
+              unit: item.unit,
+              days: daysUntil(batch.expiration_date) ?? Number.POSITIVE_INFINITY,
+            }));
+          }
+          return Number(item.quantity) > 0 && item.expiration_date
+            ? [{
+                id: item.id,
+                name: item.name,
+                batchCode: null,
+                quantity: item.quantity,
+                unit: item.unit,
+                days: daysUntil(item.expiration_date) ?? Number.POSITIVE_INFINITY,
+              }]
+            : [];
+        })
         .sort((a, b) => a.days - b.days)
         .slice(0, 4),
     [items]
@@ -216,7 +263,7 @@ export default function DashboardPage() {
   return (
     <div>
       <div className="space-y-6">
-        <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h1 className="text-2xl font-bold tracking-tight text-cocoa-900 sm:text-3xl">
               Inventory Dashboard
@@ -224,6 +271,26 @@ export default function DashboardPage() {
             <p className="mt-1 text-sm text-cocoa-400">
               Merrylane Cafe Foodhub
             </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Link
+              href="/checkout"
+              className="btn-ghost border-cream-300 bg-cream-50 shadow-sm transition-all hover:-translate-y-0.5 hover:border-cream-400 hover:bg-white hover:shadow-warm"
+            >
+              Open Checkout
+            </Link>
+            <Link
+              href="/items"
+              className="btn-ghost border-cream-300 bg-cream-50 shadow-sm transition-all hover:-translate-y-0.5 hover:border-cream-400 hover:bg-white hover:shadow-warm"
+            >
+              Manage Items
+            </Link>
+            <Link
+              href="/alerts"
+              className="btn-ghost border-cream-300 bg-cream-50 shadow-sm transition-all hover:-translate-y-0.5 hover:border-cream-400 hover:bg-white hover:shadow-warm"
+            >
+              View Alerts
+            </Link>
           </div>
         </div>
 
@@ -271,7 +338,7 @@ export default function DashboardPage() {
           <Stat label="Total Items" value={stats.total} />
           <Stat label="Low Stocks" value={stats.low.length} tone="warn" />
           <Stat label="Out of Stock" value={stats.out.length} tone="danger" />
-          <Stat label="Expired items" value={stats.expired.length} tone="danger" />
+          <Stat label="Items with expired batches" value={stats.expired.length} tone="danger" />
         </div>
 
         {/* ---- illustration + card grid ---- */}
@@ -346,21 +413,28 @@ export default function DashboardPage() {
             </MiniCard>
 
             {/* Expiring Soon */}
-            <MiniCard title="Expiring Soon" href="/alerts">
+            <MiniCard title="Batch Expiry" href="/alerts">
               {expiring.length === 0 ? (
                 <Empty>Nothing expiring soon.</Empty>
               ) : (
                 <table className="w-full">
                   <thead>
                     <tr>
-                      <th className="th !px-0 !py-1.5">Item Name</th>
-                      <th className="th !px-0 !py-1.5 text-right">Days left</th>
+                      <th className="th !px-0 !py-1.5">Item / Batch</th>
+                      <th className="th !px-0 !py-1.5 text-right">Expiry</th>
                     </tr>
                   </thead>
                   <tbody>
                     {expiring.map((i) => (
                       <tr key={i.id}>
-                        <td className="td !px-0 !py-1.5 text-cocoa-800">{i.name}</td>
+                        <td className="td !px-0 !py-1.5 text-cocoa-800">
+                          <div>{i.name}</div>
+                          {i.batchCode && (
+                            <div className="text-[10px] text-cocoa-400">
+                              {i.batchCode} · {fmtQty(i.quantity, i.unit)}
+                            </div>
+                          )}
+                        </td>
                         <td
                           className={`td !px-0 !py-1.5 text-right font-semibold tabular-nums ${
                             i.days < 0 ? "text-terracotta-700" : "text-ochre-700"
@@ -407,18 +481,6 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* ---- shortcut strip ---- */}
-        <div className="flex flex-wrap gap-2">
-          <Link href="/checkout" className="btn-primary">
-            Open Checkout
-          </Link>
-          <Link href="/items" className="btn-ghost">
-            Manage Items
-          </Link>
-          <Link href="/alerts" className="btn-ghost">
-            View Alerts
-          </Link>
-        </div>
       </div>
     </div>
   );

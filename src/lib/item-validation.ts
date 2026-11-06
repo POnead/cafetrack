@@ -57,6 +57,13 @@ export function parseExpiryDate(raw: unknown): string | null {
   return s;
 }
 
+export function parseBoolean(raw: unknown, label: string): boolean {
+  if (typeof raw !== "boolean") {
+    throw new FieldError(`${label} must be true or false`);
+  }
+  return raw;
+}
+
 /** Positive integer within an inclusive range; used for thresholds. */
 export function parseThreshold(raw: unknown, label: string): number {
   if (raw === null || raw === undefined || raw === "") return 5;

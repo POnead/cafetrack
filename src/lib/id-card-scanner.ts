@@ -14,8 +14,8 @@ type OpenCvBootstrap = {
 let openCvPromise: Promise<CV> | null = null;
 
 const DETECT_EDGE = 320;
-const CARD_OUTPUT_WIDTH = 1024;
-const CARD_OUTPUT_HEIGHT = 646;
+const CARD_OUTPUT_MIN_WIDTH = 640;
+const CARD_OUTPUT_MAX_WIDTH = 1600;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -105,6 +105,29 @@ function distance(a: CardPoint, b: CardPoint): number {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
+export function cardFrameArea(corners: CardCorners): number {
+  let twiceArea = 0;
+  for (let index = 0; index < corners.length; index++) {
+    const current = corners[index];
+    const next = corners[(index + 1) % corners.length];
+    twiceArea += current.x * next.y - next.x * current.y;
+  }
+  return Math.abs(twiceArea) / 2;
+}
+
+export function cardHasSafeMargin(corners: CardCorners): boolean {
+  return corners.every(
+    (point) => point.x >= 0.02 && point.x <= 0.98 && point.y >= 0.02 && point.y <= 0.98
+  );
+}
+
+export function cardDistanceState(corners: CardCorners): "too-small" | "too-close" | "ok" {
+  const area = cardFrameArea(corners);
+  if (area < 0.025) return "too-small";
+  if (area > 0.82 || !cardHasSafeMargin(corners)) return "too-close";
+  return "ok";
+}
+
 export async function detectIdCard(video: HTMLVideoElement): Promise<CardCorners | null> {
   if (!video.videoWidth || !video.videoHeight) return null;
 
@@ -119,6 +142,7 @@ export async function detectIdCard(video: HTMLVideoElement): Promise<CardCorners
   const cv = await loadOpenCv();
   const source = cv.imread(canvas);
   const gray = new cv.Mat();
+  const normalized = new cv.Mat();
   const blurred = new cv.Mat();
   const edges = new cv.Mat();
   const contours = new cv.MatVector();
@@ -127,7 +151,8 @@ export async function detectIdCard(video: HTMLVideoElement): Promise<CardCorners
 
   try {
     cv.cvtColor(source, gray, cv.COLOR_RGBA2GRAY);
-    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+    cv.normalize(gray, normalized, 0, 255, cv.NORM_MINMAX);
+    cv.GaussianBlur(normalized, blurred, new cv.Size(5, 5), 0);
     cv.Canny(blurred, edges, 55, 150);
     cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
 
@@ -137,7 +162,7 @@ export async function detectIdCard(video: HTMLVideoElement): Promise<CardCorners
       const polygon = new cv.Mat();
       try {
         const area = Math.abs(cv.contourArea(contour));
-        if (area < frameArea * 0.18 || area > frameArea * 0.96) continue;
+        if (area < frameArea * 0.025 || area > frameArea * 0.96) continue;
 
         cv.approxPolyDP(contour, polygon, cv.arcLength(contour, true) * 0.02, true);
         if (polygon.rows !== 4 || !cv.isContourConvex(polygon)) continue;
@@ -166,6 +191,7 @@ export async function detectIdCard(video: HTMLVideoElement): Promise<CardCorners
         ) {
           best = { corners, area, aspectPenalty };
         }
+
       } finally {
         polygon.delete();
         contour.delete();
@@ -180,6 +206,7 @@ export async function detectIdCard(video: HTMLVideoElement): Promise<CardCorners
   } finally {
     source.delete();
     gray.delete();
+    normalized.delete();
     blurred.delete();
     edges.delete();
     contours.delete();
@@ -211,8 +238,6 @@ export async function captureRectifiedIdFrame(
   let sourcePoints: InstanceType<typeof cv.Mat> | null = null;
   let destinationPoints: InstanceType<typeof cv.Mat> | null = null;
   const output = document.createElement("canvas");
-  output.width = CARD_OUTPUT_WIDTH;
-  output.height = CARD_OUTPUT_HEIGHT;
 
   try {
     const scaled = corners.map((point) => ({
@@ -225,6 +250,18 @@ export async function captureRectifiedIdFrame(
       sideHeight > topWidth
         ? [scaled[3], scaled[0], scaled[1], scaled[2]]
         : scaled;
+    const sourceWidth = (distance(points[0], points[1]) + distance(points[2], points[3])) / 2;
+    const sourceHeight = (distance(points[1], points[2]) + distance(points[3], points[0])) / 2;
+    const outputWidth = Math.max(
+      CARD_OUTPUT_MIN_WIDTH,
+      Math.min(CARD_OUTPUT_MAX_WIDTH, Math.round(sourceWidth))
+    );
+    const outputHeight = Math.max(
+      Math.round(outputWidth * sourceHeight / Math.max(sourceWidth, 1)),
+      Math.round(outputWidth / 1.585)
+    );
+    output.width = outputWidth;
+    output.height = Math.min(CARD_OUTPUT_MAX_WIDTH, outputHeight);
     sourcePoints = cv.matFromArray(
       4,
       1,
@@ -234,19 +271,19 @@ export async function captureRectifiedIdFrame(
     destinationPoints = cv.matFromArray(4, 1, cv.CV_32FC2, [
       0,
       0,
-      CARD_OUTPUT_WIDTH - 1,
+      outputWidth - 1,
       0,
-      CARD_OUTPUT_WIDTH - 1,
-      CARD_OUTPUT_HEIGHT - 1,
+      outputWidth - 1,
+      output.height - 1,
       0,
-      CARD_OUTPUT_HEIGHT - 1,
+      output.height - 1,
     ]);
     transform = cv.getPerspectiveTransform(sourcePoints, destinationPoints);
     cv.warpPerspective(
       source,
       destination,
       transform,
-      new cv.Size(CARD_OUTPUT_WIDTH, CARD_OUTPUT_HEIGHT),
+      new cv.Size(outputWidth, output.height),
       cv.INTER_CUBIC,
       cv.BORDER_REPLICATE,
       new cv.Scalar()

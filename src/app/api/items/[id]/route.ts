@@ -1,6 +1,6 @@
 import { db } from "@/lib/supabase";
 import { handler, ok, fail, badId, readBody, clientIp } from "@/lib/api";
-import { requireUser } from "@/lib/auth";
+import { requireUser, verifyPassword } from "@/lib/auth";
 import { canManageItems } from "@/lib/permissions";
 import { audit } from "@/lib/audit";
 import { eventBus, Events } from "@/lib/events";
@@ -8,10 +8,17 @@ import { memoClear } from "@/lib/ttl-cache";
 import { requireDutyVerified } from "@/lib/face-gate";
 import { dispatchSoon } from "@/lib/email";
 import {
+  checkLoginThrottle,
+  recordLoginAttempt,
+  tooManyAttempts,
+  userKey,
+} from "@/lib/rate-limit";
+import {
   FieldError,
   requireQuantity,
   parseThreshold,
   parseExpiryDate,
+  parseBoolean,
   parsePhysicalForm,
   parseUnitsPerBox,
   parseUnitPrice,
@@ -61,6 +68,46 @@ export const PATCH = handler(
     if (malformed) return malformed;
 
     const body = await readBody(req);
+    const batchCorrectionReason =
+      typeof body.correction_reason === "string" ? body.correction_reason.trim() : "";
+    let batchAdjustments:
+      | { batch_id: string; quantity: number; batch_code?: string; previous_quantity?: number; expiration_date?: string | null }[]
+      | null = null;
+    if (body.batch_adjustments !== undefined) {
+      if (!Array.isArray(body.batch_adjustments) || body.batch_adjustments.length === 0) {
+        return fail("Select at least one batch quantity to correct");
+      }
+      if (body.quantity !== undefined) {
+        return fail("Correct stock by batch instead of submitting an item total");
+      }
+      batchAdjustments = [];
+      for (const adjustment of body.batch_adjustments) {
+        const quantity = Number(adjustment?.quantity);
+        const batchId = String(adjustment?.batch_id ?? "").trim();
+        if (!batchId || !Number.isFinite(quantity) || quantity < 0 || quantity > 999999999) {
+          return fail("Each batch needs a valid non-negative quantity");
+        }
+        batchAdjustments.push({
+          batch_id: batchId,
+          quantity,
+          ...(typeof adjustment.batch_code === "string"
+            ? { batch_code: adjustment.batch_code }
+            : {}),
+          ...(adjustment.previous_quantity !== undefined
+            ? { previous_quantity: Number(adjustment.previous_quantity) }
+            : {}),
+          ...(adjustment.expiration_date !== undefined
+            ? { expiration_date: adjustment.expiration_date }
+            : {}),
+        });
+      }
+      if (!batchCorrectionReason) {
+        return fail("Enter a reason for the batch stock correction");
+      }
+      if (batchCorrectionReason.length > 500) {
+        return fail("Stock correction reason must be 500 characters or fewer");
+      }
+    }
 
     const { data: before } = await db()
       .from("items")
@@ -158,6 +205,10 @@ export const PATCH = handler(
       if (body.expiration_date !== undefined) {
         patch.expiration_date = parseExpiryDate(body.expiration_date);
       }
+      if (body.expirable !== undefined) {
+        patch.expirable = parseBoolean(body.expirable, "Expirable");
+        if (!patch.expirable) patch.expiration_date = null;
+      }
       if (body.quantity !== undefined) {
         patch.quantity = requireQuantity(body.quantity, "Quantity");
         // Quantity edits here are corrections, not movements — still versioned.
@@ -210,10 +261,13 @@ export const PATCH = handler(
         "quantity",
         "low_stock_threshold",
         "expiration_date",
+        "expirable",
       ] as const) {
         if (body[key] !== undefined) proposal[key] = patch[key];
       }
+      if (batchAdjustments) proposal.batch_adjustments = batchAdjustments;
       if (quantityCorrectionReason) proposal.correction_reason = quantityCorrectionReason;
+      if (batchAdjustments) proposal.correction_reason = batchCorrectionReason;
 
       const { data, error } = await db()
         .from("item_change_requests")
@@ -242,15 +296,31 @@ export const PATCH = handler(
       }, 201);
     }
 
-    const { data, error } = await db()
-      .from("items")
-      .update(patch)
-      .eq("id", id)
-      .eq("version", before.version)
-      .select()
-      .maybeSingle();
+    let data: any;
+    let error: { message: string } | null;
+    if (batchAdjustments) {
+      const result = await db().rpc("correct_item_batch_counts", {
+        p_item_id: id,
+        p_expected_version: before.version,
+        p_patch: patch,
+        p_batch_adjustments: batchAdjustments,
+        p_reason: batchCorrectionReason,
+      });
+      data = result.data;
+      error = result.error;
+    } else {
+      const result = await db()
+        .from("items")
+        .update(patch)
+        .eq("id", id)
+        .eq("version", before.version)
+        .select()
+        .maybeSingle();
+      data = result.data;
+      error = result.error;
+    }
 
-    if (error) return fail(error.message, 500);
+    if (error) return fail(error.message, batchAdjustments ? 409 : 500);
     if (!data) return fail("Item was modified by someone else. Refresh and retry.", 409);
 
     const changes: Record<string, { from: unknown; to: unknown }> = {};
@@ -260,11 +330,20 @@ export const PATCH = handler(
         changes[key] = { from: (before as any)[key], to: (data as any)[key] };
       }
     }
+    if (batchAdjustments && Number(before.quantity) !== Number(data.quantity)) {
+      changes.quantity = { from: before.quantity, to: data.quantity };
+    }
 
     await audit(user, "ITEM_UPDATE", "item", data.id, {
       sku: data.sku,
       name: data.name,
       changes,
+      ...(batchAdjustments
+        ? {
+            batch_corrections: batchAdjustments,
+            quantity_correction_reason: batchCorrectionReason,
+          }
+        : {}),
       ...(quantityCorrectionReason
         ? { quantity_correction_reason: quantityCorrectionReason }
         : {}),
@@ -312,6 +391,34 @@ export const DELETE = handler(
 
     const malformed = badId(id, "item");
     if (malformed) return malformed;
+
+    const body = await readBody(req);
+    const password = String(body.password ?? "");
+    if (!password) return fail("Enter your password to confirm this deletion", 400);
+
+    const key = userKey(user.username);
+    const throttle = await checkLoginThrottle(key, "admin_password");
+    if (throttle.blocked) {
+      return tooManyAttempts(throttle.retryAfterSeconds, "password attempts");
+    }
+
+    const { data: account, error: accountError } = await db()
+      .from("users")
+      .select("password_hash, is_active")
+      .eq("id", user.id)
+      .maybeSingle();
+    if (accountError) return fail(accountError.message, 500);
+    if (!account?.password_hash || account.is_active === false) {
+      return fail("This account cannot confirm the deletion", 403);
+    }
+    if (!verifyPassword(password, account.password_hash)) {
+      await recordLoginAttempt(key, "admin_password", false);
+      await audit(user, "ITEM_DELETE_DENIED", "item", id, {
+        reason: "bad_password",
+      }, { ip: clientIp(req), outcome: "denied" });
+      return fail("Incorrect password", 401);
+    }
+    await recordLoginAttempt(key, "admin_password", true);
 
     const { data: item } = await db()
       .from("items")

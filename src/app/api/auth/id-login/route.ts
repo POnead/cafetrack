@@ -1,6 +1,11 @@
 import { db } from "@/lib/supabase";
 import { handler, ok, fail, clientIp } from "@/lib/api";
-import { signSession, setSessionCookie, deactivatedMessage } from "@/lib/auth";
+import {
+  signSession,
+  setSessionCookie,
+  hasActiveSession,
+  deactivatedMessage,
+} from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { getFaceEngine, getSessionMinutes, getFaceMatchThreshold } from "@/lib/settings";
 import {
@@ -218,7 +223,7 @@ export const POST = handler(async (req: Request) => {
     .select(
       "id, username, full_name, is_active, role, face_enabled, face_embedding, " +
       "id_card_hash, id_doc_number, verification_status, id_doc_front, " +
-      "deactivation_reason, deactivated_at, session_token"
+      "deactivation_reason, deactivated_at, session_token, session_last_active_at"
     );
 
   if (rowsError) {
@@ -399,7 +404,10 @@ export const POST = handler(async (req: Request) => {
 
   return ok({
     user: session,
-    session_conflict: Boolean(user.session_token),
+    session_conflict: await hasActiveSession(
+      user.session_token,
+      user.session_last_active_at
+    ),
     /*
      * Advisory, and labelled as such on the client. A mismatch here is a sentence
      * for the person who just signed in to glance at, not a rejection.

@@ -24,6 +24,9 @@ let pass = 0;
 let fail = 0;
 
 async function call(method, path, body) {
+  if (method === "DELETE" && path.startsWith("/api/items/") && body === undefined) {
+    body = { password: ADMIN.password };
+  }
   const res = await fetch(BASE + path, {
     method,
     headers: {
@@ -149,7 +152,7 @@ async function main() {
     type: "restock",
     password: ADMIN.password,
     note: "smoke test restock",
-    items: [{ sku: newItem?.sku, qty: 5 }],
+    items: [{ sku: newItem?.sku, qty: 5, note: "smoke test item note\nsecond item note" }],
   });
   check(
     "POST /api/transactions restock -> 201",
@@ -186,7 +189,43 @@ async function main() {
   res = await call("GET", "/api/transactions?limit=5");
   const txns = res.data?.transactions ?? [];
   check("GET /api/transactions", res.status === 200 && txns.length > 0, `${txns.length} rows`);
+  check(
+    "transaction note schema status is reported",
+    res.status === 200 && res.data?.transactionNotesAvailable === true
+  );
   check("history embeds transaction_items array", Array.isArray(txns[0]?.transaction_items));
+  check(
+    "item note persists into transaction history",
+    txns.some((txn) =>
+      txn.transaction_items?.some(
+        (item) =>
+          item.sku === newItem?.sku &&
+          item.note === "smoke test item note\nsecond item note"
+      )
+    )
+  );
+  const localDayStart = new Date();
+  localDayStart.setHours(0, 0, 0, 0);
+  const nextLocalDay = new Date(localDayStart);
+  nextLocalDay.setDate(nextLocalDay.getDate() + 1);
+  const dayQuery = new URLSearchParams({
+    from_at: localDayStart.toISOString(),
+    before: nextLocalDay.toISOString(),
+    limit: "20",
+  });
+  res = await call("GET", `/api/transactions?${dayQuery}`);
+  check(
+    "GET /api/transactions filters by local calendar day",
+    res.status === 200 &&
+      res.data?.transactions?.some((txn) =>
+        txn.transaction_items?.some((item) => item.sku === newItem?.sku)
+      )
+  );
+  res = await call(
+    "GET",
+    "/api/transactions?from_at=not-a-date&before=2026-01-01T00%3A00%3A00.000Z"
+  );
+  check("invalid history date range -> 400", res.status === 400, `got ${res.status}`);
 
   section("alerts");
   res = await call("POST", "/api/alerts");
@@ -197,6 +236,37 @@ async function main() {
   check("GET /api/alerts?status=open", res.status === 200, `${alerts.length} open`);
   check("seeded data raises alerts", alerts.length > 0);
   check("alert embeds its item", alerts[0]?.item?.name !== undefined, alerts[0]?.item?.name || "");
+
+  res = await call("GET", "/api/alerts?unread_count=1");
+  check(
+    "GET /api/alerts?unread_count=1 returns a count",
+    res.status === 200 &&
+      Number.isInteger(res.data?.unreadCount) &&
+      typeof res.data?.persisted === "boolean"
+  );
+  res = await call("PATCH", "/api/alerts");
+  check(
+    "PATCH /api/alerts marks alerts as seen",
+    res.status === 200 &&
+      typeof res.data?.seenAt === "string" &&
+      typeof res.data?.persisted === "boolean"
+  );
+  res = await call("GET", "/api/alerts?unread_count=1");
+  check(
+    "marking alerts seen clears the unread count",
+    res.status === 200 && res.data?.unreadCount === 0,
+    `got ${res.data?.unreadCount}`
+  );
+  res = await call("GET", "/api/items?status=pending&limit=1");
+  check(
+    "pending item query returns total count",
+    res.status === 200 && Number.isInteger(res.data?.total)
+  );
+  res = await call("GET", "/api/change-requests?pending_count=1");
+  check(
+    "pending change-request query returns count",
+    res.status === 200 && Number.isInteger(res.data?.pendingCount)
+  );
 
   if (alerts.length) {
     const alertId = alerts[0].id;
