@@ -2,9 +2,16 @@ import { db } from "@/lib/supabase";
 import { handler, ok, fail, readBody, clientIp } from "@/lib/api";
 import { getSession } from "@/lib/auth";
 import { audit } from "@/lib/audit";
-import { PRIMARY_POSE, parseEmbedding, parseFaceEvidence, parseFaceFrames } from "@/lib/face";
+import {
+  PRIMARY_POSE,
+  parseEmbedding,
+  parseFaceBlinkEvidence,
+  parseFaceEvidence,
+  parseFaceFrames,
+} from "@/lib/face";
 import { evaluatePresentation } from "@/lib/face-samples";
 import { verifyFacePresentation } from "@/lib/face-liveness";
+import { facePlusPlusMode, verifyFacePlusPlusLogin } from "@/lib/facepp";
 import { getFaceEngine, getFaceMatchThreshold, getFaceRequireProfileAngles } from "@/lib/settings";
 import { getFaceStatus, recordFaceVerification } from "@/lib/face-gate";
 import {
@@ -19,12 +26,22 @@ export const runtime = "nodejs";
 /**
  * Confirm a face, and open the duty window.
  *
- *   POST { embedding: [128 numbers] }   ->   { ok, nextDueAt }
+ *   POST {
+ *     face_images: { front, left, right },
+ *     blink_evidence: { before, closed, after },
+ *   }  ->  { ok, nextDueAt }
  *
- * The only route that decides whether a person gets in. The browser computes the
- * embedding with the recognition model and sends the numbers — no image is
- * uploaded here, so a raw photograph of a staff member exists in exactly one
- * place: the reference the admin enrolled.
+ * The only route that decides whether a person gets in.
+ *
+ * In production Face++ makes the whole decision: Detect finds exactly one face
+ * and reads the head pose and eye state in every frame (which is how the
+ * open → closed → open blink is verified), and Compare matches the straight-on
+ * frame against the photo saved on this account. No local recognition model runs
+ * on that path.
+ *
+ * `CAFETRACK_TEST_FACE_LIVENESS=1` (never honoured in production) keeps the
+ * local reader and vector comparison for the isolated test server, so its
+ * synthetic fixtures can exercise this route without calling Face++.
  *
  * Three rules shape what comes back, and all three exist because the obvious
  * version of this endpoint leaks:
@@ -104,125 +121,275 @@ export const POST = handler(async (req: Request) => {
   const body = await readBody(req);
 
   /*
-   * The frames, new format first.
-   *
-   * `face_frames` is one entry per angle the person presented. A body with a
-   * single `embedding` is still accepted and means one straight-on frame: pages
-   * already open on a phone when the angles shipped must keep working, and a
-   * stale tab is not a reason to refuse someone their shift.
+   * The isolated test server keeps the local reader and vector comparison so its
+   * synthetic fixtures can exercise this route without calling Face++. Every
+   * other server uses Face++ for the whole decision.
    */
-  const legacy = parseEmbedding(body.embedding);
-  const parsedFrames = parseFaceFrames(body.face_frames);
-  const singleEvidence = parseFaceEvidence(body.face_evidence);
-  const candidateFrames = parsedFrames.ok
-    ? parsedFrames.frames
-    : legacy && singleEvidence
-      ? [{ pose: PRIMARY_POSE, embedding: legacy, evidence: singleEvidence }]
-      : null;
-
-  if (!candidateFrames) {
-    // A malformed vector is a bad request rather than a failed identity check,
-    // but it is still recorded as a denial: a client posting garbage here
-    // repeatedly is the signature of someone probing the endpoint.
-    await recordFaceAttempt(key, false);
-    await audit(
-      session,
-      "FACE_VERIFY",
-      "user",
-      session.id,
-      { method: "camera", result: "malformed" },
-      { ip: clientIp(req), outcome: "denied", critical: false }
-    );
-    return fail(
-      "That face could not be read. Take the photo again, facing the camera in good light."
-    );
-  }
+  const localTestMode =
+    process.env.CAFETRACK_TEST_FACE_LIVENESS === "1" &&
+    process.env.NODE_ENV !== "production";
 
   const { data: row } = await db()
     .from("users")
-    .select("face_embedding")
+    .select("face_embedding, face_image")
     .eq("id", session.id)
     .maybeSingle();
 
-  // The engine is read once and used for both the threshold and the comparison:
-  // the two are calibrated per engine, so mixing them would apply one model's
-  // tolerance to another model's vectors.
-  const engine = await getFaceEngine();
-  const threshold = await getFaceMatchThreshold(engine);
-  const requireProfileAngles = await getFaceRequireProfileAngles();
-  const liveness = await verifyFacePresentation(candidateFrames, engine);
-  if (!liveness.ok) {
-    if (liveness.reason === "unavailable") {
+  let matched = false;
+  let anglesPresented: string[] = [];
+
+  if (!localTestMode) {
+    /*
+     * Production: Face++ decides. Detect finds exactly one face and reads the
+     * head pose and eye state in every frame, and Compare matches the
+     * straight-on frame with the saved account photo. No local embedding model
+     * is loaded on this path.
+     */
+    const facePlusPlus = facePlusPlusMode();
+    if (facePlusPlus !== "enabled") {
+      console.error(`Face++ duty verification is not ready (${facePlusPlus}).`);
       return fail(
-        "Face liveness is not available on this server. Use your password or ask your manager for an override.",
-        503
+        "Face++ verification is not available. Use your password or ask your manager for an override.",
+        503,
+        { facePlusPlus: { status: "unavailable" } }
       );
     }
-    await recordFaceAttempt(key, false);
-    await audit(
-      session,
-      "FACE_VERIFY",
-      "user",
-      session.id,
-      { method: "camera", result: "liveness_failed" },
-      { ip: clientIp(req), outcome: "denied", critical: false }
+
+    const referenceImage =
+      typeof row?.face_image === "string" &&
+      /^data:image\/(?:jpeg|png);base64,/.test(row.face_image)
+        ? row.face_image
+        : null;
+    if (!referenceImage) {
+      return fail(
+        "The saved account photo is missing or unreadable. Ask an administrator to re-enrol your face.",
+        403,
+        { facePlusPlus: { status: "not_run" } }
+      );
+    }
+
+    const images = body.face_images;
+    const imageRecord =
+      images && typeof images === "object" && !Array.isArray(images)
+        ? (images as Record<string, unknown>)
+        : null;
+    const frontImage = parseFaceEvidence(imageRecord?.front);
+    const leftImage = parseFaceEvidence(imageRecord?.left);
+    const rightImage = parseFaceEvidence(imageRecord?.right);
+    const blinkEvidence = parseFaceBlinkEvidence(body.blink_evidence);
+
+    if (!frontImage || !leftImage || !rightImage || !blinkEvidence) {
+      await recordFaceAttempt(key, false);
+      await audit(
+        session,
+        "FACE_VERIFY",
+        "user",
+        session.id,
+        { method: "camera", result: "malformed" },
+        { ip: clientIp(req), outcome: "denied", critical: false }
+      );
+      return fail(
+        "That face scan is incomplete. Capture the straight-on photo, both head turns and the blink."
+      );
+    }
+
+    const verification = await verifyFacePlusPlusLogin({
+      referenceImage,
+      frontImage,
+      leftImage,
+      rightImage,
+      blinkEvidence,
+    });
+    const { steps } = verification;
+    console.info(
+      `[Face++ verify-face] Detect ${steps.detect}; pose ${steps.pose}; blink ${steps.blink}; Compare ${steps.compare}.`
     );
-    return fail("That face could not be verified as live. Try again, or ask your manager for an override.");
-  }
 
-  /*
-   * Every angle this account owes, against the samples it holds.
-   *
-   * A missing or corrupt reference is a refusal, not a crash and not a match:
-   * evaluatePresentation finds nothing to compare against, so nothing matches.
-   * The gate above already refuses an unenrolled account, so this is only
-   * reachable if the face was removed between the two reads.
-   */
-  const presentation = await evaluatePresentation({
-    userId: session.id,
-    legacyEmbedding: row?.face_embedding ?? null,
-    frames: liveness.frames,
-    threshold,
-    requireProfileAngles,
-    engine,
-  });
+    if (verification.status === "unavailable") {
+      console.error(
+        `[Face++ verify-face] Provider unavailable (${verification.code ?? "unknown"}).`
+      );
+      return fail(
+        "Face++ could not complete verification. Try again in a moment, or ask your manager for an override.",
+        503,
+        { facePlusPlus: { status: "unavailable", steps } }
+      );
+    }
 
-  if (!presentation.matched && presentation.needsEnrolment) {
+    if (verification.status === "rejected") {
+      await recordFaceAttempt(key, false);
+      await audit(
+        session,
+        "FACE_VERIFY",
+        "user",
+        session.id,
+        { method: "camera", result: verification.reason ?? "no_match" },
+        { ip: clientIp(req), outcome: "denied", critical: false }
+      );
+
+      const extra = { facePlusPlus: { status: "responded", steps } };
+
+      if (verification.reason === "blink_not_verified") {
+        return fail(
+          "Face++ did not verify an open, closed, open eye sequence. Capture the blink again.",
+          401,
+          extra
+        );
+      }
+      if (verification.reason === "pose_not_verified") {
+        return fail(
+          "Face++ could not confirm the straight-on and turned-head poses. Follow the prompts and try again.",
+          401,
+          extra
+        );
+      }
+      if (verification.reason === "face_not_detected") {
+        return fail(
+          "Face++ could not find exactly one clear face in every frame. Center your face and retake the scan.",
+          401,
+          extra
+        );
+      }
+      if (verification.reason === "identity_not_matched") {
+        return fail(
+          "Face++ compared the live face with the saved account photo but did not find a match. Retake the front-facing photo in good lighting.",
+          401,
+          extra
+        );
+      }
+      return fail(
+        "That face was not recognised. Try again, or ask your manager for an override.",
+        401,
+        extra
+      );
+    }
+
+    matched = true;
+    anglesPresented = ["front", "side", "blink"];
+  } else {
     /*
-     * Enrolled, but not in the engine now in use. This is the state a cafe is in
-     * between switching engines and re-enrolling each person, and saying "not
-     * recognised" for it would send someone to the camera again and again for a
-     * problem no camera can fix.
+     * The frames, new format first.
+     *
+     * `face_frames` is one entry per angle the person presented. A body with a
+     * single `embedding` is still accepted and means one straight-on frame: pages
+     * already open on a phone when the angles shipped must keep working, and a
+     * stale tab is not a reason to refuse someone their shift.
      */
-    await recordFaceAttempt(key, false);
-    return fail(
-      "Your face on file was recorded with a different face model, so it cannot be " +
-        "compared any more. Ask an administrator to enrol your face again."
-    );
+    const legacy = parseEmbedding(body.embedding);
+    const parsedFrames = parseFaceFrames(body.face_frames);
+    const singleEvidence = parseFaceEvidence(body.face_evidence);
+    const candidateFrames = parsedFrames.ok
+      ? parsedFrames.frames
+      : legacy && singleEvidence
+        ? [{ pose: PRIMARY_POSE, embedding: legacy, evidence: singleEvidence }]
+        : null;
+
+    if (!candidateFrames) {
+      // A malformed vector is a bad request rather than a failed identity check,
+      // but it is still recorded as a denial: a client posting garbage here
+      // repeatedly is the signature of someone probing the endpoint.
+      await recordFaceAttempt(key, false);
+      await audit(
+        session,
+        "FACE_VERIFY",
+        "user",
+        session.id,
+        { method: "camera", result: "malformed" },
+        { ip: clientIp(req), outcome: "denied", critical: false }
+      );
+      return fail(
+        "That face could not be read. Take the photo again, facing the camera in good light."
+      );
+    }
+
+    // The engine is read once and used for both the threshold and the comparison:
+    // the two are calibrated per engine, so mixing them would apply one model's
+    // tolerance to another model's vectors.
+    const engine = await getFaceEngine();
+    const threshold = await getFaceMatchThreshold(engine);
+    const requireProfileAngles = await getFaceRequireProfileAngles();
+    const liveness = await verifyFacePresentation(candidateFrames, engine);
+    if (!liveness.ok) {
+      if (liveness.reason === "unavailable") {
+        return fail(
+          "Face liveness is not available on this server. Use your password or ask your manager for an override.",
+          503
+        );
+      }
+      await recordFaceAttempt(key, false);
+      await audit(
+        session,
+        "FACE_VERIFY",
+        "user",
+        session.id,
+        { method: "camera", result: "liveness_failed" },
+        { ip: clientIp(req), outcome: "denied", critical: false }
+      );
+      return fail("That face could not be verified as live. Try again, or ask your manager for an override.");
+    }
+
+    /*
+     * Every angle this account owes, against the samples it holds.
+     *
+     * A missing or corrupt reference is a refusal, not a crash and not a match:
+     * evaluatePresentation finds nothing to compare against, so nothing matches.
+     * The gate above already refuses an unenrolled account, so this is only
+     * reachable if the face was removed between the two reads.
+     */
+    const presentation = await evaluatePresentation({
+      userId: session.id,
+      legacyEmbedding: row?.face_embedding ?? null,
+      frames: liveness.frames,
+      threshold,
+      requireProfileAngles,
+      engine,
+    });
+
+    if (!presentation.matched && presentation.needsEnrolment) {
+      /*
+       * Enrolled, but not in the engine now in use. This is the state a cafe is in
+       * between switching engines and re-enrolling each person, and saying "not
+       * recognised" for it would send someone to the camera again and again for a
+       * problem no camera can fix.
+       */
+      await recordFaceAttempt(key, false);
+      return fail(
+        "Your face on file was recorded with a different face model, so it cannot be " +
+          "compared any more. Ask an administrator to enrol your face again."
+      );
+    }
+
+    if (!presentation.matched) {
+      await recordFaceAttempt(key, false);
+      await audit(
+        session,
+        "FACE_VERIFY",
+        "user",
+        session.id,
+        // No distance. See rule 1 at the top of this file.
+        {
+          method: "camera",
+          result: "no_match",
+          angles_required: presentation.required,
+          failed_angle: presentation.failedPose,
+        },
+        { ip: clientIp(req), outcome: "denied", critical: false }
+      );
+      return fail(
+        presentation.failedPose && presentation.failedPose !== PRIMARY_POSE
+          ? `That was not recognised on the ${presentation.failedPose} turn. Try again, ` +
+              "taking each photograph as the screen asks for it — or ask your manager for an override."
+          : "That face was not recognised. Try again, or ask your manager for an override."
+      );
+    }
+
+    matched = true;
+    anglesPresented = liveness.frames.map((frame) => frame.pose);
   }
 
-  if (!presentation.matched) {
+  if (!matched) {
     await recordFaceAttempt(key, false);
-    await audit(
-      session,
-      "FACE_VERIFY",
-      "user",
-      session.id,
-      // No distance. See rule 1 at the top of this file.
-      {
-        method: "camera",
-        result: "no_match",
-        angles_required: presentation.required,
-        failed_angle: presentation.failedPose,
-      },
-      { ip: clientIp(req), outcome: "denied", critical: false }
-    );
-    return fail(
-      presentation.failedPose && presentation.failedPose !== PRIMARY_POSE
-        ? `That was not recognised on the ${presentation.failedPose} turn. Try again, ` +
-            "taking each photograph as the screen asks for it — or ask your manager for an override."
-        : "That face was not recognised. Try again, or ask your manager for an override."
-    );
+    return fail("That face was not recognised. Try again, or ask your manager for an override.");
   }
 
   const verifiedAt = await recordFaceVerification(session.id);
@@ -241,7 +408,7 @@ export const POST = handler(async (req: Request) => {
       method: "camera",
       result: "matched",
       duty_hours: dutyHours,
-      angles_presented: liveness.frames.map((f) => f.pose),
+      angles_presented: anglesPresented,
     },
     { ip: clientIp(req), critical: false }
   );
@@ -251,7 +418,7 @@ export const POST = handler(async (req: Request) => {
     required: true,
     verifiedAt,
     dutyHours,
-    anglesChecked: presentation.required,
+    anglesChecked: anglesPresented,
     nextDueAt: new Date(Date.now() + dutyHours * 3_600_000).toISOString(),
   });
 });

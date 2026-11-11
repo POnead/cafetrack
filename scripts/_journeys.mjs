@@ -17,6 +17,7 @@
 
 import { assertTestTarget } from "./_guard.mjs";
 const BASE = process.env.BASE_URL || "http://127.0.0.1:3100";
+const ADMIN_PASSWORD = process.env.SEED_ADMIN_PASSWORD || "admin123";
 
 let pass = 0;
 let fail = 0;
@@ -44,6 +45,12 @@ function day(offset) {
 }
 
 async function call(method, path, body, cookie) {
+  if (method === "DELETE" && path.startsWith("/api/items/") && body === undefined) {
+    body = { password: ADMIN_PASSWORD };
+  }
+  if (method === "DELETE" && path.startsWith("/api/refs/") && body === undefined) {
+    body = { reason: "Journey test cleanup", confirm_password: ADMIN_PASSWORD };
+  }
   const headers = { "content-type": "application/json" };
   if (cookie) headers.cookie = cookie;
   const r = await fetch(BASE + path, {
@@ -65,7 +72,7 @@ async function signInAdmin() {
   return cookieOf(
     await call("POST", "/api/auth/login", {
       username: "admin",
-      password: process.env.SEED_ADMIN_PASSWORD || "admin123",
+      password: ADMIN_PASSWORD,
     })
   );
 }
@@ -155,8 +162,18 @@ async function expiryOf(sku, cookie) {
 
   // The password set at creation above, not the seeded staff password: this
   // journey creates its own account rather than borrowing barista1.
-  const S = await signInStaff(newHire.qr_token, "journey123");
+  await call("PATCH", "/api/settings", { staff_session_timeout_minutes: "12" }, A);
+  const staffLogin = await call("POST", "/api/auth/staff", {
+    token: newHire.qr_token,
+    password: "journey123",
+  });
+  const S = cookieOf(staffLogin);
+  const staffSetCookie = staffLogin.headers.getSetCookie?.()
+    .find((c) => c.startsWith("cafetrack_session="));
+  const staffMaxAge = /Max-Age=(\d+)/i.exec(staffSetCookie ?? "")?.[1];
   check("the new hire signed in with the barcode", Boolean(S));
+  check("the staff cookie honours its separate timeout", Number(staffMaxAge) === 720, `Max-Age=${staffMaxAge ?? "absent"}s`);
+  await call("PATCH", "/api/settings", { staff_session_timeout_minutes: "10" }, A);
 
   r = await call(
     "POST",
@@ -718,8 +735,8 @@ async function expiryOf(sku, cookie) {
   /* ================================================================= */
   section("JOURNEY 5 - the session timeout reaches the cookie");
   /* ================================================================= */
-  r = await call("PATCH", "/api/settings", { session_timeout_minutes: "5" }, A);
-  check("set the session timeout to 5 minutes", r.status === 200, `${r.status} ${r.data?.error ?? ""}`);
+  r = await call("PATCH", "/api/settings", { admin_session_timeout_minutes: "5" }, A);
+  check("set the admin session timeout to 5 minutes", r.status === 200, `${r.status} ${r.data?.error ?? ""}`);
 
   const shortSession = await call("POST", "/api/auth/login", { username: "admin", password: "admin123" });
   const setCookie = shortSession.headers.getSetCookie?.().find((c) => c.startsWith("cafetrack_session="));
@@ -742,19 +759,27 @@ async function expiryOf(sku, cookie) {
    */
   A = cookieOf(shortSession);
 
-  r = await call("PATCH", "/api/settings", { session_timeout_minutes: "5000" }, A);
-  check("an out-of-range timeout is rejected", r.status === 400, `${r.status} ${r.data?.error ?? ""}`);
+  r = await call("PATCH", "/api/settings", { admin_session_timeout_minutes: "5000" }, A);
+  check("an out-of-range admin timeout is rejected", r.status === 400, `${r.status} ${r.data?.error ?? ""}`);
 
-  await call("PATCH", "/api/settings", { session_timeout_minutes: "15" }, A);
+  await call("PATCH", "/api/settings", { staff_session_timeout_minutes: "12" }, A);
   r = await call("GET", "/api/settings", undefined, A);
   check(
-    "the timeout was restored to 15",
-    r.data?.settings?.session_timeout_minutes === "15",
-    r.data?.settings?.session_timeout_minutes ?? "?"
+    "staff timeout is stored separately",
+    r.data?.settings?.staff_session_timeout_minutes === "12",
+    r.data?.settings?.staff_session_timeout_minutes ?? "?"
+  );
+
+  await call("PATCH", "/api/settings", { staff_session_timeout_minutes: "10" }, A);
+  r = await call("GET", "/api/settings", undefined, A);
+  check(
+    "the admin timeout remains unchanged",
+    r.data?.settings?.admin_session_timeout_minutes === "5",
+    r.data?.settings?.admin_session_timeout_minutes ?? "?"
   );
 
   /*
-   * And take a fresh one now the timeout is back to fifteen.
+   * And take a fresh one now the admin timeout is back to five.
    *
    * The cookie rebound above still carries Max-Age=300 from the moment it was
    * issued, and the rest of this file can outlast five minutes on a cold dev

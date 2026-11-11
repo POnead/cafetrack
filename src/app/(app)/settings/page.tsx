@@ -8,19 +8,15 @@
  * storage locations, alert thresholds" and to "configure low-stock thresholds
  * and expiration warning periods" — that is what this page is for.
  *
- * Note the threshold here is the *global* policy (how long before expiry an
- * item warns, how long a session lasts). The per-item low-stock threshold lives
- * on the item itself and is edited on the inventory page, because it depends
- * on what the item is.
+ * The global policies here include expiry warnings and role-specific session
+ * timeouts. Per-item low-stock thresholds live on the inventory page because
+ * they depend on the item.
  */
-import { useEffect, useRef, useState } from "react";
-import { Card, Spinner, Toast, Empty } from "@/components/ui";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Card, ConfirmDialog, Spinner, Toast, Empty } from "@/components/ui";
+import { EmailNotifications } from "@/components/EmailNotifications";
 import { matchThresholdBand } from "@/lib/face";
-import {
-  DEFAULT_ID_MATCH_THRESHOLD,
-  MAX_ID_MATCH_THRESHOLD,
-  MIN_ID_MATCH_THRESHOLD,
-} from "@/lib/id-verification/local";
 
 type Ref = { id: string; name: string; min_shelf_life_days?: number | null };
 type Supplier = { id: string; name: string; contact_name: string | null; phone: string | null; email: string | null };
@@ -32,42 +28,90 @@ type SupplierItem = {
   quantity: number;
   low_stock_threshold: number;
 };
+type StaffPosition = {
+  id: string;
+  name: string;
+  originalName?: string;
+  access: "staff" | "admin";
+  assignedCount?: number;
+};
 type Tone = "info" | "error" | "success";
+type ExpiryPreset = "7" | "15" | "30" | "custom";
+type SettingsTab = "email" | "staff" | "storage" | "suppliers" | "general";
+type RemovalKind = "category" | "location" | "supplier";
+type RemovalTarget = { kind: RemovalKind; id: string; name: string };
 
-const NUMERIC_FIELDS = [
-  {
-    key: "expiry_warning_days",
-    label: "Expiry warning window",
-    hint: "Days before expiry that an item starts raising a near-expiry alert.",
-    min: 1,
-    max: 365,
-  },
-  {
-    key: "session_timeout_minutes",
-    label: "Session timeout",
-    hint: "Minutes of inactivity before a session signs itself out.",
-    min: 1,
-    max: 480,
-  },
+const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
+  { id: "email", label: "Email" },
+  { id: "staff", label: "Staff" },
+  { id: "storage", label: "Storage" },
+  { id: "suppliers", label: "Suppliers" },
+  { id: "general", label: "General" },
+];
+
+const GENERAL_SETTING_DEFAULTS = {
+  expiry_warning_days: "7",
+  admin_session_timeout_minutes: "5",
+  staff_session_timeout_minutes: "10",
+  face_duty_hours: "9",
+  business_name: "Merrylane Cafe Foodhub",
+  password_recovery_email: "",
+};
+
+const GENERAL_SETTING_KEYS = Object.keys(GENERAL_SETTING_DEFAULTS);
+const STAFF_ACCESS_SETTING_KEYS = [
+  "admin_session_timeout_minutes",
+  "staff_session_timeout_minutes",
+  "face_duty_hours",
 ] as const;
 
 export default function SettingsPage() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const recoveryEmailInputRef = useRef<HTMLInputElement | null>(null);
+  const [activeTab, setActiveTab] = useState<SettingsTab>("email");
+  const [focusRecoveryEmail, setFocusRecoveryEmail] = useState(false);
   const [settings, setSettings] = useState<Record<string, string>>({});
+  const [expiryPreset, setExpiryPreset] = useState<ExpiryPreset>("7");
   const [categories, setCategories] = useState<Ref[]>([]);
   const [locations, setLocations] = useState<Ref[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  const [staffPositions, setStaffPositions] = useState<StaffPosition[]>([]);
+  const [newPosition, setNewPosition] = useState("");
+  const [savingPositions, setSavingPositions] = useState(false);
+  const savedStaffPositions = useRef<{ name: string; access: StaffPosition["access"] }[]>([]);
+  const [adminName, setAdminName] = useState("Admin");
+  const [savedAdminName, setSavedAdminName] = useState("Admin");
+  const [savingAdminName, setSavingAdminName] = useState(false);
 
   const [loading, setLoading] = useState(true);
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<{ msg: string; tone: Tone } | null>(null);
+  const [pendingToggle, setPendingToggle] = useState<{
+    key: string;
+    title: string;
+    message: string;
+    confirmLabel: string;
+    onConfirm: () => void;
+  } | null>(null);
 
   const [newCategory, setNewCategory] = useState("");
   const [newLocation, setNewLocation] = useState("");
   const [newSupplier, setNewSupplier] = useState("");
   const [adding, setAdding] = useState<"category" | "location" | "supplier" | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [removalTarget, setRemovalTarget] = useState<RemovalTarget | null>(null);
+  const [removalReason, setRemovalReason] = useState("");
+  const [removalPassword, setRemovalPassword] = useState("");
+  const [removing, setRemoving] = useState(false);
+  const [passwordChange, setPasswordChange] = useState({
+    current: "",
+    next: "",
+    confirm: "",
+  });
+  const [changingPassword, setChangingPassword] = useState(false);
 
   /* Supplier detail is edited in place, and its items are fetched only when
      asked for. Both keep the settings page to one list rather than turning a
@@ -85,6 +129,32 @@ export default function SettingsPage() {
   const [supplierItemsLoading, setSupplierItemsLoading] = useState(false);
 
   const inFlight = useRef(false);
+
+  useEffect(() => {
+    const tabParam = searchParams.get("tab");
+    const focusParam = searchParams.get("focus");
+    if (tabParam === "general" || focusParam === "password_recovery_email") {
+      setActiveTab("general");
+    }
+    if (focusParam === "password_recovery_email") {
+      setFocusRecoveryEmail(true);
+      router.replace("/settings?tab=general", { scroll: false });
+    }
+  }, [router, searchParams]);
+
+  useEffect(() => {
+    if (!focusRecoveryEmail || activeTab !== "general") return;
+
+    const timer = window.setTimeout(() => {
+      const input = recoveryEmailInputRef.current;
+      if (!input) return;
+      input.scrollIntoView({ behavior: "smooth", block: "center" });
+      input.focus({ preventScroll: true });
+      setFocusRecoveryEmail(false);
+    }, 120);
+
+    return () => window.clearTimeout(timer);
+  }, [activeTab, focusRecoveryEmail]);
 
   /*
    * What the database currently holds, as opposed to what the form currently
@@ -112,21 +182,52 @@ export default function SettingsPage() {
       const admin = meData.user?.role === "admin";
       setIsAdmin(admin);
       if (!admin) return;
+      const currentAdminName =
+        typeof meData.user?.fullName === "string" && meData.user.fullName.trim()
+          ? meData.user.fullName.trim()
+          : "Admin";
+      setAdminName(currentAdminName);
+      setSavedAdminName(currentAdminName);
 
-      const [s, c, l, sup] = await Promise.all([
+      const [s, c, l, sup, positions] = await Promise.all([
         fetch("/api/settings").then((r) => r.json()),
         fetch("/api/refs/categories").then((r) => r.json()),
         fetch("/api/refs/locations").then((r) => r.json()),
         fetch("/api/refs/suppliers").then((r) => r.json()),
+        fetch("/api/staff-positions").then((r) => r.json()),
       ]);
 
       if (s.error) throw new Error(s.error);
+      if (positions.error) throw new Error(positions.error);
 
-      setSettings(s.settings ?? {});
-      saved.current = { ...(s.settings ?? {}) };
+      const loadedSettings = {
+        ...GENERAL_SETTING_DEFAULTS,
+        ...(s.settings ?? {}),
+      };
+      setSettings(loadedSettings);
+      setExpiryPreset(
+        loadedSettings.expiry_warning_days === "7" ||
+          loadedSettings.expiry_warning_days === "15" ||
+          loadedSettings.expiry_warning_days === "30"
+          ? loadedSettings.expiry_warning_days
+          : "custom"
+      );
+      saved.current = { ...loadedSettings };
       setCategories(c.items ?? []);
       setLocations(l.items ?? []);
       setSuppliers(sup.items ?? []);
+      const loadedPositions: StaffPosition[] = (
+        (positions.positions ?? []) as Omit<StaffPosition, "id">[]
+      ).map((position) => ({
+        ...position,
+        id: crypto.randomUUID(),
+        originalName: position.name,
+      }));
+      setStaffPositions(loadedPositions);
+      savedStaffPositions.current = loadedPositions.map(({ name, access }) => ({
+        name,
+        access,
+      }));
       setError(null);
     } catch (e: any) {
       setError(e.message || "Could not load settings");
@@ -136,10 +237,68 @@ export default function SettingsPage() {
     }
   }
 
+  async function saveAdminName() {
+    const name = adminName.trim();
+    if (!name) {
+      setToast({ msg: "Enter the admin display name.", tone: "error" });
+      return;
+    }
+    if (name.length > 80) {
+      setToast({ msg: "The admin display name must be 80 characters or fewer.", tone: "error" });
+      return;
+    }
+    if (name === savedAdminName) return;
+
+    setSavingAdminName(true);
+    try {
+      const res = await fetch("/api/admin/profile", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ full_name: name }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not update the admin name");
+      setAdminName(data.user.full_name || "Admin");
+      setSavedAdminName(data.user.full_name || "Admin");
+      setToast({ msg: "Admin name updated", tone: "success" });
+      router.refresh();
+    } catch (error) {
+      setToast({
+        msg: error instanceof Error ? error.message : "Could not update the admin name",
+        tone: "error",
+      });
+    } finally {
+      setSavingAdminName(false);
+    }
+  }
+
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  function askToDisableToggle(
+    key: string,
+    label: string,
+    warning: string,
+    value: string,
+  ) {
+    if (value !== "0") {
+      void saveField(key, value);
+      return;
+    }
+
+    setPendingToggle({
+      key,
+      title: `Turn off ${label}?`,
+      message: warning,
+      confirmLabel: `Turn off ${label}`,
+      onConfirm: () => {
+        setPendingToggle(null);
+        void saveField(key, "0");
+      },
+    });
+  }
 
   async function saveField(key: string, value: string) {
     setSaving(true);
@@ -156,6 +315,7 @@ export default function SettingsPage() {
       // field's precision (see `decimals` in api/settings).
       setSettings((prev) => ({ ...prev, [key]: data.settings[key] }));
       saved.current[key] = data.settings[key];
+      window.dispatchEvent(new Event("cafetrack:settings-updated"));
       setToast({ msg: "Saved", tone: "success" });
     } catch (e: any) {
       setToast({ msg: e.message, tone: "error" });
@@ -166,9 +326,190 @@ export default function SettingsPage() {
     }
   }
 
+  async function saveSpecificGeneralSettings(keys: string[], successMessage: string) {
+    const changes = Object.fromEntries(
+      keys
+        .filter((key) => settings[key] !== saved.current[key])
+        .map((key) => [key, settings[key]])
+    );
+    if (Object.keys(changes).length === 0) return;
+
+    const staffAccessBounds: Record<string, { min: number; max: number; label: string }> = {
+      admin_session_timeout_minutes: {
+        min: 1,
+        max: 480,
+        label: "Admin session timeout",
+      },
+      staff_session_timeout_minutes: {
+        min: 1,
+        max: 480,
+        label: "Staff session timeout",
+      },
+      face_duty_hours: { min: 1, max: 24, label: "Staff face-check interval" },
+    };
+    for (const [key, value] of Object.entries(changes)) {
+      const bounds = staffAccessBounds[key];
+      if (!bounds) continue;
+      const number = Number(value);
+      if (
+        !Number.isInteger(number) ||
+        number < bounds.min ||
+        number > bounds.max
+      ) {
+        setToast({
+          msg: `${bounds.label} must be a whole number between ${bounds.min} and ${bounds.max}.`,
+          tone: "error",
+        });
+        return;
+      }
+    }
+
+    if (changes.expiry_warning_days !== undefined) {
+      const expiryDays = Number(changes.expiry_warning_days);
+      if (!Number.isInteger(expiryDays) || expiryDays < 1 || expiryDays > 365) {
+        setToast({
+          msg: "Enter a custom expiry warning between 1 and 365 whole days.",
+          tone: "error",
+        });
+        return;
+      }
+    }
+
+    setSaving(true);
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(changes),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not save settings");
+
+      const persisted = data.settings as Record<string, string>;
+      setSettings((prev) => ({ ...prev, ...persisted }));
+      saved.current = { ...saved.current, ...persisted };
+      window.dispatchEvent(new Event("cafetrack:settings-updated"));
+      setToast({ msg: successMessage, tone: "success" });
+      router.refresh();
+    } catch (e: any) {
+      setToast({ msg: e.message || "Could not save settings", tone: "error" });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveStaffPositions(next: StaffPosition[]) {
+    setSavingPositions(true);
+    try {
+      const res = await fetch("/api/staff-positions", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          positions: next.map(({ name, access, originalName }) => ({
+            name: name.trim(),
+            access,
+            originalName,
+          })),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not save staff positions");
+      const savedPositions: StaffPosition[] = (
+        data.positions as Omit<StaffPosition, "id">[]
+      ).map((position, index) => {
+        const previousName =
+          next[index]?.originalName ?? next[index]?.name ?? position.name;
+        return {
+          ...position,
+          id: next[index]?.id ?? crypto.randomUUID(),
+          assignedCount:
+            staffPositions.find(
+              (existing) =>
+                existing.name.toLocaleLowerCase() === previousName.toLocaleLowerCase()
+            )?.assignedCount ?? 0,
+          originalName: position.name,
+        };
+      });
+      setStaffPositions(savedPositions);
+      savedStaffPositions.current = savedPositions.map(({ name, access }) => ({
+        name,
+        access,
+      }));
+      setToast({ msg: "Staff positions saved", tone: "success" });
+      router.refresh();
+    } catch (error) {
+      setToast({
+        msg: error instanceof Error ? error.message : "Could not save staff positions",
+        tone: "error",
+      });
+    } finally {
+      setSavingPositions(false);
+    }
+  }
+
+  function addStaffPosition() {
+    const name = newPosition.trim();
+    if (!name) {
+      setToast({ msg: "Enter a position name first.", tone: "error" });
+      return;
+    }
+    if (
+      staffPositions.some(
+        (position) => position.name.toLocaleLowerCase() === name.toLocaleLowerCase()
+      )
+    ) {
+      setToast({ msg: "That position already exists.", tone: "error" });
+      return;
+    }
+    if (name.length > 80) {
+      setToast({ msg: "Position names must be 80 characters or fewer.", tone: "error" });
+      return;
+    }
+    setStaffPositions((current) => [
+      ...current,
+      { id: crypto.randomUUID(), name, access: "staff", assignedCount: 0 },
+    ]);
+    setNewPosition("");
+  }
+
+  async function changeOwnPassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (passwordChange.next !== passwordChange.confirm) {
+      setToast({ msg: "New passwords do not match.", tone: "error" });
+      return;
+    }
+
+    setChangingPassword(true);
+    try {
+      const res = await fetch("/api/auth/change-password", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          current_password: passwordChange.current,
+          password: passwordChange.next,
+          confirm_password: passwordChange.confirm,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not change password");
+      setPasswordChange({ current: "", next: "", confirm: "" });
+      setToast({ msg: "Password changed.", tone: "success" });
+    } catch (error) {
+      setToast({
+        msg: error instanceof Error ? error.message : "Could not change password",
+        tone: "error",
+      });
+    } finally {
+      setChangingPassword(false);
+    }
+  }
+
   async function addRef(kind: "category" | "location") {
     const name = (kind === "category" ? newCategory : newLocation).trim();
-    if (!name) return;
+    if (!name) {
+      setToast({ msg: `Enter a ${kind} name first.`, tone: "error" });
+      return;
+    }
 
     setAdding(kind);
     try {
@@ -238,30 +579,18 @@ export default function SettingsPage() {
     }
   }
 
-  async function removeRef(kind: "category" | "location", ref: Ref) {
-    setBusyId(ref.id);
-    try {
-      const path = kind === "category" ? "categories" : "locations";
-      const res = await fetch(`/api/refs/${path}/${ref.id}`, { method: "DELETE" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Could not remove");
-
-      if (kind === "category") {
-        setCategories((prev) => prev.filter((c) => c.id !== ref.id));
-      } else {
-        setLocations((prev) => prev.filter((l) => l.id !== ref.id));
-      }
-      setToast({ msg: `Removed "${ref.name}"`, tone: "success" });
-    } catch (e: any) {
-      setToast({ msg: e.message, tone: "error" });
-    } finally {
-      setBusyId(null);
-    }
+  function requestRemoval(target: RemovalTarget) {
+    setRemovalTarget(target);
+    setRemovalReason("");
+    setRemovalPassword("");
   }
 
   async function addSupplier() {
     const name = newSupplier.trim();
-    if (!name) return;
+    if (!name) {
+      setToast({ msg: "Enter a supplier name first.", tone: "error" });
+      return;
+    }
 
     setAdding("supplier");
     try {
@@ -286,21 +615,54 @@ export default function SettingsPage() {
     }
   }
 
-  async function removeSupplier(supplier: Supplier) {
-    setBusyId(supplier.id);
+  function cancelRemoval() {
+    if (removing) return;
+    setRemovalTarget(null);
+    setRemovalReason("");
+    setRemovalPassword("");
+  }
+
+  async function confirmRemoval(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!removalTarget) return;
+    if (!removalReason.trim() || !removalPassword) {
+      setToast({ msg: "Enter a reason and your password to continue.", tone: "error" });
+      return;
+    }
+
+    setRemoving(true);
     try {
-      const res = await fetch(`/api/refs/suppliers/${supplier.id}`, {
+      const path = removalTarget.kind === "category"
+        ? "categories"
+        : removalTarget.kind === "location"
+          ? "locations"
+          : "suppliers";
+      const res = await fetch(`/api/refs/${path}/${removalTarget.id}`, {
         method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          reason: removalReason,
+          confirm_password: removalPassword,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not remove");
 
-      setSuppliers((prev) => prev.filter((s) => s.id !== supplier.id));
-      setToast({ msg: `Removed "${supplier.name}"`, tone: "success" });
+      if (removalTarget.kind === "category") {
+        setCategories((prev) => prev.filter((item) => item.id !== removalTarget.id));
+      } else if (removalTarget.kind === "location") {
+        setLocations((prev) => prev.filter((item) => item.id !== removalTarget.id));
+      } else {
+        setSuppliers((prev) => prev.filter((item) => item.id !== removalTarget.id));
+      }
+      setToast({ msg: `Removed "${removalTarget.name}"`, tone: "success" });
+      setRemovalTarget(null);
+      setRemovalReason("");
+      setRemovalPassword("");
     } catch (e: any) {
       setToast({ msg: e.message, tone: "error" });
     } finally {
-      setBusyId(null);
+      setRemoving(false);
     }
   }
 
@@ -408,15 +770,19 @@ export default function SettingsPage() {
             maxLength={60}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") addRef(kind);
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void addRef(kind);
+              }
             }}
           />
           <button
+            type="button"
             className="btn-primary"
             onClick={() => addRef(kind)}
-            disabled={adding === kind || !value.trim()}
+            disabled={adding === kind}
           >
-            Add
+            {adding === kind ? "Adding..." : "Add"}
           </button>
         </div>
 
@@ -465,11 +831,12 @@ export default function SettingsPage() {
                     )}
 
                     <button
+                      type="button"
                       className="btn-danger"
-                      onClick={() => removeRef(kind, r)}
+                      onClick={() => requestRemoval({ kind, id: r.id, name: r.name })}
                       disabled={busyId === r.id}
                     >
-                      {busyId === r.id ? "Removing..." : "Remove"}
+                      Remove
                     </button>
                   </div>
                 </li>
@@ -489,146 +856,569 @@ export default function SettingsPage() {
     settings.face_engine === "sface" ? "sface" : "legacy"
   );
   const thresholdName = settings.face_engine === "sface" ? "SFace" : "original";
+  const businessRecoveryDirty = ["business_name", "password_recovery_email"].some(
+    (key) => settings[key] !== saved.current[key]
+  );
+  const expirySettingsDirty = ["expiry_warning_days"].some(
+    (key) => settings[key] !== saved.current[key]
+  );
+  const tabPaths: Record<SettingsTab, string> = {
+    email: "M3 5h18v14H3z M3 6l9 7 9-7",
+    staff: "M16 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2 M10 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8 M20 21v-2a4 4 0 0 0-3-3.87 M16 3.13a4 4 0 0 1 0 7.75",
+    storage: "M3 21h18 M5 21V7l7-4 7 4v14 M9 21v-6h6v6 M9 9h.01 M15 9h.01",
+    suppliers: "M3 7h11v11H3z M14 11h4l3 3v4h-7z M7 21a2 2 0 1 0 0-4 2 2 0 0 0 0 4 M17 21a2 2 0 1 0 0-4 2 2 0 0 0 0 4",
+    general: "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8 M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.6 2.77-.08-.02a1.7 1.7 0 0 0-1.82.62l-.05.07h-3.2l-.03-.08a1.7 1.7 0 0 0-1.43-1.13h-.09L9.9 16.4l.05-.08a1.7 1.7 0 0 0-.28-1.83l-.06-.06 1.6-2.77.09.02a1.7 1.7 0 0 0 1.82-.62l.05-.07h3.2l.03.08a1.7 1.7 0 0 0 1.43 1.13h.09z",
+  };
 
   return (
     <div className="space-y-5">
+      <ConfirmDialog
+        open={pendingToggle !== null}
+        title={pendingToggle?.title ?? ""}
+        message={pendingToggle?.message ?? ""}
+        confirmLabel={pendingToggle?.confirmLabel ?? "Continue"}
+        tone="warning"
+        onCancel={() => setPendingToggle(null)}
+        onConfirm={() => {
+          const action = pendingToggle?.onConfirm;
+          setPendingToggle(null);
+          action?.();
+        }}
+      />
       <div>
         <h1 className="deco-title text-3xl">Settings</h1>
       </div>
 
       {error && <div className="card p-4 text-sm text-terracotta-700">{error}</div>}
 
-      {/*
-        The Email page is the only place the `email_enabled` switch exists. It
-        lived under "User Management" in the nav, which is where nobody looks
-        for a setting that is about alerts rather than about users. Link from
-        here too, so it is findable from both words people use — settings, or
-        email.
-      */}
-      <Card>
-        <h2 className="text-lg font-semibold text-cocoa-800">Email notifications</h2>
-        <p className="mt-3">
-          <a href="/email" className="text-sm font-medium text-ochre-700 underline">
-            Set up and test email notifications
-          </a>
-        </p>
-      </Card>
+      <nav
+        className="flex gap-2 overflow-x-auto rounded-2xl border border-cream-200 bg-cream-50 p-2"
+        role="tablist"
+        aria-label="Settings sections"
+      >
+        {SETTINGS_TABS.map((tab) => (
+          <button
+            key={tab.id}
+            id={`settings-tab-${tab.id}`}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === tab.id}
+            aria-controls={`settings-panel-${tab.id}`}
+            onClick={() => setActiveTab(tab.id)}
+            className={`inline-flex shrink-0 items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold transition-colors ${
+              activeTab === tab.id
+                ? "bg-cocoa-800 text-white shadow-warm"
+                : "text-cocoa-600 hover:bg-cream-100"
+            }`}
+          >
+            <svg
+              aria-hidden="true"
+              className="h-4 w-4"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.7"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d={tabPaths[tab.id]} />
+            </svg>
+            {tab.label}
+          </button>
+        ))}
+      </nav>
 
-      <Card>
-        <h2 className="text-lg font-semibold text-cocoa-800">
-          Alerts &amp; sessions
-        </h2>
+      <section
+        id="settings-panel-email"
+        role="tabpanel"
+        aria-labelledby="settings-tab-email"
+        hidden={activeTab !== "email"}
+      >
+        <EmailNotifications view="settings" />
+      </section>
 
-        <div className="mt-4 grid gap-4 sm:grid-cols-2">
-          {NUMERIC_FIELDS.map((f) => (
-            <div key={f.key}>
-              <label className="label" htmlFor={f.key}>
-                {f.label}
+      <section
+        id="settings-panel-staff"
+        role="tabpanel"
+        aria-labelledby="settings-tab-staff"
+        hidden={activeTab !== "staff"}
+        className="space-y-5"
+      >
+        <Card>
+          <h2 className="text-lg font-semibold text-cocoa-800">Staff &amp; session access</h2>
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            {([
+              ["admin_session_timeout_minutes", "Admin session timeout"],
+              ["staff_session_timeout_minutes", "Staff session timeout"],
+            ] as const).map(([key, label]) => (
+              <div key={key}>
+                <label className="label" htmlFor={key}>{label}</label>
+                <input
+                  id={key}
+                  type="number"
+                  className="input"
+                  min={1}
+                  max={480}
+                  value={settings[key]}
+                  disabled={saving}
+                  onChange={(event) =>
+                    setSettings((prev) => ({ ...prev, [key]: event.target.value }))
+                  }
+                />
+                <p className="mt-1 text-xs text-cocoa-400">
+                  Sign out after this many idle minutes (1–480).
+                </p>
+              </div>
+            ))}
+            <div>
+              <label className="label" htmlFor="face_duty_hours">
+                Staff face-check interval
               </label>
               <input
-                id={f.key}
+                id="face_duty_hours"
                 type="number"
                 className="input"
-                min={f.min}
-                max={f.max}
-                value={settings[f.key] ?? ""}
+                min={1}
+                max={24}
+                value={settings.face_duty_hours}
                 disabled={saving}
-                onChange={(e) =>
-                  setSettings((prev) => ({ ...prev, [f.key]: e.target.value }))
+                onChange={(event) =>
+                  setSettings((prev) => ({ ...prev, face_duty_hours: event.target.value }))
                 }
-                onBlur={(e) => {
-                  const v = e.target.value;
-                  // Only write on a real change, so blurring an untouched
-                  // field does not fire a pointless request. The comparison is
-                  // against what the database holds, not what the field shows —
-                  // see `saved` above.
-                  if (v !== "" && v !== saved.current[f.key]) saveField(f.key, v);
-                }}
               />
               <p className="mt-1 text-xs text-cocoa-400">
-                {f.hint} ({f.min}&ndash;{f.max})
+                Require another face check after this many hours per duty (1–24).
               </p>
             </div>
-          ))}
-        </div>
+          </div>
+          <div className="mt-4 flex justify-end">
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={
+                saving ||
+                !STAFF_ACCESS_SETTING_KEYS.some(
+                  (key) => settings[key] !== saved.current[key]
+                )
+              }
+              onClick={() =>
+                void saveSpecificGeneralSettings(
+                  [...STAFF_ACCESS_SETTING_KEYS],
+                  "Staff and session access settings saved"
+                )
+              }
+            >
+              {saving ? "Saving..." : "Save settings"}
+            </button>
+          </div>
+        </Card>
+        <Card>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold text-cocoa-800">Positions &amp; access profiles</h2>
+              <p className="mt-1 max-w-2xl text-sm text-cocoa-500">
+                Add job positions and choose what their accounts can access. Staff access is
+                limited to team pages; full admin access unlocks every management page and action.
+              </p>
+            </div>
+          </div>
 
-        <div className="mt-4">
-          <label className="label" htmlFor="business_name">
-            Business name
-          </label>
-          <input
-            id="business_name"
-            className="input max-w-sm"
-            value={settings.business_name ?? ""}
-            maxLength={120}
-            disabled={saving}
-            onChange={(e) =>
-              setSettings((prev) => ({ ...prev, business_name: e.target.value }))
-            }
-            onBlur={(e) => {
-              const v = e.target.value;
-              if (v !== (saved.current.business_name ?? "")) saveField("business_name", v);
-            }}
-          />
-        </div>
-      </Card>
+          <div className="mt-4 grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+            <div className="min-w-0">
+              <label className="label" htmlFor="new-staff-position">Position name</label>
+              <input
+                id="new-staff-position"
+                className="input w-full min-w-0"
+                value={newPosition}
+                placeholder="For example, Barista or Manager"
+                maxLength={80}
+                onChange={(event) => setNewPosition(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    addStaffPosition();
+                  }
+                }}
+              />
+            </div>
+            <button
+              type="button"
+              className="btn-ghost whitespace-nowrap"
+              disabled={
+                savingPositions ||
+                !newPosition.trim() ||
+                newPosition.trim().length > 80 ||
+                staffPositions.some(
+                  (position) =>
+                    position.name.toLocaleLowerCase() ===
+                    newPosition.trim().toLocaleLowerCase()
+                )
+              }
+              onClick={addStaffPosition}
+            >
+              Add position
+            </button>
+          </div>
 
-      {/*
-        Face verification.
-
-        Two switches in one card, but deliberately described as two separate
-        decisions — they are not two views of one thing. One asks for a face at
-        the start of a shift, the other changes how someone gets in at all. An
-        admin should be able to tell them apart without reading any code.
-
-        Both are off in every fresh database, so nothing here disturbs the login
-        the cafe uses today until it is deliberately switched on.
-      */}
-      <Card>
-        <h2 className="text-lg font-semibold text-cocoa-800">Face verification</h2>
-
-        <div className="mt-4 space-y-3">
-          {(
-            [
-              {
-                key: "face_verification_enabled",
-                title: "Duty face check",
-                on: "Staff confirm their face once per duty before they can move stock. One check covers the duty length set below.",
-                off: "Enrol everyone's photo from Staff Accounts first — this holds every member of staff at the camera screen.",
-              },
-              {
-                key: "face_login_enabled",
-                title: "Sign in with a face",
-                on: "Staff can scan their badge and confirm their face instead of typing a password. Admins still use a password.",
-                off: "Staff without a reference photo cannot use this, so enrol them from Staff Accounts first. Password sign-in keeps working either way.",
-              },
-              {
-                key: "face_require_profile_angles",
-                title: "Turned-head checks",
-                on: "A check asks for the straight-on photo and both turned-head photos. A printed portrait cannot produce the turned ones, which is what makes it fail.",
-                off: "Only the straight-on photo is required. The turned-head photos stay on file as reference photographs, and turning this back on needs no re-enrolment.",
-              },
-            ] as const
-          ).map((t) => {
-            const on = settings[t.key] === "1";
-            return (
+          <div className="mt-4 min-w-0 space-y-3">
+            {staffPositions.map((position, index) => (
               <div
-                key={t.key}
-                className="flex flex-wrap items-start justify-between gap-3 rounded-xl border border-cream-200 bg-cream-50 px-3.5 py-3"
+                key={position.id}
+                className="grid min-w-0 gap-3 rounded-xl border border-cream-200 p-3 lg:grid-cols-[minmax(0,1.2fr)_minmax(14rem,1fr)_auto] lg:items-start"
               >
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-bold text-cocoa-800">{t.title}</p>
+                <div className="min-w-0">
+                  <label className="label" htmlFor={`staff-position-${index}`}>Position name</label>
+                  <input
+                    id={`staff-position-${index}`}
+                    className="input w-full min-w-0"
+                    value={position.name}
+                    maxLength={80}
+                    disabled={savingPositions}
+                    onChange={(event) =>
+                      setStaffPositions((current) =>
+                        current.map((item, itemIndex) =>
+                          itemIndex === index ? { ...item, name: event.target.value } : item
+                        )
+                      )
+                    }
+                  />
+                  {Boolean(position.assignedCount) && (
+                    <p className="mt-1 text-xs text-cocoa-400">
+                      Assigned to {position.assignedCount} account{position.assignedCount === 1 ? "" : "s"}.
+                      Renaming updates assigned accounts.
+                    </p>
+                  )}
                 </div>
-                <button
-                  className={on ? "btn-ghost" : "btn-primary"}
-                  disabled={saving}
-                  onClick={() => saveField(t.key, on ? "0" : "1")}
-                >
-                  {on ? "Turn off" : "Turn on"}
-                </button>
+                <div className="min-w-0">
+                  <label className="label" htmlFor={`staff-access-${index}`}>Access profile</label>
+                  <select
+                    id={`staff-access-${index}`}
+                    className="input w-full min-w-0"
+                    value={position.access}
+                    disabled={savingPositions}
+                    onChange={(event) =>
+                      setStaffPositions((current) =>
+                        current.map((item, itemIndex) =>
+                          itemIndex === index
+                            ? { ...item, access: event.target.value as StaffPosition["access"] }
+                            : item
+                        )
+                      )
+                    }
+                  >
+                    <option value="staff">Staff — team pages only</option>
+                    <option value="admin">Full admin — all pages and actions</option>
+                  </select>
+                </div>
+                <div className="lg:pt-[1.375rem]">
+                  <button
+                    type="button"
+                    className="btn-danger whitespace-nowrap"
+                    disabled={savingPositions || Boolean(position.assignedCount)}
+                    onClick={() =>
+                      setStaffPositions((current) => current.filter((_, itemIndex) => itemIndex !== index))
+                    }
+                  >
+                    Remove
+                  </button>
+                </div>
               </div>
-            );
-          })}
+            ))}
+          </div>
+
+          <div className="mt-4 flex justify-end">
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={
+                savingPositions ||
+                (staffPositions.length === savedStaffPositions.current.length &&
+                  staffPositions.every(
+                    (position, index) =>
+                      position.name.trim() === savedStaffPositions.current[index]?.name &&
+                      position.access === savedStaffPositions.current[index]?.access
+                  ))
+              }
+              onClick={() => void saveStaffPositions(staffPositions)}
+            >
+              {savingPositions ? "Saving positions..." : "Save positions"}
+            </button>
+          </div>
+        </Card>
+      </section>
+
+      <section
+        id="settings-panel-general"
+        role="tabpanel"
+        aria-labelledby="settings-tab-general"
+        hidden={activeTab !== "general"}
+        className="space-y-5"
+      >
+        <Card>
+          <h2 className="text-lg font-semibold text-cocoa-800">Admin display name</h2>
+          <p className="mt-1 text-sm text-cocoa-500">
+            This name appears in the workspace and activity records. It defaults to Admin when no name is available.
+          </p>
+          <div className="mt-4 flex max-w-xl flex-col gap-2 sm:flex-row sm:items-end">
+            <div className="flex-1">
+              <label className="label" htmlFor="admin-display-name">Name</label>
+              <input
+                id="admin-display-name"
+                className="input"
+                value={adminName}
+                placeholder="Admin"
+                maxLength={80}
+                disabled={savingAdminName}
+                onChange={(event) => setAdminName(event.target.value)}
+              />
+            </div>
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={savingAdminName || !adminName.trim() || adminName.trim() === savedAdminName}
+              onClick={() => void saveAdminName()}
+            >
+              {savingAdminName ? "Saving..." : "Save name"}
+            </button>
+          </div>
+        </Card>
+
+        <Card>
+          <div className="flex items-start justify-between gap-3">
+            <h2 className="text-lg font-semibold text-cocoa-800">Business and recovery details</h2>
+            {businessRecoveryDirty && (
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => void saveSpecificGeneralSettings(["business_name", "password_recovery_email"], "Business details saved")}
+                disabled={saving}
+              >
+                {saving ? "Saving..." : "Save"}
+              </button>
+            )}
+          </div>
+          <div className="mt-4 max-w-sm">
+            <label className="label" htmlFor="business_name">Business name</label>
+            <input
+              id="business_name"
+              className="input"
+              value={settings.business_name ?? ""}
+              maxLength={120}
+              disabled={saving}
+              onChange={(event) =>
+                setSettings((prev) => ({ ...prev, business_name: event.target.value }))
+              }
+            />
+          </div>
+          <div className="mt-4 max-w-sm">
+            <label className="label" htmlFor="password_recovery_email">
+              Legacy owner recovery email
+            </label>
+            <input
+              ref={recoveryEmailInputRef}
+              id="password_recovery_email"
+              type="email"
+              autoComplete="email"
+              className={`input ${
+                focusRecoveryEmail || !String(settings.password_recovery_email ?? "").trim()
+                  ? "border-terracotta-500 bg-terracotta-50 focus:border-terracotta-500 focus:ring-terracotta-200 animate-[shake_0.45s_ease-in-out_4]"
+                  : ""
+              }`}
+              value={settings.password_recovery_email ?? ""}
+              maxLength={254}
+              disabled={saving}
+              placeholder="owner@example.com"
+              onChange={(event) =>
+                setSettings((prev) => ({
+                  ...prev,
+                  password_recovery_email: event.target.value,
+                }))
+              }
+            />
+            <p className="mt-1 text-xs text-cocoa-400">
+              Fallback for existing admin accounts without an individual recovery email. New admin
+              accounts use the address saved for them in Staff Accounts. Configure a sending account
+              in Settings → Email.
+            </p>
+          </div>
+        </Card>
+
+        <Card>
+          <div className="flex items-start justify-between gap-3">
+            <h2 className="text-lg font-semibold text-cocoa-800">Expiry alerts</h2>
+            {expirySettingsDirty && (
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => void saveSpecificGeneralSettings(["expiry_warning_days"], "Expiry alert saved")}
+                disabled={saving}
+              >
+                {saving ? "Saving..." : "Save"}
+              </button>
+            )}
+          </div>
+          <div className="mt-4 max-w-lg">
+            <label className="label" htmlFor="expiry_warning_preset">
+              Expiry warning window
+            </label>
+            <select
+              id="expiry_warning_preset"
+              className="input"
+              value={expiryPreset}
+              disabled={saving}
+              onChange={(event) => {
+                const value = event.target.value;
+                if (
+                  value !== "7" &&
+                  value !== "15" &&
+                  value !== "30" &&
+                  value !== "custom"
+                ) {
+                  return;
+                }
+                setExpiryPreset(value);
+                setSettings((prev) => ({
+                  ...prev,
+                  expiry_warning_days: value === "custom" ? "" : value,
+                }));
+              }}
+            >
+              <option value="7">One week (7 days)</option>
+              <option value="15">Half a month (15 days)</option>
+              <option value="30">One month (30 days)</option>
+              <option value="custom">Custom days</option>
+            </select>
+            {expiryPreset === "custom" && (
+              <input
+                aria-label="Custom expiry warning days"
+                type="number"
+                className="input mt-2"
+                min={1}
+                max={365}
+                step={1}
+                required
+                value={settings.expiry_warning_days}
+                disabled={saving}
+                onChange={(event) =>
+                  setSettings((prev) => ({
+                    ...prev,
+                    expiry_warning_days: event.target.value,
+                  }))
+                }
+              />
+            )}
+            <p className="mt-1 text-xs text-cocoa-400">
+              Raise a near-expiry alert this many days before an item expires (1–365).
+            </p>
+          </div>
+        </Card>
+
+        <Card>
+          <h2 className="text-lg font-semibold text-cocoa-800">Change your password</h2>
+          <p className="mt-1 text-sm text-cocoa-500">
+            Confirm your current password before choosing a new one.
+          </p>
+          <form onSubmit={changeOwnPassword} className="mt-4 grid max-w-lg gap-3">
+            <div>
+              <label className="label" htmlFor="current-admin-password">Current password</label>
+              <input
+                id="current-admin-password"
+                className="input"
+                type="password"
+                autoComplete="current-password"
+                required
+                value={passwordChange.current}
+                disabled={changingPassword}
+                onChange={(event) =>
+                  setPasswordChange((prev) => ({ ...prev, current: event.target.value }))
+                }
+              />
+            </div>
+            <div>
+              <label className="label" htmlFor="new-admin-password">New password</label>
+              <input
+                id="new-admin-password"
+                className="input"
+                type="password"
+                autoComplete="new-password"
+                minLength={8}
+                required
+                value={passwordChange.next}
+                disabled={changingPassword}
+                onChange={(event) =>
+                  setPasswordChange((prev) => ({ ...prev, next: event.target.value }))
+                }
+              />
+            </div>
+            <div>
+              <label className="label" htmlFor="confirm-admin-password">
+                Confirm new password
+              </label>
+              <input
+                id="confirm-admin-password"
+                className="input"
+                type="password"
+                autoComplete="new-password"
+                minLength={8}
+                required
+                value={passwordChange.confirm}
+                disabled={changingPassword}
+                onChange={(event) =>
+                  setPasswordChange((prev) => ({ ...prev, confirm: event.target.value }))
+                }
+              />
+            </div>
+            <button type="submit" className="btn-primary justify-self-start" disabled={changingPassword}>
+              {changingPassword ? "Changing..." : "Change password"}
+            </button>
+          </form>
+        </Card>
+      </section>
+
+      <div className="space-y-5" hidden={activeTab !== "staff"}>
+        <Card>
+          <h2 className="text-lg font-semibold text-cocoa-800">Staff login face check</h2>
+
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-cream-200 bg-cream-50 px-3.5 py-3">
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-bold text-cocoa-800">Staff login face check</p>
+            <p className="mt-1 text-xs leading-relaxed text-cocoa-500">
+              When on, staff complete the automatic face scan, including the blink, before
+              signing in the first time and again after the face-check interval above.
+              A successful face check covers repeat sign-ins during that duty window.
+              Face++ verifies the scan; MediaPipe detects the blink in the live camera.
+              When off, staff sign in with their username or barcode and password without
+              this login scan.
+            </p>
+          </div>
+          <button
+            className={settings.face_login_enabled === "1" ? "btn-ghost" : "btn-primary"}
+            disabled={saving}
+            onClick={() =>
+              askToDisableToggle(
+                "face_login_enabled",
+                "staff face check",
+                "This disables the live face scan for staff sign-in. Staff can then sign in with a username or barcode and password without the required face check and blink verification.",
+                settings.face_login_enabled === "1" ? "0" : "1"
+              )
+            }
+          >
+            {settings.face_login_enabled === "1" ? "Turn off" : "Turn on"}
+          </button>
+        </div>
+
+        <div
+          role="status"
+          aria-live="polite"
+          className={`mt-3 rounded-xl px-3.5 py-2.5 text-xs font-medium ${
+            settings.face_login_enabled === "1"
+              ? "bg-sage-50 text-sage-700"
+              : "bg-cream-100 text-cocoa-600"
+          }`}
+        >
+          {settings.face_login_enabled === "1"
+            ? `On: the Face++ and blink-checked face scan is required once every ${settings.face_duty_hours || "9"} hours.`
+            : "Off: staff can sign in with their password without a face scan."}
         </div>
 
         <p className="mt-3 text-xs text-cocoa-400">
@@ -637,70 +1427,30 @@ export default function SettingsPage() {
           and needs no camera permission.
         </p>
 
-        {/*
-          The two numbers the check actually reads.
-
-          They belong in this card rather than in Alerts & sessions: the duty
-          length is how long one face check covers, and the threshold is how
-          close two faces have to be. Both were settable through the API before
-          this form existed, which meant an admin reading this page was told
-          about values they could not see.
-
-          The threshold field follows the engine in use, because the two engines
-          do not share a scale — one field with the other model's bounds would
-          let an admin save a number that means "accept nobody" on the model
-          actually running.
-        */}
-        <div className="mt-4 grid gap-4 sm:grid-cols-2">
-          <div>
-            <label className="label" htmlFor="face_duty_hours">
-              Duty length
-            </label>
-            <input
-              id="face_duty_hours"
-              type="number"
-              className="input"
-              min={1}
-              max={24}
-              value={settings.face_duty_hours ?? ""}
-              disabled={saving}
-              onChange={(e) =>
-                setSettings((prev) => ({ ...prev, face_duty_hours: e.target.value }))
+        <div className="mt-4 max-w-sm">
+          <label className="label" htmlFor={thresholdBand.setting}>
+            Match threshold ({thresholdName})
+          </label>
+          <input
+            id={thresholdBand.setting}
+            type="number"
+            step="0.001"
+            className="input"
+            min={thresholdBand.min}
+            max={thresholdBand.max}
+            placeholder={String(thresholdBand.fallback)}
+            value={settings[thresholdBand.setting] ?? ""}
+            disabled={saving}
+            onChange={(e) =>
+              setSettings((prev) => ({ ...prev, [thresholdBand.setting]: e.target.value }))
+            }
+            onBlur={(e) => {
+              const v = e.target.value;
+              if (v !== "" && v !== saved.current[thresholdBand.setting]) {
+                saveField(thresholdBand.setting, v);
               }
-              onBlur={(e) => {
-                const v = e.target.value;
-                if (v !== "" && v !== saved.current.face_duty_hours) {
-                  saveField("face_duty_hours", v);
-                }
-              }}
-            />
-          </div>
-
-          <div>
-            <label className="label" htmlFor={thresholdBand.setting}>
-              Match threshold ({thresholdName})
-            </label>
-            <input
-              id={thresholdBand.setting}
-              type="number"
-              step="0.001"
-              className="input"
-              min={thresholdBand.min}
-              max={thresholdBand.max}
-              placeholder={String(thresholdBand.fallback)}
-              value={settings[thresholdBand.setting] ?? ""}
-              disabled={saving}
-              onChange={(e) =>
-                setSettings((prev) => ({ ...prev, [thresholdBand.setting]: e.target.value }))
-              }
-              onBlur={(e) => {
-                const v = e.target.value;
-                if (v !== "" && v !== saved.current[thresholdBand.setting]) {
-                  saveField(thresholdBand.setting, v);
-                }
-              }}
-            />
-          </div>
+            }}
+          />
         </div>
 
         {/*
@@ -760,8 +1510,10 @@ export default function SettingsPage() {
               }
               disabled={saving}
               onClick={() =>
-                saveField(
+                askToDisableToggle(
                   "id_verification_required",
+                  "ID verification",
+                  "This removes the requirement that staff present a checked ID before sign-in. Accounts with no verified ID will be allowed to sign in until you turn the rule back on.",
                   settings.id_verification_required === "1" ? "0" : "1"
                 )
               }
@@ -770,47 +1522,18 @@ export default function SettingsPage() {
             </button>
           </div>
 
-          {/*
-            The ID portrait threshold.
-
-            API-only until now, which meant the one number that decides whether
-            the face comparison says anything was invisible to the admin who has
-            to act on it. It is not the same scale as the face-match threshold
-            above, and it belongs to SFace regardless of which face model is in
-            use for sign-in — see the note in lib/id-verification/local.ts.
-          */}
-          <div>
-            <label className="label" htmlFor="id_face_match_threshold">
-              Portrait match threshold
-            </label>
-            <input
-              id="id_face_match_threshold"
-              type="number"
-              step="0.001"
-              className="input"
-              min={MIN_ID_MATCH_THRESHOLD}
-              max={MAX_ID_MATCH_THRESHOLD}
-              placeholder={String(DEFAULT_ID_MATCH_THRESHOLD)}
-              value={settings.id_face_match_threshold ?? ""}
-              disabled={saving}
-              onChange={(e) =>
-                setSettings((prev) => ({
-                  ...prev,
-                  id_face_match_threshold: e.target.value,
-                }))
-              }
-              onBlur={(e) => {
-                const v = e.target.value;
-                if (v !== "" && v !== saved.current.id_face_match_threshold) {
-                  saveField("id_face_match_threshold", v);
-                }
-              }}
-            />
-          </div>
         </div>
 
       </Card>
+      </div>
 
+      <section
+        id="settings-panel-storage"
+        role="tabpanel"
+        aria-labelledby="settings-tab-storage"
+        className="space-y-5"
+        hidden={activeTab !== "storage"}
+      >
       {refList(
         "category",
         "Item categories",
@@ -828,8 +1551,15 @@ export default function SettingsPage() {
         newLocation,
         setNewLocation
       )}
+      </section>
 
       {/* ---------- suppliers ---------- */}
+      <section
+        id="settings-panel-suppliers"
+        role="tabpanel"
+        aria-labelledby="settings-tab-suppliers"
+        hidden={activeTab !== "suppliers"}
+      >
       <Card>
         <h2 className="text-lg font-semibold text-cocoa-800">Suppliers</h2>
         <p className="mt-1 text-sm text-cocoa-500">
@@ -847,15 +1577,19 @@ export default function SettingsPage() {
             maxLength={120}
             onChange={(e) => setNewSupplier(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") addSupplier();
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void addSupplier();
+              }
             }}
           />
           <button
+            type="button"
             className="btn-primary"
             onClick={addSupplier}
-            disabled={adding === "supplier" || !newSupplier.trim()}
+            disabled={adding === "supplier"}
           >
-            Add
+            {adding === "supplier" ? "Adding..." : "Add"}
           </button>
         </div>
 
@@ -883,6 +1617,7 @@ export default function SettingsPage() {
                       </div>
                       <div className="flex flex-wrap gap-1.5">
                         <button
+                          type="button"
                           className="btn-ghost !px-3 !py-1.5 text-xs"
                           onClick={() => startEditSupplier(s)}
                           disabled={busyId === s.id}
@@ -890,6 +1625,7 @@ export default function SettingsPage() {
                           {editing ? "Close" : "Edit"}
                         </button>
                         <button
+                          type="button"
                           className="btn-ghost !px-3 !py-1.5 text-xs"
                           onClick={() => toggleSupplierItems(s)}
                           disabled={busyId === s.id}
@@ -897,11 +1633,14 @@ export default function SettingsPage() {
                           {showingItems ? "Hide items" : "Items"}
                         </button>
                         <button
+                          type="button"
                           className="btn-danger !px-3 !py-1.5 text-xs"
-                          onClick={() => removeSupplier(s)}
+                          onClick={() =>
+                            requestRemoval({ kind: "supplier", id: s.id, name: s.name })
+                          }
                           disabled={busyId === s.id}
                         >
-                          {busyId === s.id ? "Removing..." : "Remove"}
+                          Remove
                         </button>
                       </div>
                     </div>
@@ -987,6 +1726,7 @@ export default function SettingsPage() {
                             Cancel
                           </button>
                           <button
+                            type="button"
                             className="btn-primary !px-3 !py-1.5 text-xs"
                             onClick={() => saveSupplier(s.id)}
                             disabled={savingSupplier || !supplierForm.name.trim()}
@@ -1038,6 +1778,80 @@ export default function SettingsPage() {
           )}
         </div>
       </Card>
+      </section>
+
+      {removalTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-cocoa-950/50 p-4"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) cancelRemoval();
+          }}
+        >
+          <form
+            className="card w-full max-w-lg space-y-4 p-5"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="remove-setting-title"
+            onSubmit={confirmRemoval}
+          >
+            <div>
+              <h2 id="remove-setting-title" className="text-lg font-bold text-cocoa-900">
+                Remove {removalTarget.name}?
+              </h2>
+              <p className="mt-1 text-sm text-cocoa-500">
+                Give a reason and confirm with your admin password. This action is recorded
+                in the audit history.
+              </p>
+            </div>
+            <div>
+              <label className="label" htmlFor="removal-reason">Reason for removal</label>
+              <textarea
+                id="removal-reason"
+                className="input min-h-24 resize-y"
+                rows={3}
+                maxLength={500}
+                required
+                value={removalReason}
+                disabled={removing}
+                onChange={(event) => setRemovalReason(event.target.value)}
+                placeholder="Why is this record being removed?"
+              />
+            </div>
+            <div>
+              <label className="label" htmlFor="removal-password">Admin password</label>
+              <input
+                id="removal-password"
+                className="input"
+                type="password"
+                autoComplete="current-password"
+                required
+                value={removalPassword}
+                disabled={removing}
+                onChange={(event) => setRemovalPassword(event.target.value)}
+                placeholder="Enter your password"
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                className="btn-ghost"
+                onClick={cancelRemoval}
+                disabled={removing}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="btn-danger"
+                disabled={removing || !removalReason.trim() || !removalPassword}
+              >
+                {removing ? "Removing..." : "Confirm removal"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
       <Toast
         message={toast?.msg ?? null}

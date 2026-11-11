@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { readFaceSface, sfaceModelsPresent } from "@/lib/face-sface";
 import { cameraAvailable, permissionHelp } from "@/lib/face-client";
 import {
   cameraOriginProblem,
@@ -21,20 +20,12 @@ import { fingerprintFromCanvas } from "@/lib/card-fingerprint";
 import { useAutoIdCapture } from "@/lib/use-auto-id-capture";
 
 /**
- * Attach a government ID and a photo of the person, and send both up.
+ * Attach a government ID. The server sends the ID front and saved staff face to
+ * Face++ for comparison; no additional face photo or local face model is needed.
  *
  * Loaded with `ssr: false` and `next/dynamic` by its callers, for the same
- * reason FaceCapture is: reading a face pulls in ONNX Runtime and SFace, which
- * together are several megabytes, and the staff list is a page an admin opens
- * constantly for something that usually has nothing to do with photos.
- *
- * ## Why face-sface is imported here and not passed in
- *
- * Importing it in the parent would put the models into that page's *initial*
- * download — the dynamic boundary would still work, but the module graph would
- * be resolved by the page that renders the button, and the several megabytes
- * would be fetched whether or not the admin ever opens this. Owning the import
- * inside the component that needs it is what keeps the staff list light.
+ * reason this is loaded on demand: it uses the browser camera and image canvas
+ * APIs, and the staff list is a page an admin opens constantly.
  *
  * ## What this does before the upload, and why
  *
@@ -46,34 +37,14 @@ import { useAutoIdCapture } from "@/lib/use-auto-id-capture";
  * The server enforces its own limit regardless (see lib/id-document.ts) — this is
  * a courtesy that makes the upload fast, not a control.
  *
- * **Reading two faces, always with SFace.** The portrait printed on the card and
- * the face in the photo are both turned into 128-float descriptors here, in the
- * browser, and both go up as vectors. The server compares them with the same
- * cosine distance every other face comparison in this app uses.
- *
- * SFace specifically — not whichever engine `settings.face_engine` names for
- * staff sign-in. The two engines put the same pair of faces at wildly different
- * distances: a different person measures 0.0362-0.0684 with the legacy model and
- * 0.559-0.653 with SFace. `settings.id_face_match_threshold` is one number and it
- * is calibrated to SFace's scale (see lib/id-verification/local.ts), so handing
- * it a legacy vector would make 0.55 pass almost every pair. The ID flow stores
- * no descriptors, so this choice cannot strand an enrolment or fight the café's
- * sign-in engine.
- *
- * Neither descriptor is the picture: it is 1.5KB of floats that cannot be
- * displayed. The pictures are still uploaded, because an admin has to look at
- * them — that judgement is the whole point.
- *
- * **Failure is soft.** No face in the card image, or no face in the photo, is not
- * an error. It becomes an "unknown" signal on the review screen saying the
- * comparison could not run. Refusing the upload would turn the model's inability
- * to read a face into a refusal to record an ID. The same applies when the SFace
- * models are not installed: the upload still goes, and the review screen says the
- * portrait was not compared.
+ * The server runs face comparison with Face++ using the ID front and the
+ * already-enrolled staff face. This component only uploads the ID images and
+ * computes the card fingerprint used to catch reused cards.
  */
 
 /** Long edge, in pixels, that every image is reduced to before upload. */
 const MAX_EDGE = 1600;
+const FRONT_OCR_MAX_EDGE = 2400;
 
 /**
  * JPEG quality for the re-encode.
@@ -83,23 +54,17 @@ const MAX_EDGE = 1600;
  * starts to break up, which is exactly the text an OCR provider needs.
  */
 const JPEG_QUALITY = 0.82;
+const FRONT_OCR_JPEG_QUALITY = 0.92;
 
 export type IdUploadResult = {
   front: File;
   back: File | null;
-  photo: File | null;
-  /** 128 floats from the portrait printed on the card, if one was read with SFace. */
-  cardEmbedding: number[] | null;
-  /** 128 floats from the photo of the person, if one was read with SFace. */
-  photoEmbedding: number[] | null;
   /**
    * 64-bit perceptual fingerprint of the card front, as 16 hex characters.
    *
    * Compared server-side against every other account's stored fingerprint to catch
-   * one card covering two people. Computed here for the same reason the embeddings
-   * are: the server has no image decoder, and the card is already on a canvas by
-   * this point. See src/lib/card-fingerprint.ts for the trust model this shares
-   * with the descriptors above.
+   * one card covering two people. The card is already on a canvas by this point.
+   * See src/lib/card-fingerprint.ts for the trust model.
    */
   cardHash: string | null;
 };
@@ -110,28 +75,22 @@ export type IdUploadProps = {
   onReady: (result: IdUploadResult | null) => void;
 };
 
-type Slot = "front" | "back" | "photo";
+type Slot = "front" | "back";
 
-const SLOT_COPY: Record<Slot, { label: string; hint: string; required: boolean }> = {
+const SLOT_COPY: Record<Slot, { label: string; hint?: string; required: boolean }> = {
   front: {
     label: "Front of the ID",
-    hint: "The side with the photo and the details. Fill the frame — the card should be the whole picture.",
+    hint: "Capture the side with the photo and details. Keep all four edges visible and the text clear.",
     required: true,
   },
   back: {
     label: "Back of the ID",
-    hint: "Optional. Most Philippine IDs are single-sided; a passport has useful text here.",
-    required: false,
-  },
-  photo: {
-    label: "Photo of the person",
-    hint: "A clear photo of the applicant, looking at the camera. Without one the portrait cannot be compared.",
     required: false,
   },
 };
 
 /** Downscale an image file to a bounded JPEG. */
-async function downscale(file: File): Promise<File> {
+async function downscale(file: File, enhanceForOcr = false): Promise<File> {
   let bitmap: ImageBitmap;
   try {
     bitmap = await createImageBitmap(file);
@@ -142,7 +101,8 @@ async function downscale(file: File): Promise<File> {
   }
 
   try {
-    const scale = Math.min(1, MAX_EDGE / Math.max(bitmap.width, bitmap.height));
+    const maxEdge = enhanceForOcr ? FRONT_OCR_MAX_EDGE : MAX_EDGE;
+    const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
     const width = Math.max(1, Math.round(bitmap.width * scale));
     const height = Math.max(1, Math.round(bitmap.height * scale));
 
@@ -153,10 +113,16 @@ async function downscale(file: File): Promise<File> {
     const ctx = canvas.getContext("2d");
     if (!ctx) return file;
 
-    ctx.drawImage(bitmap, 0, 0, width, height);
+    if (enhanceForOcr) {
+      ctx.filter = "contrast(1.12) saturate(0.92) brightness(1.03)";
+      ctx.drawImage(bitmap, 0, 0, width, height);
+      ctx.filter = "none";
+    } else {
+      ctx.drawImage(bitmap, 0, 0, width, height);
+    }
 
     const blob = await new Promise<Blob | null>((resolve) =>
-      canvas.toBlob(resolve, "image/jpeg", JPEG_QUALITY)
+      canvas.toBlob(resolve, "image/jpeg", enhanceForOcr ? FRONT_OCR_JPEG_QUALITY : JPEG_QUALITY)
     );
     if (!blob) return file;
 
@@ -169,46 +135,16 @@ async function downscale(file: File): Promise<File> {
   }
 }
 
-/** A canvas holding an already-decoded image, ready for the face model. */
-async function toCanvas(file: File): Promise<HTMLCanvasElement | null> {
-  let bitmap: ImageBitmap;
-  try {
-    bitmap = await createImageBitmap(file);
-  } catch {
-    return null;
-  }
-
-  try {
-    const canvas = document.createElement("canvas");
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return null;
-    ctx.drawImage(bitmap, 0, 0);
-    return canvas;
-  } finally {
-    bitmap.close();
-  }
-}
-
 export default function IdUpload({ disabled, onReady }: IdUploadProps) {
   const [files, setFiles] = useState<Partial<Record<Slot, File>>>({});
   const [previews, setPreviews] = useState<Partial<Record<Slot, string>>>({});
-  const [embeddings, setEmbeddings] = useState<{
-    cardEmbedding: number[] | null;
-    photoEmbedding: number[] | null;
-  }>({ cardEmbedding: null, photoEmbedding: null });
 
   /**
    * The card's perceptual fingerprint, for the duplicate check.
    *
-   * Held separately from `embeddings` because it fails for a completely different
-   * reason: the descriptors come back null when there is no *face* to find, while
-   * this is null when the canvas cannot be read at all. Folding them together would
-   * mean a card with no portrait quietly losing its duplicate check too.
+   * Kept independent so a fingerprint failure cannot affect the ID upload itself.
    */
   const [cardHash, setCardHash] = useState<string | null>(null);
-  const [reading, setReading] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
   /*
@@ -227,6 +163,7 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
   const [pendingFront, setPendingFront] = useState<{ file: File; preview: string } | null>(null);
 
   const camVideoRef = useRef<HTMLVideoElement | null>(null);
+  const guideRef = useRef<HTMLDivElement | null>(null);
   const camStreamRef = useRef<MediaStream | null>(null);
 
   useEffect(() => {
@@ -271,6 +208,10 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
    */
   const published = useRef<IdUploadResult | null>(null);
   const urls = useRef<string[]>([]);
+  const slotSelectionVersions = useRef<Record<Slot, number>>({
+    front: 0,
+    back: 0,
+  });
 
   useEffect(() => {
     const held = urls.current;
@@ -295,107 +236,22 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
 
   const idScanner = useAutoIdCapture({
     videoRef: camVideoRef,
+    guideRef,
     active: camSlot === "front" && !camBlocked && !camBusy,
     onCapture: acceptCameraFront,
   });
   const resumeIdScanner = idScanner.resume;
 
-  /**
-   * Read whatever faces the current selection allows.
-   *
-   * Takes the two files as arguments rather than reading them from state: it is
-   * called from inside the change handler where `files` is still the previous
-   * value, and a callback closing over that would compare the card against a
-   * photo the admin has not chosen yet.
+  /*
+   * "Detected" = the local scanner has found a card-shaped outline, judged its
+   * light, glare and distance acceptable, and is counting steady frames. This
+   * is the green state: the preview ring, the status card and the steadiness
+   * bar all switch on it, so someone holding the card can read "keep it
+   * exactly like this" off the screen at a glance, without parsing words.
    */
-  const readFaces = useCallback(
-    async (front: File | undefined, photo: File | undefined) => {
-      if (!front) {
-        setEmbeddings({ cardEmbedding: null, photoEmbedding: null });
-        setReading(false);
-        return;
-      }
+  const idScanDetected =
+    idScanner.phase === "hold" || idScanner.phase === "capturing";
 
-      setReading(true);
-      const warnings: string[] = [];
-
-      /*
-       * Both reads use SFace regardless of settings.face_engine — see the note at
-       * the top of this file for why the threshold, not the cafe's sign-in
-       * engine, decides which reader this flow uses.
-       *
-       * Checked before loading, so an install without the model files says so
-       * once, plainly, instead of surfacing the same ONNX failure twice.
-       */
-      if (!(await sfaceModelsPresent().catch(() => false))) {
-        setEmbeddings({ cardEmbedding: null, photoEmbedding: null });
-        setNote(
-          "The face-matching model is not installed, so the portrait will not be compared. " +
-            "Everything else still runs. Run `npm run setup:face:sface` to install it."
-        );
-        setReading(false);
-        return;
-      }
-
-      let cardEmbedding: number[] | null = null;
-      let photoEmbedding: number[] | null = null;
-
-      const frontCanvas = await toCanvas(front);
-      if (!frontCanvas) {
-        warnings.push("The front of the ID could not be opened as an image.");
-      } else {
-        try {
-          const read = await readFaceSface(frontCanvas);
-          if (read.ok) {
-            cardEmbedding = read.embedding;
-          } else {
-            warnings.push(
-              "No face could be read from the card image, so the printed portrait will not be " +
-                "compared. Check the card is large enough and evenly lit in the photo."
-            );
-          }
-        } catch {
-          warnings.push(
-            "The face-matching model failed on the card image, so the printed portrait was not " +
-              "compared."
-          );
-        }
-      }
-
-      if (photo) {
-        const photoCanvas = await toCanvas(photo);
-        if (!photoCanvas) {
-          warnings.push("The photo of the person could not be opened as an image.");
-        } else {
-          try {
-            const read = await readFaceSface(photoCanvas);
-            if (read.ok) {
-              photoEmbedding = read.embedding;
-            } else {
-              warnings.push("No face could be read from the photo, so nothing will be compared.");
-            }
-          } catch {
-            warnings.push(
-              "The face-matching model failed on the photo of the person, so nothing was compared."
-            );
-          }
-        }
-      }
-
-      setEmbeddings({ cardEmbedding, photoEmbedding });
-      setNote(warnings.length ? warnings.join(" ") : null);
-      setReading(false);
-    },
-    /*
-     * Nothing reactive is captured: the two files arrive as arguments, the
-     * setters are stable, and `toCanvas`, `sfaceModelsPresent` and `readFaceSface`
-     * are module scope. Listing the imports here was not just noise — the lint
-     * rule is right that a module binding can never change in a way a re-render
-     * would observe, so the array was describing a dependency that does not
-     * exist.
-     */
-    []
-  );
   const pick = useCallback(
     async (slot: Slot, file: File | undefined) => {
       if (!file) return;
@@ -405,22 +261,14 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
         return;
       }
 
+      slotSelectionVersions.current[slot]++;
+      const selectionVersion = slotSelectionVersions.current[slot];
       setNote(null);
 
-      const small = await downscale(file);
+      const small = await downscale(file, slot === "front");
+      if (selectionVersion !== slotSelectionVersions.current[slot]) return;
 
-      setFiles((prev) => {
-        const next = { ...prev, [slot]: small };
-        // The next selection is worked out here, from `next`, so the face read
-        // sees the images the admin has actually chosen rather than the ones
-        // that were there when this handler started.
-        queueMicrotask(() => {
-          if (slot === "front" || slot === "photo") {
-            void readFaces(next.front, next.photo);
-          }
-        });
-        return next;
-      });
+      setFiles((prev) => ({ ...prev, [slot]: small }));
 
       setPreviews((prev) => {
         revoke(prev[slot]);
@@ -429,7 +277,7 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
         return { ...prev, [slot]: url };
       });
     },
-    [readFaces, revoke]
+    [revoke]
   );
 
   /** Open the camera for one slot, closing whatever was open before. */
@@ -531,10 +379,11 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
 
   const clearSlot = useCallback(
     (slot: Slot) => {
+      slotSelectionVersions.current[slot]++;
+      setNote(null);
       setFiles((prev) => {
         const next = { ...prev };
         delete next[slot];
-        queueMicrotask(() => void readFaces(next.front, next.photo));
         return next;
       });
       setPreviews((prev) => {
@@ -544,7 +393,7 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
         return next;
       });
     },
-    [readFaces, revoke]
+    [revoke]
   );
 
   const confirmFrontCapture = useCallback(async () => {
@@ -572,9 +421,6 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
     const next: IdUploadResult = {
       front: files.front,
       back: files.back ?? null,
-      photo: files.photo ?? null,
-      cardEmbedding: embeddings.cardEmbedding,
-      photoEmbedding: embeddings.photoEmbedding,
       cardHash,
     };
 
@@ -583,9 +429,6 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
       previous &&
       previous.front === next.front &&
       previous.back === next.back &&
-      previous.photo === next.photo &&
-      previous.cardEmbedding === next.cardEmbedding &&
-      previous.photoEmbedding === next.photoEmbedding &&
       previous.cardHash === next.cardHash
     ) {
       return;
@@ -593,14 +436,13 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
 
     published.current = next;
     onReady(next);
-  }, [files, embeddings, cardHash, onReady]);
+  }, [files, cardHash, onReady]);
 
   // Fingerprint the front whenever it changes.
   //
-  // On the file rather than inside readFaces, because readFaces is skipped when
-  // there is no photo of the person to compare against — and a card with no
-  // accompanying photo is exactly the case where an admin most needs to know
-  // whether that card is already on file somewhere else.
+  // Keep duplicate-card checking independent from Face++ so a provider outage
+  // cannot hide whether the same card is already attached.
+  // to another account.
   useEffect(() => {
     const front = files.front;
     if (!front) {
@@ -657,9 +499,11 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
               <h3 id={`id-${slot}-label`} className="text-sm font-semibold text-cocoa-800">
                 {SLOT_COPY[slot].label}
               </h3>
-              <p className="mt-0.5 text-[11px] leading-snug text-cocoa-500">
-                {SLOT_COPY[slot].hint}
-              </p>
+              {SLOT_COPY[slot].hint && (
+                <p className="mt-0.5 text-[11px] leading-snug text-cocoa-500">
+                  {SLOT_COPY[slot].hint}
+                </p>
+              )}
             </div>
             <span
               className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-semibold ${
@@ -707,7 +551,12 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
                 aria-hidden="true"
                 className="pointer-events-none absolute inset-0 flex items-center justify-center p-5"
               >
-                <div className="aspect-[1.59/1] w-[88%] max-w-[21rem] rounded-xl border-2 border-dashed border-cream-100/80 shadow-[0_0_0_999px_rgba(22,18,14,0.28)]" />
+                <div
+                  ref={slot === "front" ? guideRef : undefined}
+                  className={`aspect-[1.59/1] w-[88%] max-w-[21rem] rounded-xl border-2 border-dashed shadow-[0_0_0_999px_rgba(22,18,14,0.28)] transition-colors ${
+                    idScanDetected ? "border-green-400 shadow-[0_0_0_999px_rgba(22,18,14,0.18)]" : "border-cream-100/80"
+                  }`}
+                />
               </div>
 
               {camBlocked && (
@@ -772,7 +621,7 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
                 <button
                   type="button"
                   className="btn-primary !px-3 !py-1.5 text-xs"
-                  disabled={disabled || reading}
+                  disabled={disabled}
                   onClick={() => void confirmFrontCapture()}
                 >
                   Use this ID
@@ -790,24 +639,36 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
           )}
 
           {slot === "front" && camSlot === "front" && !camBlocked && (
-            <div className="mb-3 rounded-xl border border-cream-200 bg-white px-3.5 py-3">
+            <div
+              className={`mb-3 rounded-xl border px-3.5 py-3 transition-colors ${
+                idScanDetected
+                  ? "border-green-200 bg-green-50"
+                  : "border-cream-200 bg-white"
+              }`}
+            >
               <div className="flex items-center gap-2">
                 <span
                   aria-hidden="true"
                   className={`h-2.5 w-2.5 shrink-0 rounded-full ${
                     idScanner.phase === "capturing"
-                      ? "animate-pulse bg-ochre-500"
-                      : idScanner.phase === "hold"
+                      ? "animate-pulse bg-green-600"
+                      : idScanDetected
                         ? "bg-green-600"
                         : "bg-cocoa-300"
                   }`}
                 />
-                <p role="status" aria-live="polite" className="text-xs font-medium text-cocoa-700">
+                <p
+                  role="status"
+                  aria-live="polite"
+                  className={`text-xs font-medium ${idScanDetected ? "text-green-800" : "text-cocoa-700"}`}
+                >
                   {idScanner.message}
                 </p>
               </div>
               <div
-                className="mt-2 h-1.5 overflow-hidden rounded-full bg-cream-100"
+                className={`mt-2 h-1.5 overflow-hidden rounded-full ${
+                  idScanDetected ? "bg-green-100" : "bg-cream-100"
+                }`}
                 role="progressbar"
                 aria-label="ID steadiness"
                 aria-valuemin={0}
@@ -815,7 +676,9 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
                 aria-valuenow={Math.round(idScanner.holdProgress * 100)}
               >
                 <div
-                  className="h-full rounded-full bg-ochre-500 transition-[width] duration-200"
+                  className={`h-full rounded-full transition-[width] duration-200 ${
+                    idScanDetected ? "bg-green-600" : "bg-ochre-500"
+                  }`}
                   style={{ width: `${Math.round(idScanner.holdProgress * 100)}%` }}
                 />
               </div>
@@ -847,9 +710,7 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
                 <img
                   src={previews[slot]}
                   alt={`Preview of ${SLOT_COPY[slot].label}`}
-                  className={`h-full w-full ${
-                    slot === "photo" ? "object-cover" : "object-contain"
-                  }`}
+                  className="h-full w-full object-contain"
                 />
               ) : (
                 <span className="flex h-full w-full items-center justify-center px-1 text-center text-[10px] text-cocoa-400">
@@ -938,8 +799,6 @@ export default function IdUpload({ disabled, onReady }: IdUploadProps) {
           </div>
         </section>
       ))}
-
-      {reading && <p className="text-[11px] text-cocoa-500">Looking for the face on the card…</p>}
 
       {note && (
         <div className="rounded-xl bg-ochre-50 px-3 py-2.5 text-[11px] leading-snug text-ochre-700">

@@ -1,9 +1,10 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail, readBody } from "@/lib/api";
+import { handler, ok, fail, readBody, dbFail } from "@/lib/api";
 import { hashPassword, newStaffToken, requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { currentSampleUserIds } from "@/lib/face-samples";
-import { getFaceEngine } from "@/lib/settings";
+import { getFaceEngine, getFaceLoginSettings } from "@/lib/settings";
+import { getDutyWindow } from "@/lib/face-gate";
 import { FACE_POSES, type FacePose } from "@/lib/face";
 
 export const runtime = "nodejs";
@@ -26,7 +27,7 @@ export const runtime = "nodejs";
  * from /api/users/:id/id/status, which is only fetched when someone is reviewing.
  */
 const USER_COLUMNS =
-  "id, username, full_name, role, qr_token, can_manage_items, is_active, deactivation_reason, deactivated_at, created_at, position, start_date, first_name, last_name, face_enabled, face_enrolled_at, last_face_verified_at, verification_status, id_doc_type, verified_at";
+  "id, username, recovery_email, full_name, role, qr_token, can_manage_items, is_active, deactivation_reason, deactivated_at, created_at, position, start_date, first_name, last_name, face_enabled, face_enrolled_at, last_face_verified_at, profile_photo_updated_at, verification_status, id_doc_type, verified_at";
 
 /* ---------------- list ---------------- */
 export const GET = handler(async () => {
@@ -38,7 +39,7 @@ export const GET = handler(async () => {
     .order("role", { ascending: true })
     .order("full_name", { ascending: true });
 
-  if (error) return fail(error.message, 500);
+  if (error) return dbFail(error);
 
   /*
    * Which enrolled faces the current engine can actually compare.
@@ -66,7 +67,7 @@ export const GET = handler(async () => {
         .in("user_id", userIds)
     : { data: [], error: null };
 
-  if (samplesError) return fail(samplesError.message, 500);
+  if (samplesError) return dbFail(samplesError, { context: "staff face samples" });
 
   const posesByUser = new Map<string, Set<FacePose>>();
   for (const sample of (samples ?? []) as { user_id: string; pose: string }[]) {
@@ -76,15 +77,44 @@ export const GET = handler(async () => {
     posesByUser.set(sample.user_id, poses);
   }
 
+  /*
+   * Whether each person is inside their duty window right now.
+   *
+   * Derived here rather than left to the browser, because the answer depends on
+   * the admin-configured duty hours and on the server's clock. The panel used to
+   * show only "last passed", which reads identically whether the check is still
+   * good or ran out hours ago — and an override that stamps a fresh timestamp
+   * then looked like no change at all. Settings are cached in-process, so this
+   * is arithmetic per row, not a query per row.
+   */
+  const facePolicy = await getFaceLoginSettings();
+  const duty = await Promise.all(
+    users.map((u) =>
+      getDutyWindow({
+        userId: String(u.id),
+        role: String(u.role),
+        faceEnabled: u.face_enabled === true,
+        lastVerifiedAt: (u.last_face_verified_at as string | null) ?? null,
+      }, facePolicy)
+    )
+  );
+
   return ok({
-    users: users.map((u) => ({
+    users: users.map((u, i) => ({
       ...u,
+      profile_photo_url: u.profile_photo_updated_at
+        ? `/api/users/${String(u.id)}/profile-photo?v=${encodeURIComponent(String(u.profile_photo_updated_at))}`
+        : null,
       face_needs_enrolment: Boolean(u.face_enabled) && !current.has(String(u.id)),
       face_poses: u.face_enabled
         ? FACE_POSES.filter(
             (pose) => pose === "front" || posesByUser.get(String(u.id))?.has(pose)
           )
         : [],
+      duty_window_open: duty[i].open,
+      duty_check_enabled: duty[i].enabled,
+      duty_next_due_at: duty[i].until,
+      duty_bypassed: duty[i].bypassed,
     })),
   });
 });
@@ -104,6 +134,7 @@ export const POST = handler(async (req: Request) => {
   const startDate = String(body.start_date ?? "").trim();
   const firstName = String(body.first_name ?? "").trim();
   const lastName = String(body.last_name ?? "").trim();
+  const recoveryEmail = String(body.recovery_email ?? "").trim().toLowerCase();
 
   // Composed here so everything downstream can keep reading full_name — that is
   // what the printed badge label, the audit log and the movement history use.
@@ -115,8 +146,19 @@ export const POST = handler(async (req: Request) => {
   if (firstName.length > 60 || lastName.length > 60) {
     return fail("Names must be 60 characters or fewer");
   }
-  if (password.length < 6) return fail("Password must be at least 6 characters");
+  // Same minimum as change-password and the admin reset — one policy, whichever
+  // door the password arrives through.
+  if (password.length < 8) return fail("Password must be at least 8 characters");
   if (role !== "admin" && role !== "staff") return fail("Invalid role");
+  if (role === "admin" && !recoveryEmail) {
+    return fail("A recovery email is required for admin accounts");
+  }
+  if (
+    role === "admin" &&
+    (recoveryEmail.length > 254 || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(recoveryEmail))
+  ) {
+    return fail("Enter a valid admin recovery email address");
+  }
   if (position.length > 80) return fail("Position must be 80 characters or fewer");
 
   // Shape-checked rather than left to the insert, for the same reason the edit
@@ -138,6 +180,7 @@ export const POST = handler(async (req: Request) => {
     .from("users")
     .insert({
       username,
+      recovery_email: role === "admin" ? recoveryEmail : null,
       full_name: composedName,
       first_name: firstName || null,
       last_name: lastName || null,
@@ -146,6 +189,9 @@ export const POST = handler(async (req: Request) => {
       // Staff sign in with the printed barcode code; admins sign in with a
       // username. The column is still called qr_token for historical reasons.
       qr_token: role === "staff" ? newStaffToken() : null,
+      is_active: true,
+      deactivation_reason: null,
+      deactivated_at: null,
       // FR-03. Grantable at creation so a trusted hire starts with it rather
       // than needing a second trip to the admin. Only meaningful for staff —
       // an admin can already manage items.
@@ -167,7 +213,7 @@ export const POST = handler(async (req: Request) => {
     .select(USER_COLUMNS)
     .single();
 
-  if (error) return fail(error.message, 500);
+  if (error) return dbFail(error);
 
   await audit(admin, "USER_CREATE", "user", data.id, {
     username: data.username,

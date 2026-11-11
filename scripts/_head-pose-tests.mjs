@@ -28,6 +28,11 @@ import {
   yawFraction,
 } from "../src/lib/head-pose.ts";
 import { poseRefusal } from "../src/lib/face.ts";
+import {
+  FACEPP_LOGIN_SIDE_MIN_YAW,
+  FACEPP_LOGIN_SIDE_STABLE_READS,
+  isFacePlusPlusLoginSidePoseReady,
+} from "../src/lib/facepp-capture-policy.ts";
 
 let pass = 0;
 let fail = 0;
@@ -320,6 +325,50 @@ check(
   "a generous three-quarter turn is accepted",
   poseStateFromAngles({ yaw: 62, pitch: 0, roll: 0 }).pose === "left",
   "55° used to refuse this and call it 'not far enough'"
+);
+
+section("Face++ login capture policy");
+
+const loginLeftAtMinimum = poseStateFromAngles({
+  yaw: FACEPP_LOGIN_SIDE_MIN_YAW,
+  pitch: 0,
+  roll: 0,
+});
+const loginRightAtMinimum = poseStateFromAngles({
+  yaw: -FACEPP_LOGIN_SIDE_MIN_YAW,
+  pitch: 0,
+  roll: 0,
+});
+check(
+  "left capture accepts the reduced 35-degree turn",
+  isFacePlusPlusLoginSidePoseReady("left", loginLeftAtMinimum)
+);
+check(
+  "right capture requires the opposite turn",
+  isFacePlusPlusLoginSidePoseReady("right", loginRightAtMinimum)
+);
+check(
+  "a 34-degree login turn is not enough",
+  !isFacePlusPlusLoginSidePoseReady(
+    "left",
+    poseStateFromAngles({ yaw: 34, pitch: 0, roll: 0 })
+  )
+);
+check(
+  "a barely accepted local angle is not enough for Face++",
+  !isFacePlusPlusLoginSidePoseReady(
+    "left",
+    poseStateFromAngles({ yaw: SIDE_MIN_YAW, pitch: 0, roll: 0 })
+  )
+);
+check(
+  "a left turn cannot satisfy the right prompt",
+  !isFacePlusPlusLoginSidePoseReady("right", loginLeftAtMinimum)
+);
+check(
+  "login holds a side pose across multiple reads",
+  FACEPP_LOGIN_SIDE_STABLE_READS >= 5,
+  `${FACEPP_LOGIN_SIDE_STABLE_READS} consecutive reads`
 );
 
 section("poseStateFromAngles — tilt and pitch outrank yaw");

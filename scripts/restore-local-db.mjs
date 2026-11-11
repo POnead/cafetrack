@@ -1,4 +1,4 @@
-/**
+ /**
  * Restores the local PGlite database from a backup made by db:backup.
  *
  * The current .pglite is moved aside rather than deleted, so a mistaken

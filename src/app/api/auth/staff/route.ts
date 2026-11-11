@@ -1,10 +1,21 @@
 import { db } from "@/lib/supabase";
 import { handler, ok, fail, readBody, clientIp } from "@/lib/api";
-import { verifyPassword, signSession, setSessionCookie, deactivatedMessage } from "@/lib/auth";
-import { newStep2Nonce, signStep2Ticket } from "@/lib/auth/step2-ticket";
+import {
+  clearSessionCookie,
+  verifyPassword,
+  signSession,
+  setSessionCookie,
+  hasActiveSession,
+  deactivatedMessage,
+} from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { dispatchSoon } from "@/lib/email";
-import { getSessionMinutes } from "@/lib/settings";
+import {
+  getFaceLoginSettings,
+  getSessionMinutes,
+} from "@/lib/settings";
+import { verificationRequired } from "@/lib/face";
+import { newStep2Nonce, signStep2Ticket } from "@/lib/auth/step2-ticket";
 import { getIdGate } from "@/lib/id-gate";
 import {
   checkLoginThrottle,
@@ -16,25 +27,7 @@ import {
 
 export const runtime = "nodejs";
 
-/**
- * True only on the throwaway test server, never in production.
- *
- * Two-step sign-in makes the enrolled-face check mandatory, and a test has no
- * enrolled face to present. Fifteen suites use POST /api/auth/staff as
- * their login helper and would all fail at the door without an escape, so a
- * legacy test suite can explicitly opt in to CAFETRACK_DISABLE_STEP2 and this
- * route behaves exactly as it did before.
- *
- * The `NODE_ENV` check is the one that matters. The env var is the convenience;
- * being unable to turn step two off on a real deployment is the requirement.
- * Same shape as CAFETRACK_DISABLE_EMAIL, which dev-test.mjs also sets.
- */
-function bypassStepTwo(): boolean {
-  return (
-    process.env.NODE_ENV !== "production" &&
-    process.env.CAFETRACK_DISABLE_STEP2 === "1"
-  );
-}
+const STAFF_LOGIN_METHOD = "staff_password";
 
 /**
  * Record a rejected sign-in and, if anyone is listening by email, tell them.
@@ -88,9 +81,8 @@ async function recordRejection(
  */
 const LOGIN_COLUMNS =
   "id, username, password_hash, full_name, role, qr_token, is_active, " +
-  "deactivation_reason, deactivated_at, session_token, verification_status, " +
-  "face_enabled, id_card_hash, face_embedding, " +
-  "id_doc_front is not null as has_id_doc";
+  "deactivation_reason, deactivated_at, session_token, session_last_active_at, verification_status, " +
+  "face_enabled, last_face_verified_at, id_doc_front is not null as has_id_doc";
 
 /**
  * What `LOGIN_COLUMNS` returns. Spelled out so `getIdGate` and the session
@@ -108,10 +100,10 @@ type LoginUser = {
   deactivation_reason: string | null;
   deactivated_at: string | null;
   session_token: string | null;
+  session_last_active_at: string | null;
   verification_status: string | null;
   face_enabled: boolean | null;
-  id_card_hash: string | null;
-  face_embedding: unknown;
+  last_face_verified_at: string | null;
   has_id_doc: boolean;
 };
 
@@ -130,14 +122,18 @@ export const POST = handler(async (req: Request) => {
     return fail("Username or barcode and password are required");
   }
 
+  const rejectUnknownCredential = async () => {
+    await recordRejection(req, null, "unknown_credential", input);
+    return fail("Unrecognized username or barcode", 401);
+  };
+
   // The identifier is compared as a value, never interpolated into a PostgREST
   // filter grammar. It used to be spliced into `.or(qr_token.eq.${input},...)`,
   // where a comma or dot in the input becomes query syntax and can match a
   // different account than the one presented. Two exact lookups are also easier
   // to reason about: a barcode either matches a barcode or it does not.
   if (input.length > 64) {
-    await recordLoginAttempt(tokenKey(input), "staff", false);
-    return fail("Unrecognized username or barcode", 401);
+    return rejectUnknownCredential();
   }
 
   let user: LoginUser | null = null;
@@ -172,20 +168,20 @@ export const POST = handler(async (req: Request) => {
     return fail("Cannot reach the database. Check the server configuration.", 503);
   }
 
-  const method = user?.qr_token === input ? "staff_qr" : "staff";
-  const key = user ? userKey(user.username) : tokenKey(input);
-  const throttle = await checkLoginThrottle(key, method);
+  if (!user) {
+    return rejectUnknownCredential();
+  }
+
+  const key = userKey(user.username);
+  const method = STAFF_LOGIN_METHOD;
+  const throttle = await checkLoginThrottle(key, method, {
+    includeMethodLimit: false,
+  });
   if (throttle.blocked) return tooManyAttempts(throttle.retryAfterSeconds);
 
   const logAttempt = async (success: boolean) => {
     await recordLoginAttempt(key, method, success);
   };
-
-  if (!user) {
-    await logAttempt(false);
-    await recordRejection(req, null, "unknown_credential", input);
-    return fail("Unrecognized username or barcode", 401);
-  }
 
   if (!verifyPassword(pwd, user.password_hash)) {
     await logAttempt(false);
@@ -240,96 +236,82 @@ export const POST = handler(async (req: Request) => {
     });
   }
 
-  /*
-   * Step one of a two-step sign-in. The password is proven; the session is not
-   * minted yet.
-   *
-   * This is the whole point of the change, so it is worth being explicit about
-   * what went wrong before. Signing a session here made step two advisory: the
-   * cookie was already in the browser while the face-check panel was still on
-   * screen, so any request made during that window - including one the panel
-   * never made - walked straight past the check that was supposed to be the
-   * second factor.
-   *
-   * So nothing session-shaped is written here. What comes back is a ticket,
-   * signed with a key the session code does not hold (see lib/auth/step2-ticket),
-   * which /api/auth/staff/confirm exchanges for a real session once a face or an
-   * ID card has matched. The ticket cannot be used as a session cookie, which is
-   * what makes "the second step is mandatory" true rather than aspirational.
-   */
-  await logAttempt(true);
+  const { enabled: faceLoginEnabled, dutyHours } = await getFaceLoginSettings();
+  const faceCheckDue =
+    faceLoginEnabled &&
+    (!user.face_enabled ||
+      verificationRequired({
+        enabled: true,
+        role: user.role,
+        faceEnabled: true,
+        lastVerifiedAt: user.last_face_verified_at,
+        hours: dutyHours,
+      }));
 
-  /*
-   * Explicit test bypass only. See bypassStepTwo() for why this exists and what
-   * it costs.
-   *
-   * Double-gated on purpose: scripts/dev-test.mjs only sets the flag for an
-   * explicitly requested legacy test mode, and this branch refuses to run in
-   * production even if it somehow is. Fifteen existing
-   * suites use this endpoint as their login helper and have no face and no card
-   * to present at a second step, so without this the mandatory step two would
-   * not be a feature but an outage.
-   */
-  if (bypassStepTwo()) {
-    const session = {
-      id: user.id,
+  if (faceCheckDue) {
+    // The browser may still carry a session from an earlier sign-in (or even a
+    // different account). Do not leave it usable while this login is held at
+    // the required face check.
+    await clearSessionCookie(user.id, db());
+    await logAttempt(true);
+    await audit(
+      { id: user.id, username: user.username, fullName: user.full_name, role: "staff" },
+      "LOGIN_PASSWORD_OK",
+      "user",
+      user.id,
+      { method },
+      { critical: false, ip: clientIp(req), outcome: "partial" }
+    );
+
+    const nonce = newStep2Nonce();
+    const { error: nonceError } = await db()
+      .from("users")
+      .update({ step2_nonce: nonce })
+      .eq("id", user.id);
+
+    if (nonceError) {
+      console.error("staff login nonce write failed:", nonceError.message);
+      return fail("Cannot reach the database. Try again in a moment.", 503);
+    }
+
+    const ticket = await signStep2Ticket({
+      userId: user.id,
       username: user.username,
-      fullName: user.full_name,
-      role: "staff" as const,
-    };
-
-    const minutes = await getSessionMinutes();
-    const token = await signSession(session, minutes);
-    await setSessionCookie(token, minutes, user.id, db());
-
-    await audit(session, "LOGIN", "user", user.id, { method }, {
-      ip: clientIp(req),
-      outcome: "success",
+      nonce,
     });
 
     return ok({
-      user: session,
-      session_conflict: Boolean(user.session_token),
-      step2_bypassed: true,
+      step2_required: true,
+      ticket,
+      ticket_seconds: 300,
+      full_name: user.full_name,
     });
   }
 
-  /*
-   * Password accepted; step two still owed. Audited as its own thing rather than
-   * folded into the eventual LOGIN, because an account that types a correct
-   * password and then walks away is worth being able to count.
-   */
-  await audit(
-    { id: user.id, username: user.username, fullName: user.full_name, role: "staff" },
-    "LOGIN_PASSWORD_OK",
-    "user",
-    user.id,
-    { method },
-    { critical: false, ip: clientIp(req), outcome: "partial" }
-  );
+  // A current face verification covers password sign-ins until the configured
+  // duty window expires; otherwise password sign-in finishes normally.
+  await logAttempt(true);
 
-  const nonce = newStep2Nonce();
-
-  const { error: nonceError } = await db()
-    .from("users")
-    .update({ step2_nonce: nonce })
-    .eq("id", user.id);
-
-  if (nonceError) {
-    console.error("staff login nonce write failed:", nonceError.message);
-    return fail("Cannot reach the database. Try again in a moment.", 503);
-  }
-
-  const ticket = await signStep2Ticket({
-    userId: user.id,
+  const session = {
+    id: user.id,
     username: user.username,
-    nonce,
+    fullName: user.full_name,
+    role: "staff" as const,
+  };
+  const minutes = await getSessionMinutes("staff");
+  const sessionToken = await signSession(session, minutes);
+  await setSessionCookie(sessionToken, minutes, user.id, db());
+
+  await audit(session, "LOGIN", "user", user.id, { method }, {
+    ip: clientIp(req),
+    outcome: "success",
   });
 
   return ok({
-    step2_required: true,
-    ticket,
-    ticket_seconds: 300,
-    full_name: user.full_name,
+    user: session,
+    session_conflict: await hasActiveSession(
+      user.session_token,
+      user.session_last_active_at
+    ),
   });
 });

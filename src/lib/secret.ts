@@ -8,8 +8,6 @@
  * source. Refusing to start is far better than that.
  */
 
-const DEV_FALLBACK = "dev-only-secret-change-me-please-32-chars-min";
-
 /** Comfortably longer than an HMAC key needs, and catches obvious mistakes. */
 const MIN_LENGTH = 32;
 
@@ -27,7 +25,7 @@ const HOW_TO_GENERATE =
   '(or on Windows: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))")';
 
 function isPlaceholderSecret(value: string): boolean {
-  return value === DEV_FALLBACK || PLACEHOLDER.test(value);
+  return PLACEHOLDER.test(value);
 }
 
 /** True when AUTH_SECRET is set, long enough, and not a published placeholder. */
@@ -46,18 +44,10 @@ export function resolveAuthSecret(): string {
 
   if (secret.length >= MIN_LENGTH && !isPlaceholderSecret(secret)) return secret;
 
-  if (process.env.NODE_ENV === "production") {
-    throw new Error(
-      `AUTH_SECRET must be set to a real random value of at least ${MIN_LENGTH} characters in production. ` +
-        HOW_TO_GENERATE
-    );
-  }
-
-  // eslint-disable-next-line no-console
-  console.warn(
-    "[auth] AUTH_SECRET is not set — falling back to the published dev secret. " +
-      "Sessions will not survive a restart and must never be trusted. " +
+  // Fail closed in ALL environments. A published dev secret means every session
+  // cookie can be forged by anyone who has read the source.
+  throw new Error(
+    `AUTH_SECRET must be set to a real random value of at least ${MIN_LENGTH} characters. ` +
       HOW_TO_GENERATE
   );
-  return DEV_FALLBACK;
 }

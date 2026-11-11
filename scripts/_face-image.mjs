@@ -141,6 +141,22 @@ check(
 );
 check("exactly at the limit is allowed", (await readFaceImage(makeFile(PNG, "image/png", MAX_IMAGE_BYTES))).ok === true);
 check("the limit is 200KB", MAX_IMAGE_BYTES === 200 * 1024, `${MAX_IMAGE_BYTES} bytes`);
+const profileLimit = 2 * 1024 * 1024;
+check(
+  "profile portraits can use their larger upload limit",
+  (await readFaceImage(makeFile(PNG, "image/png", MAX_IMAGE_BYTES + 1), {
+    maxBytes: profileLimit,
+    purpose: "profile photo",
+  })).ok === true
+);
+const oversizedProfile = await readFaceImage(makeFile(PNG, "image/png", profileLimit + 1), {
+  maxBytes: profileLimit,
+  purpose: "profile photo",
+});
+check(
+  "profile portraits are still capped at 2MB",
+  oversizedProfile.ok === false && oversizedProfile.reason === "too-large"
+);
 
 /* ------------------------------------------------------------- lying --- */
 

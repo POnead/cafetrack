@@ -2,7 +2,7 @@
  * Read-only access to the `settings` key/value table.
  *
  * Values are cached in-process for a minute: every request that signs or
- * refreshes a session touches `session_timeout_minutes`, and hitting the DB
+ * refreshes a session touches a role-specific session timeout, and hitting the DB
  * for it on each call would be wasteful.
  *
  * Deliberately independent of lib/auth.ts — auth.ts is imported by local-db.ts,
@@ -10,6 +10,10 @@
  * would close an import cycle. Routes read the value here and pass it in.
  */
 import { db } from "./supabase";
+import {
+  DEFAULT_ROLE_IDLE_TIMEOUT_MINUTES,
+  type SessionRole,
+} from "./session-policy";
 import {
   DEFAULT_DUTY_HOURS,
   DEFAULT_FACE_ENGINE,
@@ -19,16 +23,10 @@ import {
   matchThresholdBand,
   parseEngine,
 } from "./face";
-import {
-  DEFAULT_ID_MATCH_THRESHOLD,
-  MAX_ID_MATCH_THRESHOLD,
-  MIN_ID_MATCH_THRESHOLD,
-} from "./id-verification/local";
 
 const CACHE_TTL_MS = 60_000;
 
-/** Matches the seeded schema defaults, used whenever the setting is unreadable. */
-export const DEFAULT_SESSION_MINUTES = 15;
+/** Matches the seeded schema defaults, used whenever a setting is unreadable. */
 export const DEFAULT_EXPIRY_WARNING_DAYS = 7;
 
 let cache: { at: number; values: Record<string, string> } | null = null;
@@ -59,14 +57,34 @@ export async function getSetting(key: string): Promise<string | null> {
 }
 
 function clampInt(raw: string | null, fallback: number, min: number, max: number) {
+  if (raw === null) return fallback;
   const n = Number(raw);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(Math.max(Math.round(n), min), max);
 }
 
-/** Session lifetime in minutes (settings.session_timeout_minutes). */
-export async function getSessionMinutes(): Promise<number> {
-  return clampInt(await getSetting("session_timeout_minutes"), DEFAULT_SESSION_MINUTES, 1, 480);
+/** Session lifetime in minutes, independently configurable by role. */
+export async function getSessionMinutes(role: SessionRole): Promise<number> {
+  const key = `${role}_session_timeout_minutes`;
+  const configured = await getSetting(key);
+  if (configured !== null) {
+    return clampInt(configured, DEFAULT_ROLE_IDLE_TIMEOUT_MINUTES[role], 1, 480);
+  }
+
+  // Existing installs may not have applied the additive settings migration yet.
+  // Preserve the old shared setting's behavior until the role-specific rows exist.
+  const legacy = clampInt(
+    await getSetting("session_timeout_minutes"),
+    DEFAULT_ROLE_IDLE_TIMEOUT_MINUTES[role],
+    1,
+    480
+  );
+  return Math.min(legacy, DEFAULT_ROLE_IDLE_TIMEOUT_MINUTES[role]);
+}
+
+/** Idle timeout in minutes for this role. */
+export async function getRoleIdleMinutes(role: SessionRole): Promise<number> {
+  return getSessionMinutes(role);
 }
 
 /** Days before expiry that an item starts warning (settings.expiry_warning_days). */
@@ -108,32 +126,62 @@ async function readToggle(key: string): Promise<boolean> {
 }
 
 /**
- * Is duty verification switched on (settings.face_verification_enabled)?
+ * Read the staff login-face policy without the process-local cache.
  *
- * The master switch. While this is off nothing face-related loads, no camera is
- * asked for, and every staff member walks straight in.
+ * Next may evaluate route handlers in separate module contexts, so clearing the
+ * settings page's cache does not necessarily invalidate the password route's
+ * cache. Authentication policy must not use stale values: an enabled check or
+ * shortened duty window must apply to the next login. A read error is thrown
+ * rather than treated as "off", so a database problem cannot silently bypass
+ * the required second factor.
  */
-export async function getFaceVerificationEnabled(): Promise<boolean> {
-  return readToggle("face_verification_enabled");
+export async function getFaceLoginSettings(): Promise<{
+  enabled: boolean;
+  dutyHours: number;
+}> {
+  const { data, error } = await db()
+    .from("settings")
+    .select("key, value")
+    .in("key", ["face_login_enabled", "face_verification_enabled", "face_duty_hours"]);
+
+  if (error) {
+    console.error("Could not read staff face-login settings:", error.message);
+    throw new Error("Could not read staff face-login settings");
+  }
+
+  const values = Object.fromEntries(
+    ((data ?? []) as { key: string; value: string }[]).map(({ key, value }) => [
+      key,
+      value,
+    ])
+  );
+  const enabledValue =
+    values.face_login_enabled ?? values.face_verification_enabled ?? null;
+
+  return {
+    enabled: toggleIsEnabled(enabledValue),
+    dutyHours: clampFloat(
+      values.face_duty_hours ?? null,
+      DEFAULT_DUTY_HOURS,
+      MIN_DUTY_HOURS,
+      MAX_DUTY_HOURS
+    ),
+  };
 }
 
-/**
- * May staff sign in with their face instead of a password
- * (settings.face_login_enabled)?
- *
- * Deliberately a *different* switch from duty verification, and the two must not
- * be folded together. They answer unrelated questions — "prove it is you at the
- * start of this shift" and "let this person in without typing a password" — and a
- * cafe may reasonably want the first, the second, both or neither. Folding them
- * together would mean that trialling face sign-in silently also switches every
- * member of staff over to duty checks, which is a far larger change than anyone
- * asking for face login has agreed to.
- *
- * Off by default. A sign-in method is the front door of the app, and nothing
- * about this one should be switched on without an admin deciding it.
- */
+function toggleIsEnabled(raw: string | null): boolean {
+  const value = raw?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes" || value === "on";
+}
+
+/** Whether the face-check policy applies to the staff duty window. */
+export async function getFaceVerificationEnabled(): Promise<boolean> {
+  return (await getFaceLoginSettings()).enabled;
+}
+
+/** Whether staff password sign-in requires the enrolled-face second step. */
 export async function getFaceLoginEnabled(): Promise<boolean> {
-  return readToggle("face_login_enabled");
+  return (await getFaceLoginSettings()).enabled;
 }
 
 /**
@@ -239,35 +287,4 @@ export async function getFaceVerifyPublicUrl(): Promise<string | null> {
  */
 export async function getIdVerificationRequired(): Promise<boolean> {
   return readToggle("id_verification_required");
-}
-
-/**
- * Which engine reads the ID (settings.id_provider). Empty means "whatever is
- * configured" — the local checks plus any vendor whose credentials are present.
- *
- * A name that is not available is *not* an error. The orchestrator falls back to
- * the automatic choice, because a feature that stops working when a vendor key
- * expires is worse than one that quietly gets less thorough.
- */
-export async function getIdProvider(): Promise<string> {
-  return ((await getSetting("id_provider")) ?? "").trim().toLowerCase();
-}
-
-/**
- * How close the portrait printed on the card and the photo of the person must
- * be (settings.id_face_match_threshold). Lower is stricter.
- *
- * A separate setting from `face_match_threshold` and set far looser, because it
- * compares two genuinely different things. See DEFAULT_ID_MATCH_THRESHOLD in
- * lib/id-verification/local.ts for why that number is reasoned rather than
- * measured — which is also the reason this one is worth revisiting once there
- * are real cards to test against.
- */
-export async function getIdFaceMatchThreshold(): Promise<number> {
-  return clampFloat(
-    await getSetting("id_face_match_threshold"),
-    DEFAULT_ID_MATCH_THRESHOLD,
-    MIN_ID_MATCH_THRESHOLD,
-    MAX_ID_MATCH_THRESHOLD
-  );
 }

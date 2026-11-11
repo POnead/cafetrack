@@ -149,6 +149,12 @@ function frame(pose, vector) {
   };
 }
 
+const BLINK_EVIDENCE = {
+  before: frame("front", PERSON).evidence,
+  closed: frame("front", PERSON).evidence,
+  after: frame("front", PERSON).evidence,
+};
+
 /* ---------------- run ---------------- */
 
 console.log("\nThree-angle faces");
@@ -292,18 +298,76 @@ await call("PATCH", "/api/settings", { face_login_enabled: "1" }, cookie);
 const triStaffStepOne = await staffLogin(`angle3${uniq}`, "staff123");
 check("the staff password step is accepted and requires step two", triStaffStepOne);
 
-const threeFrames = await call(
+const noBlink = await call(
+  "POST",
+  "/api/auth/face-login",
+  {
+    identifier: `angle3${uniq}`,
+    face_frames: [frame("front", PERSON), frame("left", PERSON)],
+  },
+  undefined
+);
+check("a presentation without the blink challenge is refused", noBlink.status === 401, `${noBlink.status}`);
+
+const bothSides = await call(
   "POST",
   "/api/auth/face-login",
   {
     identifier: `angle3${uniq}`,
     face_frames: [frame("front", PERSON), frame("left", PERSON), frame("right", PERSON)],
+    blink_evidence: BLINK_EVIDENCE,
   },
   undefined
 );
-check("three frames from the enrolled person are accepted", threeFrames.status === 200, `${threeFrames.status} ${threeFrames.data?.error ?? ""}`);
+check("a presentation cannot submit both side angles", bothSides.status === 401, `${bothSides.status}`);
 
-section("matching — a presentation missing an angle is refused");
+const frontAndLeft = await call(
+  "POST",
+  "/api/auth/face-login",
+  {
+    identifier: `angle3${uniq}`,
+    face_frames: [frame("front", PERSON), frame("left", PERSON)],
+    blink_evidence: BLINK_EVIDENCE,
+  },
+  undefined
+);
+check(
+  "front plus left and a blink are accepted",
+  frontAndLeft.status === 200,
+  `${frontAndLeft.status} ${frontAndLeft.data?.error ?? ""}`
+);
+
+const repeatPasswordLogin = await call(
+  "POST",
+  "/api/auth/staff",
+  { username: `angle3${uniq}`, password: "staff123" },
+  undefined
+);
+check(
+  "a password sign-in within the duty window does not require another face scan",
+  repeatPasswordLogin.status === 200 &&
+    repeatPasswordLogin.data?.step2_required !== true &&
+    repeatPasswordLogin.data?.user?.role === "staff",
+  `${repeatPasswordLogin.status} ${repeatPasswordLogin.data?.error ?? ""}`
+);
+
+const frontAndRight = await call(
+  "POST",
+  "/api/auth/face-login",
+  {
+    identifier: `angle3${uniq}`,
+    face_frames: [frame("front", PERSON), frame("right", PERSON)],
+    blink_evidence: BLINK_EVIDENCE,
+  },
+  undefined
+);
+check(
+  "front plus right and a blink are accepted",
+  frontAndRight.status === 200,
+  `${frontAndRight.status} ${frontAndRight.data?.error ?? ""}`
+);
+
+section("matching — a presentation without a side angle is refused");
 
 /*
  * Each refusal uses its own account, because failed face sign-ins are throttled
@@ -320,7 +384,11 @@ await upload(
 const missingSide = await call(
   "POST",
   "/api/auth/face-login",
-  { identifier: `anglem${uniq}`, face_frames: [frame("front", PERSON)] },
+  {
+    identifier: `anglem${uniq}`,
+    face_frames: [frame("front", PERSON)],
+    blink_evidence: BLINK_EVIDENCE,
+  },
   undefined
 );
 check("a three-angle account is not let in on the front frame alone", missingSide.status === 401, `${missingSide.status}`);
@@ -339,7 +407,8 @@ const strangerFrames = await call(
   "/api/auth/face-login",
   {
     identifier: `anglex${uniq}`,
-    face_frames: [frame("front", STRANGER), frame("left", STRANGER), frame("right", STRANGER)],
+    face_frames: [frame("front", STRANGER), frame("left", STRANGER)],
+    blink_evidence: BLINK_EVIDENCE,
   },
   undefined
 );
@@ -373,16 +442,13 @@ const afterReEnrol = await call(
   "/api/auth/face-login",
   {
     identifier: `anglem${uniq}`,
-    face_frames: [
-      frame("front", PERSON),
-      frame("left", PERSON),
-      frame("right", PERSON),
-    ],
+    face_frames: [frame("front", PERSON), frame("left", PERSON)],
+    blink_evidence: BLINK_EVIDENCE,
   },
   undefined
 );
 check(
-  "and the replacement enrolment is checked against all three angles",
+  "and the replacement enrolment is checked against the presented angles",
   afterReEnrol.status === 200,
   `${afterReEnrol.status} ${afterReEnrol.data?.error ?? ""}`
 );
@@ -409,7 +475,12 @@ check(
 const legacyLogin = await call(
   "POST",
   "/api/auth/face-login",
-  { identifier: `angle1${uniq}`, embedding: PERSON },
+  {
+    identifier: `angle1${uniq}`,
+    embedding: PERSON,
+    face_evidence: frame("front", PERSON).evidence,
+    blink_evidence: BLINK_EVIDENCE,
+  },
   undefined
 );
 check(
@@ -442,12 +513,16 @@ await call("PATCH", "/api/settings", { face_engine: "legacy" }, cookie);
 const crossProbe = await call(
   "POST",
   "/api/auth/face-login",
-  { identifier: `anglee${uniq}`, embedding: PERSON },
+  {
+    identifier: `anglee${uniq}`,
+    face_frames: [frame("front", PERSON), frame("left", PERSON)],
+    blink_evidence: BLINK_EVIDENCE,
+  },
   undefined
 );
 check(
-  "an sface vector does not match a legacy check, even with identical numbers",
-  crossProbe.status === 401,
+  "legacy checks fail closed when live-face verification is unavailable",
+  crossProbe.status === 503,
   `${crossProbe.status}`
 );
 await call("PATCH", "/api/settings", { face_engine: "sface" }, cookie);
@@ -496,7 +571,8 @@ const stillLegacy = await call(
   "/api/auth/face-login",
   {
     identifier: `angleb${uniq}`,
-    face_frames: [frame("front", PERSON), frame("left", PERSON), frame("right", PERSON)],
+    face_frames: [frame("front", PERSON), frame("left", PERSON)],
+    blink_evidence: BLINK_EVIDENCE,
   },
   undefined
 );
@@ -508,7 +584,8 @@ const afterSwitch = await call(
   "/api/auth/face-login",
   {
     identifier: `angleb${uniq}`,
-    face_frames: [frame("front", PERSON), frame("left", PERSON), frame("right", PERSON)],
+    face_frames: [frame("front", PERSON), frame("left", PERSON)],
+    blink_evidence: BLINK_EVIDENCE,
   },
   undefined
 );

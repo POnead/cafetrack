@@ -44,6 +44,7 @@ export async function getIdGate(user: {
   verification_status?: string | null;
   /** Either the document itself, or a boolean computed by the caller's select. */
   id_doc_front?: string | null;
+  id_doc_expiry?: string | null;
   has_id_doc?: boolean;
 }): Promise<IdGate> {
   const status = String(user.verification_status ?? "unverified");
@@ -57,6 +58,17 @@ export async function getIdGate(user: {
   }
 
   if (status === "verified") {
+    if (user.id_doc_expiry) {
+      const expiry = new Date(`${user.id_doc_expiry}T23:59:59Z`);
+      if (!Number.isNaN(expiry.valueOf()) && expiry.valueOf() < Date.now()) {
+        return {
+          required: true,
+          cleared: false,
+          status,
+          message: "This account's ID has expired. Ask an administrator to review it.",
+        };
+      }
+    }
     return { required: true, cleared: true, status };
   }
 
@@ -96,7 +108,7 @@ export async function getIdGateFor(userId: string): Promise<IdGate | null> {
   const { data } = await db()
     .from("users")
     .select(
-      "id, role, is_active, verification_status, id_doc_front is not null as has_id_doc"
+      "id, role, is_active, verification_status, id_doc_expiry, id_doc_front is not null as has_id_doc"
     )
     .eq("id", userId)
     .maybeSingle();

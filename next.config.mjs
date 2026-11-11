@@ -60,6 +60,10 @@ function localHostnames() {
  * reaching the dev server by a name or an address not in networkInterfaces().
  */
 const allowedDevOrigins = [
+  "localhost",
+  "127.0.0.1",
+  "0.0.0.0",
+  "[::1]",
   ...localIPv4Addresses(),
   ...localHostnames(),
   ...(process.env.DEV_ALLOWED_ORIGINS ?? "")
@@ -72,17 +76,22 @@ const allowedDevOrigins = [
 // the page loads, but an unlisted address leaves it unstyled and unclickable,
 // and there is nothing on screen that says which address to try instead.
 if (process.env.NODE_ENV !== "production") {
+  const devHost =
+    process.env.CAFETRACK_DEV_HOST ?? [...localIPv4Addresses()][0] ?? "localhost";
+  const devProtocol = process.env.CAFETRACK_DEV_HTTPS === "1" ? "https" : "http";
+  const devPort = process.env.PORT ?? "3100";
   console.log(
     `[cafetrack] LAN origins allowed: ${allowedDevOrigins.join(", ") || "none"}\n` +
-      `[cafetrack] open on a phone/tablet at http://${
-        [...localIPv4Addresses()][0] ?? "<this machine's IPv4>"
-      }:3100`
+      `[cafetrack] open on a phone/tablet at ${devProtocol}://${devHost}:${devPort}`
   );
 }
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  experimental: {
+    turbopackFileSystemCacheForDev: false,
+  },
   // PGlite ships PostgreSQL compiled to WebAssembly, and pdfkit loads its font
   // metrics from `data/*.afm` on disk at runtime. Neither survives being
   // bundled: PGlite's WASM breaks, and pdfkit resolves its data directory
@@ -122,32 +131,21 @@ const nextConfig = {
    * on this app contains nothing sensitive today, but is one query parameter
    * away from doing so. These are one-line fixes that cost nothing at runtime.
    *
-   * CSP is deliberately a baseline rather than a nonce-based policy. Next needs
-   * `'unsafe-inline'` for its own bootstrap script unless the proxy mints a
-   * nonce per request, and the face engine needs `'wasm-unsafe-eval'` plus blob
-   * workers. Tightening this is a separate change, with a browser pass over
-   * login, enrolment and duty check — the three screens that load WASM.
+   * Content-Security-Policy lives in src/proxy.ts, not here: the strict policy
+   * is nonce-per-request, and a nonce cannot come from a static header table.
+   * The proxy mints one per response and sets the policy both ways — on the
+   * request (so Next stamps its inline bootstrap scripts with the nonce) and on
+   * the response — for every matched path, public ones included; that is the
+   * only shape in which inline scripts survive on the login screen. Set
+   * CAFETRACK_CSP_LEGACY=1 to fall back to the previous 'unsafe-inline' policy
+   * if a particular browser proves unable to run a nonce policy. The rest of
+   * these headers stay here: they are static values, and this keeps applying
+   * them to the paths the proxy does not walk into.
    */
   async headers() {
     const dev = process.env.NODE_ENV !== "production";
 
-    const csp = [
-      "default-src 'self'",
-      `script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'${dev ? " 'unsafe-eval'" : ""}`,
-      "style-src 'self' 'unsafe-inline'",
-      "img-src 'self' data: blob:",
-      "media-src 'self' blob:",
-      "font-src 'self' data:",
-      "connect-src 'self'",
-      "worker-src 'self' blob:",
-      "object-src 'none'",
-      "base-uri 'self'",
-      "form-action 'self'",
-      "frame-ancestors 'none'",
-    ].join("; ");
-
     const headers = [
-      { key: "Content-Security-Policy", value: csp },
       { key: "X-Content-Type-Options", value: "nosniff" },
       { key: "X-Frame-Options", value: "DENY" },
       { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },

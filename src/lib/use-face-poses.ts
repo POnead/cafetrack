@@ -30,7 +30,7 @@ import {
   poseAlreadyHeld,
   poseRefusal,
 } from "./face";
-import { poseStateOfRead, readFaceFor, useFaceEngine } from "./face-engine";
+import { capturePoseStateOfRead, readFaceFor, useFaceEngine } from "./face-engine";
 
 /** One frame of a presentation. What goes on the wire as `face_frames`. */
 export type PoseFrame = {
@@ -54,6 +54,10 @@ export type ReadResult = {
 export type FacePoseSequence = {
   /** The angle the screen should be asking for now. */
   activePose: FacePose;
+  /** Whether a detected pose satisfies the currently requested angle. */
+  acceptsPose: (expected: FacePose, seen: FacePose | null) => boolean;
+  /** The prompt steps, with alternatives represented by their first option. */
+  steps: readonly FacePose[];
   /** Frames accepted so far, in capture order. */
   frames: PoseFrame[];
   /** Why the last frame was refused, or null. */
@@ -76,7 +80,10 @@ export type FacePoseSequence = {
  */
 export function useFacePoses(
   poses: readonly FacePose[] = FACE_POSES,
-  { includeEvidence = true }: { includeEvidence?: boolean } = {}
+  {
+    includeEvidence = true,
+    acceptEitherSide = false,
+  }: { includeEvidence?: boolean; acceptEitherSide?: boolean } = {}
 ): FacePoseSequence & {
   read: (source: HTMLVideoElement | HTMLImageElement) => Promise<ReadResult>;
 } {
@@ -89,12 +96,46 @@ export function useFacePoses(
   const [frames, setFrames] = useState<PoseFrame[]>([]);
   const [message, setMessage] = useState<string | null>(null);
 
+  const poseGroups = useMemo<FacePose[][]>(() => {
+    if (!acceptEitherSide || !poses.includes("left") || !poses.includes("right")) {
+      return poses.map((pose) => [pose]);
+    }
+
+    const groups: FacePose[][] = [];
+    let sides: FacePose[] | null = null;
+    for (const pose of poses) {
+      if (pose === "left" || pose === "right") {
+        if (!sides) {
+          sides = [];
+          groups.push(sides);
+        }
+        sides.push(pose);
+      } else {
+        groups.push([pose]);
+      }
+    }
+    return groups;
+  }, [poses, acceptEitherSide]);
+
+  const groupComplete = useCallback(
+    (group: readonly FacePose[], captured: readonly PoseFrame[]) =>
+      group.some((pose) => captured.some((frame) => frame.pose === pose)),
+    []
+  );
+
+  const acceptsPose = useCallback(
+    (expected: FacePose, seen: FacePose | null) =>
+      seen !== null &&
+      (poseGroups.find((group) => group.includes(expected)) ?? [expected]).includes(seen),
+    [poseGroups]
+  );
+
   const activePose = useMemo(() => {
-    const missing = poses.find((pose) => !frames.some((f) => f.pose === pose));
+    const missing = poseGroups.find((group) => !groupComplete(group, frames));
     // Falls back to the last angle rather than throwing when the set is complete,
     // so a render that races the final frame still has something to show.
-    return missing ?? poses[poses.length - 1];
-  }, [frames, poses]);
+    return missing?.[0] ?? poseGroups[poseGroups.length - 1]?.[0] ?? "front";
+  }, [frames, poseGroups, groupComplete]);
 
   const reset = useCallback(() => {
     setFrames([]);
@@ -103,7 +144,11 @@ export function useFacePoses(
 
   const read = useCallback(
     async (source: HTMLVideoElement | HTMLImageElement): Promise<ReadResult> => {
-      const expected = poses.find((pose) => !frames.some((f) => f.pose === pose)) ?? activePose;
+      const activeGroup =
+        poseGroups.find((group) => !groupComplete(group, frames)) ??
+        poseGroups[poseGroups.length - 1] ??
+        [activePose];
+      const expected = activeGroup[0];
 
       const capture = includeEvidence ? snapshot(source) : source;
       const result = await readFaceFor(engine, capture);
@@ -113,10 +158,13 @@ export function useFacePoses(
       }
 
       const evidence = includeEvidence ? await toJpegDataUrl(capture as HTMLCanvasElement) : undefined;
-      const state = poseStateOfRead(result);
+      const state = capturePoseStateOfRead(result, engine);
       const seen = state.pose;
       const held = frames.map((f) => f.pose);
-      const filing = fileFrame({ expected, seen, held });
+      const filing =
+        seen !== null && activeGroup.includes(seen) && !held.includes(seen)
+          ? { kind: "file" as const, pose: seen }
+          : fileFrame({ expected, seen, held });
 
       if (filing.kind === "turn-more") {
         // Halfway between straight on and turned, too far round, or tilted. The
@@ -129,7 +177,8 @@ export function useFacePoses(
       }
 
       if (filing.kind === "already-have") {
-        const missing = poses.find((pose) => !held.includes(pose)) ?? null;
+        const missing =
+          poseGroups.find((group) => !group.some((pose) => held.includes(pose)))?.[0] ?? null;
         const note = poseAlreadyHeld(filing.pose, missing);
         setMessage(note);
         return { outcome: "retry", frames, message: note };
@@ -145,7 +194,7 @@ export function useFacePoses(
        * frontal retake would be filed as the left one, count as "complete", and
        * leave the frontal photo missing.
        */
-      if (!poses.includes(filing.pose)) {
+      if (!poseGroups.some((group) => group.includes(filing.pose))) {
         const refusal = poseRefusal(expected, state);
         setMessage(refusal);
         return { outcome: "retry", frames, message: refusal };
@@ -166,22 +215,25 @@ export function useFacePoses(
 
       setFrames(next);
       setMessage(null);
+      const complete = poseGroups.every((group) => groupComplete(group, next));
 
       return {
-        outcome: next.length === poses.length ? "complete" : "accepted",
+        outcome: complete ? "complete" : "accepted",
         frames: next,
         message: null,
       };
     },
-    [frames, poses, activePose, engine, includeEvidence]
+    [frames, poseGroups, groupComplete, activePose, engine, includeEvidence]
   );
 
   return {
     activePose,
+    acceptsPose,
+    steps: poseGroups.map((group) => group[0]),
     frames,
     message,
-    complete: poses.every((pose) => frames.some((f) => f.pose === pose)),
-    remaining: poses.filter((pose) => !frames.some((f) => f.pose === pose)).length,
+    complete: poseGroups.every((group) => groupComplete(group, frames)),
+    remaining: poseGroups.filter((group) => !groupComplete(group, frames)).length,
     reset,
     read,
   };
@@ -245,4 +297,3 @@ function toJpegDataUrl(canvas: HTMLCanvasElement): Promise<string> {
     );
   });
 }
-

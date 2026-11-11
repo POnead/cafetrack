@@ -97,15 +97,16 @@ const CLIENT_ERRORS: Record<string, SmtpDiagnosis> = {
     fix: "Check the port. 587 upgrades the connection with STARTTLS; 465 connects with TLS from the start. A server offering neither is one this app will not send a password to.",
     transient: false,
   },
-  // Could not open the connection at all. Almost always host or port.
+  // Could not open the connection at all. The configured host/port or outbound
+  // SMTP access may be unavailable.
   ECONNECTION: {
     title: "Could not reach the mail server.",
-    fix: "Check the server address and port. Gmail is smtp.gmail.com on 587 and Outlook is smtp.office365.com on 587 — the Use Gmail / Use Outlook buttons fill these in.",
+    fix: "Confirm the server address and port. If they are correct, check whether this machine, router, ISP, or hosting provider blocks outbound SMTP. Gmail uses smtp.gmail.com on 587 (or 465); Outlook uses smtp.office365.com on 587.",
     transient: false,
   },
   ECONNREFUSED: {
-    title: "The mail server refused the connection.",
-    fix: "Check the server address and port. Gmail is smtp.gmail.com on 587 and Outlook is smtp.office365.com on 587 — the Use Gmail / Use Outlook buttons fill these in.",
+    title: "The network refused the SMTP connection.",
+    fix: "The app could not open a TCP connection, so the password was not checked. Confirm the server address and port, then allow outbound SMTP in the machine's firewall, router, ISP, or hosting provider. Gmail uses smtp.gmail.com on 587 (or 465); if SMTP access is blocked, use an HTTPS email service or relay.",
     transient: false,
   },
   ENOTFOUND: {
@@ -115,7 +116,7 @@ const CLIENT_ERRORS: Record<string, SmtpDiagnosis> = {
   },
   ETIMEDOUT: {
     title: "The mail server did not respond in time.",
-    fix: "Usually the server address or port is wrong, or the network is blocking it. Check that the server address is reachable from this machine.",
+    fix: "Confirm the server address and port. If they are correct, check whether this machine, router, ISP, or hosting provider blocks outbound SMTP. Gmail uses smtp.gmail.com on 587 (or 465); Outlook uses smtp.office365.com on 587.",
     transient: true,
   },
   // Wrong credentials, where the server said so in a way nodemailer could not map

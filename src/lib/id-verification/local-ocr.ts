@@ -15,16 +15,13 @@
  * worse than no signal, and the whole design of this module is built around not
  * being that.
  *
- * The portrait comparison in local.ts already runs alongside this and is
- * unaffected.
+ * The Face++ portrait comparison is handled separately by the upload route.
  *
  * ## Provenance is the contract
  *
- * Every field this provider returns carries how it was found, and only an anchored
- * read — a verified MRZ, or a value sitting beside its printed label — is passed
- * on to the orchestrator. A shape-based guess is reported on screen and kept out of
- * `fields`, so it can never become a red "different person" against a correct
- * upload. See `isTrustworthy` in ./ocr/extract.ts for why that matters.
+ * Names and dates require an anchored read. A shape-checked ID-number guess may
+ * also be passed as an editable suggestion; it is never used for identity or
+ * duplicate decisions without passing the selected type's number-format check.
  */
 
 import {
@@ -40,6 +37,8 @@ import { buildLayout } from "./ocr/rows";
 import { extract, isTrustworthy, type Extraction } from "./ocr/extract";
 import { MIN_OCR_WIDTH, languageModelPresent, runOcr } from "./ocr/engine";
 import { readImageSize } from "./image-size";
+import { detectCardType } from "./ocr/card-type";
+import { idTypeHasExpiry } from "./specification";
 
 /** Where the reading came from, in the words an admin needs. */
 const STRATEGY_WORDS: Record<string, string> = {
@@ -157,8 +156,12 @@ export const localOcrProvider: IdVerificationProvider = {
 
     const layout = buildLayout(run.words);
     const { fields, mrz } = extract(layout, input.docType);
+    const detected = detectCardType(layout.text || run.text);
 
-    const signals: IdSignal[] = Object.entries(fields).map(([key, value]) =>
+    const applicableFields = Object.entries(fields).filter(
+      ([key]) => key !== "date_of_expiry" || idTypeHasExpiry(input.docType)
+    );
+    const signals: IdSignal[] = applicableFields.map(([key, value]) =>
       signalFor(key as keyof Extraction, value)
     );
 
@@ -167,9 +170,16 @@ export const localOcrProvider: IdVerificationProvider = {
      * read" is noise that buries the useful row. It is the one that tells an admin
      * which template failed, which is the thing they could actually act on.
      */
-    const read = Object.values(fields).filter((f) => isTrustworthy(f));
+    const read = applicableFields.filter(([key, value]) => {
+      if (isTrustworthy(value)) return true;
+      return (
+        key === "id_number" &&
+        value.strategy === "heuristic" &&
+        value.value !== null
+      );
+    });
 
-    const total = Object.keys(fields).length;
+    const total = applicableFields.length;
     const missing = total - read.length;
 
     /*
@@ -189,8 +199,9 @@ export const localOcrProvider: IdVerificationProvider = {
             detail:
               `No text could be read off this ${ID_DOC_TYPE_LABELS[input.docType]} ` +
               `(${Math.round(run.confidence)}% overall confidence). Either the photo is too ` +
-              `blurry, or this app has no template for this card type — in which case ` +
-              `compare the card with the roster by eye.`,
+              `blurry, or this ${ID_DOC_TYPE_LABELS[input.docType]} layout is not supported by ` +
+              `the current template. Capture the front square-on with both edges visible, avoid ` +
+              `glare, and compare the card with the roster by eye.`,
           }
         : missing === 0
           ? {
@@ -200,7 +211,7 @@ export const localOcrProvider: IdVerificationProvider = {
               detail:
                 `All ${total} fields read from this ${ID_DOC_TYPE_LABELS[input.docType]}` +
                 `${mrz ? ", including the machine-readable zone" : ""}. ` +
-                `Everything stayed on this machine — nothing was sent anywhere.`,
+                `This text read stayed on this machine. Other configured checks may send images to their providers.`,
             }
           : {
               id: "ocr_summary",
@@ -212,7 +223,7 @@ export const localOcrProvider: IdVerificationProvider = {
                 `${mrz ? ", including the machine-readable zone" : ""}. ` +
                 `The rest were not found on the card, or could not be read from it. ` +
                 `Look at the card yourself for anything shown as unchecked. ` +
-                `Everything stayed on this machine — nothing was sent anywhere.`,
+                `This text read stayed on this machine. Other configured checks may send images to their providers.`,
             }
     );
 
@@ -224,11 +235,24 @@ export const localOcrProvider: IdVerificationProvider = {
      */
     const out: IdExtractedFields = {};
     for (const [key, value] of Object.entries(fields) as [keyof Extraction, Extraction[keyof Extraction]][]) {
-      if (isTrustworthy(value) && value.value !== null) {
+      const numberSuggestion =
+        key === "id_number" &&
+        value.strategy === "heuristic" &&
+        value.value !== null;
+      if (
+        (isTrustworthy(value) || numberSuggestion) &&
+        value.value !== null &&
+        (key !== "date_of_expiry" || idTypeHasExpiry(input.docType))
+      ) {
         out[key] = value.value;
       }
     }
 
-    return { provider: "local_ocr", signals, fields: out };
+    return {
+      provider: "local_ocr",
+      signals,
+      fields: out,
+      detectedDocType: detected.confidence === "high" ? detected.type : null,
+    };
   },
 };

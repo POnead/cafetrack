@@ -38,6 +38,7 @@ export function useScanFocus(
 ): void {
   useEffect(() => {
     if (!enabled) return;
+    if (!window.matchMedia("(min-width: 1024px)").matches) return;
 
     const refocus = () => {
       const el = document.activeElement as HTMLElement | null;
@@ -55,6 +56,7 @@ export function useScanFocus(
       ref.current?.focus();
     };
 
+    refocus();
     const t = setInterval(refocus, intervalMs);
     return () => clearInterval(t);
   }, [ref, enabled, intervalMs]);

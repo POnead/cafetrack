@@ -1,5 +1,5 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail, readBody } from "@/lib/api";
+import { handler, ok, fail, readBody, dbFail } from "@/lib/api";
 import { requireUser, requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { FieldError, parseMinShelfLifeDays } from "@/lib/item-validation";
@@ -15,7 +15,7 @@ export const GET = handler(async () => {
     .select("id, name, min_shelf_life_days")
     .order("name", { ascending: true });
 
-  if (error) return fail(error.message, 500);
+  if (error) return dbFail(error);
 
   return ok({ items: data ?? [] });
 });
@@ -53,7 +53,7 @@ export const POST = handler(async (req: Request) => {
     .select("id, name, min_shelf_life_days")
     .single();
 
-  if (error) return fail(error.message, 500);
+  if (error) return dbFail(error);
 
   await audit(admin, "LOCATION_CREATE", "location", data.id, {
     name,
@@ -115,7 +115,7 @@ export const PATCH = handler(async (req: Request) => {
     .select("id, name, min_shelf_life_days")
     .maybeSingle();
 
-  if (error) return fail(error.message, 500);
+  if (error) return dbFail(error);
   if (!data) return fail("Location not found", 404);
 
   await audit(admin, "LOCATION_UPDATE", "location", data.id, {

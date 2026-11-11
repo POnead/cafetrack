@@ -57,6 +57,13 @@ export function parseExpiryDate(raw: unknown): string | null {
   return s;
 }
 
+export function parseBoolean(raw: unknown, label: string): boolean {
+  if (typeof raw !== "boolean") {
+    throw new FieldError(`${label} must be true or false`);
+  }
+  return raw;
+}
+
 /** Positive integer within an inclusive range; used for thresholds. */
 export function parseThreshold(raw: unknown, label: string): number {
   if (raw === null || raw === undefined || raw === "") return 5;
@@ -200,7 +207,7 @@ export function parsePhysicalForm(raw: unknown): string {
 }
 
 /**
- * Every staff token is generated as "CT-STF-" plus ten hex characters
+ * Every staff token is generated as "CT-STF-" plus 32 hex characters
  * (newStaffToken in lib/auth.ts), while an item SKU is "CT-<CATEGORY>-<4 hex>".
  * The two shapes cannot collide, so a code carrying this prefix is definitely
  * not an item.
@@ -210,7 +217,7 @@ export function parsePhysicalForm(raw: unknown): string {
  * so this reveals nothing about which staff ids exist.
  */
 export function looksLikeStaffCode(code: string): boolean {
-  return /^CT-STF-[0-9A-F]{10}$/i.test(code.trim());
+  return /^CT-STF-[0-9A-F]{32}$/i.test(code.trim());
 }
 
 export { requireQuantity };

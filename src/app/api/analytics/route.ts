@@ -99,7 +99,7 @@ export const GET = handler(async (req: Request) => {
    * Errors are thrown rather than returned so a failed load is never cached --
    * `memoize` only stores fulfilled values.
    */
-  const { allItems, allTxns } = await memoize(
+  const { allItems, allTxns, allTxnsTruncated } = await memoize(
     "analytics:raw",
     15_000,
     async () => {
@@ -116,11 +116,13 @@ export const GET = handler(async (req: Request) => {
       if (itemsError) throw new Error(itemsError.message);
 
       // Paginate through all transactions in the 13-month window. The loop is
-      // here so a full year of data cannot silently truncate the analytics.
+      // here so a full year of data cannot silently truncate the analytics:
+      // hitting the cap does not stop the response, it just marks it.
       const txns: any[] = [];
       const PAGE = 500;
-      const CAP = 20000;
+      const CAP = 50000;
       let offset = 0;
+      let truncated = false;
 
       while (txns.length < CAP) {
         const { data, error } = await db()
@@ -142,7 +144,24 @@ export const GET = handler(async (req: Request) => {
         offset += page.length;
       }
 
-      return { allItems: (items ?? []) as any[], allTxns: txns };
+      if (txns.length >= CAP) {
+        /*
+         * The loop ended on the cap rather than on a short page, so there may
+         * or may not be a 50001st row. One probe row settles it — reading all
+         * of it would be the extra walking this cap exists to avoid.
+         */
+        const { data: probe, error: probeError } = await db()
+          .from("transactions")
+          .select("id")
+          .gte("created_at", thirteenMonthsAgo.toISOString())
+          .order("created_at", { ascending: false })
+          .order("id", { ascending: true })
+          .range(CAP, CAP);
+        if (probeError) throw new Error(probeError.message);
+        truncated = ((probe ?? []) as any[]).length > 0;
+      }
+
+      return { allItems: (items ?? []) as any[], allTxns: txns, allTxnsTruncated: truncated };
     }
   );
 
@@ -409,6 +428,13 @@ export const GET = handler(async (req: Request) => {
     chronicLowStock,
     expiryRisk,
     soonestExpiry,
+    /*
+     * True when the 13-month window held more transactions than the scan cap.
+     * The aggregates above describe the first 50,000 rows; anything beyond that
+     * is outside this response, and the dashboard can say so instead of
+     * presenting a silent undercount as the whole story.
+     */
+    transactions_truncated: allTxnsTruncated,
     snapshot: {
       items: snapshotItems,
       total: snapshotItems.length,

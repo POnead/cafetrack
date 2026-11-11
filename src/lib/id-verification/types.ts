@@ -114,7 +114,7 @@ export type IdVerificationInput = {
   front: IdImage;
   /** The back, where the document has one. Optional and often null. */
   back?: IdImage | null;
-  /** A photo of the applicant, for the portrait comparison. Optional. */
+  /** Optional applicant photo for providers that support it. */
   photo?: IdImage | null;
 
   /** The document type the admin selected. A hint, not a certainty. */
@@ -126,17 +126,6 @@ export type IdVerificationInput = {
   /** The name on the account, used to flag a card that reads as someone else. */
   expectedName?: string | null;
 
-  /**
-   * The 128-float descriptor of the portrait printed on the card, and of the
-   * applicant photo, both computed in the browser by lib/face-client.
-   *
-   * Sent as two vectors rather than a distance so the comparison happens here,
-   * on the same `cosineDistance` every other face comparison in this app uses.
-   * A browser-computed number would be a second implementation of the same idea,
-   * and the two would drift.
-   */
-  cardEmbedding?: Float32Array | null;
-  photoEmbedding?: Float32Array | null;
 };
 
 export type IdVerificationResult = {
@@ -153,6 +142,8 @@ export type IdVerificationResult = {
    * never be taken back out.
    */
   raw?: unknown;
+  /** A card type detected from strong, printed identifiers on the front. */
+  detectedDocType?: IdDocType | null;
 };
 
 export type IdVerificationProvider = {
@@ -161,8 +152,9 @@ export type IdVerificationProvider = {
   /**
    * Can this provider run right now?
    *
-   * Checked by the orchestrator rather than caught from a thrown error, so a
-   * missing API key reads as "fall back to the local checker" and not as a 500.
+   * Checked by the orchestrator rather than caught from a thrown error. Required
+   * providers can still be listed when unavailable so the UI can explain what
+   * needs configuration.
    */
   available(): boolean;
   verify(input: IdVerificationInput): Promise<IdVerificationResult>;
@@ -171,10 +163,8 @@ export type IdVerificationProvider = {
 /**
  * A provider that is not configured, or that failed.
  *
- * Never thrown as a 500 to the admin: the whole point of having more than one
- * provider is that the feature keeps working when one is down. The orchestrator
- * catches, records the failure as an `unknown` signal, and carries on with the
- * next provider.
+ * The orchestrator records provider failures as `unknown` signals so the route
+ * can decide whether that provider is optional or required for the operation.
  */
 export class IdProviderError extends Error {
   readonly provider: string;

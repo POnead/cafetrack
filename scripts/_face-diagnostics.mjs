@@ -135,6 +135,16 @@ for (const problem of ALL) {
   );
 }
 
+check(
+  "camera advice does not suggest uploading a photo",
+  ALL.every(
+    (problem) =>
+      !/upload\s+(?:a\s+)?photo|choose\s+a\s+photo/i.test(
+        describeCameraProblem(problem).help ?? ""
+      )
+  )
+);
+
 /*
  * Retryable means "clicking again could plausibly change the answer".
  *
@@ -148,6 +158,11 @@ section("retry is offered only where retry can work");
 check(
   "an insecure address is not retryable — the address is the problem",
   describeCameraProblem("insecure-origin").retryable === false
+);
+
+check(
+  "an insecure LAN address points to the HTTPS development command",
+  /npm run dev:https/.test(describeCameraProblem("insecure-origin").help ?? "")
 );
 
 check(

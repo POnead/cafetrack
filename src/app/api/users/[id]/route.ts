@@ -1,7 +1,22 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail, badId, readBody } from "@/lib/api";
-import { hashPassword, verifyPassword, newStaffToken, requireAdmin } from "@/lib/auth";
+import { handler, ok, fail, badId, readBody, clientIp, dbFail } from "@/lib/api";
+import {
+  clearSessionCache,
+  hashPassword,
+  verifyPassword,
+  newStaffToken,
+  requireAdmin,
+} from "@/lib/auth";
 import { audit } from "@/lib/audit";
+import {
+  getPositionAccessFromProfiles,
+  getSavedStaffPositionProfiles,
+  type StaffPositionProfile,
+} from "@/lib/staff-positions";
+import {
+  deleteFacePlusPlusEnrollment,
+  facePlusPlusFaceSetTokens,
+} from "@/lib/facepp";
 
 export const runtime = "nodejs";
 
@@ -11,7 +26,35 @@ export const runtime = "nodejs";
  * this route has no reason to read it.
  */
 const USER_COLUMNS =
-  "id, username, full_name, first_name, last_name, role, qr_token, can_manage_items, is_active, deactivation_reason, deactivated_at, created_at, position, start_date, face_enabled, face_enrolled_at, last_face_verified_at";
+  "id, username, recovery_email, full_name, first_name, last_name, role, qr_token, can_manage_items, is_active, deactivation_reason, deactivated_at, created_at, position, start_date, face_enabled, face_enrolled_at, last_face_verified_at";
+
+async function hasAnotherActiveAdmin(
+  excludedUserId: string,
+  profiles: readonly StaffPositionProfile[]
+): Promise<boolean> {
+  const { data: users, error } = await db()
+    .from("users")
+    .select("id, role, position, is_active")
+    .eq("is_active", true);
+  if (error) throw new Error(error.message);
+
+  for (const user of (users ?? []) as {
+    id: string;
+    role: string;
+    position: string | null;
+    is_active: boolean;
+  }[]) {
+    if (user.id === excludedUserId) continue;
+    if (user.role === "admin") return true;
+    if (
+      user.role === "staff" &&
+      getPositionAccessFromProfiles(user.position, profiles) === "admin"
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /** Update a staff/admin account: name, password, status, staff code. */
 export const PATCH = handler(
@@ -30,7 +73,7 @@ export const PATCH = handler(
     const { data: before } = await db()
       .from("users")
       .select(
-        "id, username, full_name, first_name, last_name, role, is_active, can_manage_items"
+        "id, username, full_name, first_name, last_name, role, is_active, can_manage_items, position"
       )
       .eq("id", id)
       .maybeSingle();
@@ -39,6 +82,27 @@ export const PATCH = handler(
 
     const patch: Record<string, unknown> = {};
     const changed: string[] = [];
+
+    if (body.is_active === false || body.position !== undefined) {
+      const profiles = await getSavedStaffPositionProfiles();
+      const currentlyHasAdminAccess =
+        before.role === "admin" ||
+        (before.role === "staff" &&
+          getPositionAccessFromProfiles(before.position, profiles) === "admin");
+      const losesAdminAccess =
+        body.is_active === false ||
+        (body.position !== undefined &&
+          before.role === "staff" &&
+          getPositionAccessFromProfiles(String(body.position ?? ""), profiles) !== "admin");
+      if (
+        before.is_active &&
+        currentlyHasAdminAccess &&
+        losesAdminAccess &&
+        !(await hasAnotherActiveAdmin(id, profiles))
+      ) {
+        return fail("This change would remove the last active account with full admin access.");
+      }
+    }
 
     /**
      * Audit records to append, gathered while validating the request and
@@ -69,6 +133,21 @@ export const PATCH = handler(
       if (!name) return fail("Full name cannot be empty");
       patch.full_name = name;
       changed.push("full_name");
+    }
+
+    if (body.recovery_email !== undefined) {
+      if (before.role !== "admin") {
+        return fail("Recovery email can only be set for admin accounts");
+      }
+      const email = String(body.recovery_email ?? "").trim().toLowerCase();
+      if (
+        email.length > 254 ||
+        (email !== "" && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))
+      ) {
+        return fail("Enter a valid admin recovery email address");
+      }
+      patch.recovery_email = email || null;
+      changed.push("recovery_email");
     }
 
     /*
@@ -138,7 +217,9 @@ export const PATCH = handler(
 
     if (body.password !== undefined) {
       const pw = String(body.password);
-      if (pw.length < 6) return fail("Password must be at least 6 characters");
+      // Same minimum as change-password — one policy, whichever door the
+      // password arrives through.
+      if (pw.length < 8) return fail("Password must be at least 8 characters");
       patch.password_hash = hashPassword(pw);
       changed.push("password");
     }
@@ -285,8 +366,11 @@ export const PATCH = handler(
       .select(USER_COLUMNS)
       .maybeSingle();
 
-    if (error) return fail(error.message, 409);
+    if (error) return dbFail(error, { status: 409, context: "user update" });
     if (!data) return fail("User not found", 404);
+    if (body.position !== undefined || body.is_active !== undefined) {
+      clearSessionCache();
+    }
 
     // The update landed, so these can now honestly say so. Ahead of the generic
     // USER_UPDATE, which keeps the specific-then-summary ordering the
@@ -312,5 +396,72 @@ export const PATCH = handler(
     });
 
     return ok({ user: data });
+  }
+);
+
+/** Permanently remove an inactive staff account after explicit confirmation. */
+export const DELETE = handler(
+  async (req: Request, { params }: { params: Promise<{ id: string }> }) => {
+    const admin = await requireAdmin();
+    const { id } = await params;
+
+    const malformed = badId(id, "user");
+    if (malformed) return malformed;
+
+    const body = await readBody(req);
+    const { data: before, error: lookupError } = await db()
+      .from("users")
+      .select(
+        "id, username, full_name, role, is_active, facepp_faceset_token, facepp_retired_facesets"
+      )
+      .eq("id", id)
+      .maybeSingle();
+
+    if (lookupError) return dbFail(lookupError, { context: "item delete lookup" });
+    if (!before) return fail("User not found", 404);
+    if (before.role !== "staff") return fail("Only staff accounts can be deleted", 400);
+    if (before.is_active) return fail("Deactivate this account before deleting it", 409);
+    if (String(body.confirm_username ?? "") !== before.username) {
+      return fail("Enter the account username to confirm deletion");
+    }
+
+    const faceSets = facePlusPlusFaceSetTokens(
+      before.facepp_faceset_token,
+      before.facepp_retired_facesets
+    );
+    const deletedFaceSets = await Promise.all(faceSets.map(deleteFacePlusPlusEnrollment));
+    const undeletedFaceSet = deletedFaceSets.find((result) => result.status === "unavailable");
+    if (undeletedFaceSet?.status === "unavailable") {
+      console.error(
+        `Face++ could not remove a deleted account's FaceSet (${undeletedFaceSet.code}).`
+      );
+      return fail(
+        "Face++ could not remove this account's stored reference. The account was not deleted; try again later.",
+        503
+      );
+    }
+
+    const { data: deleted, error } = await db()
+      .from("users")
+      .delete()
+      .eq("id", id)
+      .eq("role", "staff")
+      .eq("is_active", false)
+      .select("id")
+      .maybeSingle();
+
+    if (error) return dbFail(error);
+    if (!deleted) return fail("The account changed before it could be deleted. Refresh and try again.", 409);
+
+    await audit(
+      admin,
+      "USER_DELETE",
+      "user",
+      id,
+      { username: before.username, full_name: before.full_name, role: before.role },
+      { ip: clientIp(req) }
+    );
+
+    return ok({ deleted: true });
   }
 );

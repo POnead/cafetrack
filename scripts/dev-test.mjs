@@ -35,11 +35,13 @@
  * nothing for the other suites — it only gives the notification path somewhere
  * to send, so `test:email` can prove a message was actually delivered rather
  * than merely queued. Without it, FR-11 is the one requirement with no possible
- * way to verify.
+ * way to verify. OCR.space is stubbed too, so ID upload tests never send fixture
+ * images or credentials to an external provider.
  */
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { startSmtpStub, recordStubPorts, STUB_USER, STUB_PASS } from "./_smtp-stub.mjs";
 
 function loadEnvFile(file) {
@@ -100,6 +102,10 @@ console.log(
 // CVE-2024-27980), and going through the JS entry avoids the shell entirely,
 // so this behaves identically on Windows and POSIX.
 const NEXT_BIN = join(process.cwd(), "node_modules", "next", "dist", "bin", "next");
+const ocrMockModule = pathToFileURL(join(process.cwd(), "scripts", "_mock-ocr-space.mjs")).href;
+const nodeOptions = [process.env.NODE_OPTIONS, `--import=${ocrMockModule}`]
+  .filter(Boolean)
+  .join(" ");
 
 // Started before Next so the environment it inherits is complete on its first
 // request. Email is off by default in the settings, so nothing is sent unless a
@@ -136,9 +142,15 @@ const child = spawn(
     env: {
       ...LOCAL_ENV,
       ...process.env,
+      NODE_OPTIONS: nodeOptions,
       CAFETRACK_DB: "local",
       CAFETRACK_DB_DIR: DB_DIR,
       NEXT_DIST_DIR: DIST_DIR,
+      OCR_SPACE_API_KEY: "test-key",
+      HYPERVERGE_APP_ID: "",
+      HYPERVERGE_APP_KEY: "",
+      FACEPP_API_KEY: "",
+      FACEPP_API_SECRET: "",
       SMTP_HOST: "127.0.0.1",
       SMTP_PORT: String(stub.smtpPort),
       SMTP_STUB_PORT: String(stub.smtpPort),

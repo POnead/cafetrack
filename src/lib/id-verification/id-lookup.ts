@@ -51,16 +51,32 @@ export type IdLookupRow = {
   id_doc_number: string | null;
   verification_status: string | null;
   id_doc_front: string | null;
+  id_doc_expiry: string | null;
   deactivation_reason: string | null;
   deactivated_at: string | null;
   session_token: string | null;
+  session_last_active_at: string | null;
 };
+
+/**
+ * What the match decision actually reads: which row a candidate is, whether it
+ * is staff, and the two stored credentials it compares against.
+ *
+ * Deliberately narrow so the probe query that feeds this function never has to
+ * transfer `face_embedding` or the ID images for the whole table. The full
+ * `IdLookupRow` for the one matched account is read separately, after exactly
+ * one candidate has been found.
+ */
+export type IdProbeRow = Pick<
+  IdLookupRow,
+  "id" | "role" | "id_card_hash" | "id_doc_number"
+>;
 
 /** How a card was recognised. Both may be true for the same account. */
 export type IdMatchMethod = "fingerprint" | "number";
 
 export type IdCandidate = {
-  row: IdLookupRow;
+  row: IdProbeRow;
   matchedBy: IdMatchMethod[];
   /** Bits of difference, when the fingerprint is what matched. */
   distance: number | null;
@@ -83,7 +99,7 @@ export type IdLookupResult = {
 };
 
 export type IdLookupInput = {
-  rows: IdLookupRow[];
+  rows: IdProbeRow[];
   /** 16 hex characters from the browser, or null. */
   hash: string | null | undefined;
   /** The number OCR'd off the card, or null. Separators are tolerated. */

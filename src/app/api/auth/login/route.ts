@@ -5,12 +5,19 @@ import {
   verifyPassword,
   signSession,
   setSessionCookie,
+  hasActiveSession,
   deactivatedMessage,
 } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { dispatchSoon } from "@/lib/email";
 import { getSessionMinutes } from "@/lib/settings";
-import { checkLoginThrottle, tooManyAttempts, userKey, recordLoginAttempt } from "@/lib/rate-limit";
+import {
+  ADMIN_LOGIN_THROTTLE_KEY,
+  ADMIN_LOGIN_THROTTLE_METHOD,
+  checkLoginThrottle,
+  tooManyAttempts,
+  recordLoginAttempt,
+} from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -23,7 +30,7 @@ export const runtime = "nodejs";
  */
 const LOGIN_COLUMNS =
   "id, username, password_hash, full_name, role, is_active, " +
-  "deactivation_reason, deactivated_at, session_token";
+  "deactivation_reason, deactivated_at, session_token, session_last_active_at";
 
 /**
  * Record a rejected admin sign-in and queue the email, without ever changing
@@ -39,14 +46,14 @@ async function recordRejection(
   reason: string
 ) {
   await audit(actor, "LOGIN_FAILED", "user", actor.id, {
-    method: "admin_password",
+    method: ADMIN_LOGIN_THROTTLE_METHOD,
     reason,
   }, { critical: false, ip: clientIp(req), outcome: "failed" });
 
   try {
     await db().rpc("enqueue_failed_login_alert", {
       p_username: actor.username,
-      p_method: "admin_password",
+      p_method: ADMIN_LOGIN_THROTTLE_METHOD,
       p_reason: reason,
     });
     dispatchSoon();
@@ -56,7 +63,7 @@ async function recordRejection(
 }
 
 /** The no-such-user variant: nothing to audit against, only to notify about. */
-async function notifyRejection(_key: string, method: string, reason: string) {
+async function notifyRejection(method: string, reason: string) {
   try {
     await db().rpc("enqueue_failed_login_alert", {
       p_username: "unknown",
@@ -78,9 +85,13 @@ export const POST = handler(async (req: Request) => {
   const normalizedPassword = String(password);
   if (!normalizedUsername || !normalizedPassword) return fail("Username and password are required");
 
-  // Throttled before any password work — that is the whole point of the check.
-  const key = userKey(normalizedUsername);
-  const throttle = await checkLoginThrottle(key, "admin_password");
+  // Admin login has one shared streak, including unrecognized usernames.
+  // Password confirmation and recovery use separate throttle methods.
+  const throttle = await checkLoginThrottle(
+    ADMIN_LOGIN_THROTTLE_KEY,
+    ADMIN_LOGIN_THROTTLE_METHOD,
+    { includeMethodLimit: false }
+  );
   if (throttle.blocked) return tooManyAttempts(throttle.retryAfterSeconds);
 
   const { data: user, error: lookupError } = await db()
@@ -101,13 +112,19 @@ export const POST = handler(async (req: Request) => {
   const logAttempt = async (success: boolean) => {
     // recordLoginAttempt is the same writer the throttle reads, and it swallows
     // its own failure: a broken counter must not turn a wrong password into a 500.
-    await recordLoginAttempt(key, "admin_password", success);
+    await recordLoginAttempt(
+      ADMIN_LOGIN_THROTTLE_KEY,
+      ADMIN_LOGIN_THROTTLE_METHOD,
+      success
+    );
   };
 
   if (!user) {
     await logAttempt(false);
-    await notifyRejection(key, "admin_password", "unknown_user");
-    return fail("Invalid credentials", 401);
+    await notifyRejection(ADMIN_LOGIN_THROTTLE_METHOD, "unknown_user");
+    return fail("Invalid credentials", 401, {
+      failed_attempts: throttle.consecutiveFailures + 1,
+    });
   }
 
   if (!verifyPassword(normalizedPassword, user.password_hash)) {
@@ -117,7 +134,9 @@ export const POST = handler(async (req: Request) => {
       { id: user.id, username: user.username, fullName: user.full_name, role: "admin" },
       "bad_password"
     );
-    return fail("Invalid credentials", 401);
+    return fail("Invalid credentials", 401, {
+      failed_attempts: throttle.consecutiveFailures + 1,
+    });
   }
 
   // Checked after the password, so a wrong guess still gets the generic
@@ -146,18 +165,20 @@ export const POST = handler(async (req: Request) => {
     role: "admin" as const,
   };
 
-  // Session lifetime comes from settings.session_timeout_minutes.
-  const minutes = await getSessionMinutes();
+  const minutes = await getSessionMinutes("admin");
   const token = await signSession(session, minutes);
   await setSessionCookie(token, minutes, user.id, db());
 
-  await audit(session, "LOGIN", "user", user.id, { method: "admin_password" }, {
+  await audit(session, "LOGIN", "user", user.id, { method: ADMIN_LOGIN_THROTTLE_METHOD }, {
     ip: clientIp(req),
     outcome: "success",
   });
 
   // Check if there was a previous session — notify client to show the conflict popup.
-  const hadPreviousSession = Boolean(user.session_token);
+  const hadPreviousSession = await hasActiveSession(
+    user.session_token,
+    user.session_last_active_at
+  );
 
   return ok({ user: session, session_conflict: hadPreviousSession });
 });

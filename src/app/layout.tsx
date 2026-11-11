@@ -1,29 +1,44 @@
 import type { Metadata } from "next";
-import { Pacifico, Baloo_2, Nunito } from "next/font/google";
+import localFont from "next/font/local";
 import "./globals.css";
 
-const pacifico = Pacifico({
+/*
+ * Self-hosted so the app does not need Google Fonts at build or run time.
+ *
+ * These were `next/font/google` imports, which download the files during
+ * compilation. On a machine without outbound access to fonts.googleapis.com
+ * every page logged "Failed to download ... Using a fallback font instead" and
+ * silently rendered Arial. The three `.woff2` files beside this file are the
+ * latin subsets of the same families, committed once, so no build depends on a
+ * third party being reachable.
+ */
+const pacifico = localFont({
+  src: "./fonts/pacifico-latin.woff2",
   weight: "400",
-  subsets: ["latin"],
+  style: "normal",
   variable: "--font-pacifico",
   display: "swap",
 });
 
-const baloo = Baloo_2({
-  subsets: ["latin"],
+const baloo = localFont({
+  src: "./fonts/baloo-2-latin.woff2",
+  weight: "400 800",
+  style: "normal",
   variable: "--font-baloo",
   display: "swap",
 });
 
-const nunito = Nunito({
-  subsets: ["latin"],
+const nunito = localFont({
+  src: "./fonts/nunito-latin.woff2",
+  weight: "200 1000",
+  style: "normal",
   variable: "--font-nunito",
   display: "swap",
 });
 
 export const metadata: Metadata = {
-  title: "CafeTrack — Merrylane Cafe Foodhub",
-  description: "Real-time stock monitoring with barcode-based authentication",
+  title: "CafeTrack — Cafe Inventory Management",
+  description: "CafeTrack inventory operations for cafe teams",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

@@ -20,6 +20,7 @@ npm install
 cp .env.example .env.local     # optional — the app runs without it
 npm run setup:face             # optional — copies the ~12MB legacy face-model weights
 npm run setup:face:sface       # optional — fetches the ~9.5MB SFace engine and wasm runtime
+npm run setup:face:blink       # required for automatic live blink capture during staff login
 npm run setup:face:liveness    # required for free, local photo/spoof rejection
 npm run dev
 ```
@@ -42,12 +43,52 @@ items, the reference lists (categories, locations) and three accounts. Staff
 sign in with the barcode printed on their ID plus their password; admins use a
 username and password.
 
-`npm run setup:face` and `npm run setup:face:sface` provide the two recognition
-engines. `npm run setup:face:liveness` adds the local, open-source anti-spoof
-runtime; it is required for secure face sign-in and duty checks, and has no paid
-provider fallback. Skip the recognition setup and those camera features report
-that the required models are missing. Face authentication remains unavailable
-until the local liveness runtime is also installed.
+`npm run setup:face` and `npm run setup:face:sface` provide the local recognition
+engines used when enrolling a face. `npm run setup:face:blink` installs the
+MediaPipe Face Landmarker model and same-origin WebAssembly runtime used to
+trigger live eye-close and eye-open captures during staff login face checks.
+`npm run setup:face:liveness` adds the local, open-source anti-spoof runtime
+used by the isolated test harness.
+The liveness setup creates a local `.face-liveness/` Python
+environment; rerun it after moving the project to another computer or Windows
+account.
+
+Face++ verifies staff identity and eye state. Put `FACEPP_API_KEY`,
+`FACEPP_API_SECRET`, and optionally `FACEPP_API_REGION=US` in the server-side
+`.env.local` (never use `NEXT_PUBLIC_` for these credentials), then restart the
+server. Enrollment creates a private one-person FaceSet from the account's
+straight-on photo. The `face_login_enabled` setting controls the login scan:
+when on, staff enter their password, then complete the automatic straight-on,
+left, right, and open/closed/open blink scan before a session is issued; when
+off, password sign-in proceeds without that login scan. The browser uses the
+café's local pose gate and MediaPipe blink scores to time captures; MediaPipe
+does not decide identity or verify liveness. After the complete scan is
+submitted, the server calls Face++ Detect for face and pose tokens, Analyze to
+verify the blink from those tokens, and Compare against the saved account photo.
+An approved duty-check bypass does not skip this login scan. Admin and staff
+sessions share the browser's secure session cookie, so use separate browser
+profiles or devices to keep both roles signed in at once.
+The confidence cutoff is 75. Face++ is required for the login scan; no local
+face recognition or liveness check is used as a fallback. Manual capture
+remains available if the local blink model cannot load. Duty verification
+remains a separate optional setting and can additionally gate stock-changing
+actions. The scanner
+distinguishes configured credentials from a provider response; sanitized
+Detect, pose, blink and Compare outcomes are written to the server log for
+troubleshooting. Analyze and Compare run after Detect finds a face in every
+submitted frame, even when a pose fails, so results can be reported separately;
+every login check must pass. The saved account photo is required. Face data is
+sent to Face++ after the complete scan is submitted, and removing an enrolment
+also deletes its FaceSet.
+Face++ plans cap concurrent requests, often at one per second, so calls are serialized
+with a one-second gap; a `CONCURRENCY_LIMIT_EXCEEDED` response is retried before the
+check is reported as unavailable.
+If Face++ is unavailable during enrollment, the locally validated photos and samples
+are still saved with a warning, but staff must use password or badge sign-in until
+Face++ is available again.
+The `facepp_faceset_token` and `facepp_face_token` columns are added by the normal
+schema setup; for a hosted database, apply `db/migrate.sql` before deploying this
+version.
 
 To see it work without typing anything: **Inventory → All Items → Print visible
 barcode labels**, print a sheet, then scan a label with the field on **Checkout
@@ -67,6 +108,14 @@ fallback when a label is damaged.
 The phone has to be on the **same Wi-Fi** as this machine. Then browse to that
 address — or to `http://mypc.local:3100`, which survives the router handing out
 a different address.
+
+Browsers block live camera access from plain HTTP addresses on other devices.
+To use the camera on a phone, run `npm run dev:https` and open the HTTPS address
+it prints. Next.js creates a development certificate for the LAN address; the
+phone must trust the development CA certificate (Next prints its location) before
+the browser will allow camera access. On Android, copy `rootCA.pem` from that
+location to the phone and install it from the device's security settings as a CA
+certificate. For production, use a properly issued HTTPS certificate.
 
 Both work without editing any file. Next blocks dev-only requests (including the
 hot-reload socket) from any address it does not recognise, and when it blocks one
@@ -98,11 +147,16 @@ one, from `Downloads\cafetrack`.
   normal checkout. While you scan you are told when an item is at or below its
   low-stock threshold, out of stock, or expiring, and again if the movement you
   just recorded pushed something under its threshold. **A restock can carry the
-  new batch's expiry date**, one date per cart line, because receiving stock is
-  the only moment that date is actually known. Leaving the field blank keeps
-  the item's existing date rather than clearing it, and only a restock ever sets
-  one — a checkout or a waste log cannot move an expiry, so discarding a spoiled
-  item never extends its life.
+  new batch's expiry date**, one date per delivery, because receiving stock is
+  the only moment that date is actually known. Each delivery becomes a separate
+  batch, even when its expiry matches another delivery; leaving the date blank
+  creates an undated batch without changing existing lots. Checkout defaults to
+  first-expiring usable stock, and lets the operator switch to manual batch
+  quantities, including splitting a checkout across lots. Expired batches are
+  never eligible for checkout. Waste uses the oldest remaining batches first,
+  or a scanned batch label can target a specific lot. The item quantity remains
+  the total across all its batches; expiry alerts name the affected batch and
+  quantity and note when other stock is still usable.
 - **Per-box packaging** — an item can record how many of its unit arrive in one
   box. A restock can then be entered as a box count, and the conversion to the
   item's own unit is done by the database, which owns the factor, so the browser
@@ -117,7 +171,13 @@ one, from `Downloads\cafetrack`.
   business, and clearing the rule lets the same delivery through.
 - **Inventory** — items with SKU, category, location, physical form, unit,
   units per box, quantity, low-stock threshold, expiry date and an optional
-  supplier. A restock can name the supplier it came from, and that becomes the
+  supplier. Search shows the total and the remaining batches with their own
+  expiry dates; each active batch has a unique barcode label for exact
+  identification at checkout or when logging waste. Existing inventory is
+  migrated as one opening batch per item because earlier lot history is not
+  available. Editing an item's expiry updates its only active batch, but is
+  refused when several batches are active so their different dates are not
+  overwritten. A restock can name the supplier it came from, and that becomes the
   item's supplier, so the next low-stock alert knows who to ring. Search, filter by
   category, and sort by clicking any column header. Barcode labels for the whole
   filtered list or one at a time. Paged 50 at a time, with the search, the filter
@@ -147,10 +207,20 @@ one, from `Downloads\cafetrack`.
   browser's print dialog is not involved, so the file is named after the report
   and dated rather than after whatever the browser defaults to. CSV export carries
   the same rows, each tagged with the record it came from, so the ranked views sit
-  beside the snapshot and the movements in one file.
+  beside the snapshot and the movements in one file. The report includes
+  interactive revenue and waste-loss doughnut charts, activity and restock bars,
+  top checked-out and wasted item charts, waste events by category, a line chart
+  for value over time, a histogram of transaction values, and a scatter plot
+  comparing checkout and waste event counts per item. Charts fit narrow screens
+  and selecting a chart entry shows its details. Date filters include Today,
+  This week, This year and custom dates. Monetary figures use the item's current
+  Unit Price (stored as cost per unit), not a historical sales-price snapshot.
 - **Email notifications** — low stock, out of stock, expiring soon, expired, a daily
-  summary, rejected sign-ins, and the stock report on demand. **Off until an admin
-  turns it on** in Settings → Email, which the page will not let them do until a
+  summary, rejected sign-ins, and the stock report on demand. Configure SMTP,
+  recipients, and subscriptions in Settings → Email; the Email menu contains a
+  filterable delivery log with full message contents. Set the expiry-warning
+  threshold in Settings → General. Email is **off until an admin turns it on**,
+  which the page will not let them do until a
   sending account and a recipient both exist, so the feature cannot
   start sending from someone's café by accident. Alerts are queued by the database
   during the movement that caused them and sent afterwards, so a slow or dead mail
@@ -198,31 +268,14 @@ that a sample is never stored under an angle it does not show. Only a frame
 squarely between straight on and turned is refused, because there is no honest
 slot for it.
 
-**What a check asks for.** The duty check and face sign-in ask for whatever angles
-the account actually holds — all three when all three were enrolled, one when the
-account predates the angles. Nothing is ever requested that the account cannot
-present, so an existing enrolment never becomes an account someone cannot use.
-`Settings → Face → Turned-head checks` switches the side angles off entirely, which
-keeps them on file as reference photos; that is the switch to reach for if real
-staff are refused on the sides. Staff password confirmation checks the face
-against the face enrolled on that account; an ID card does not substitute for
-that check. The separate card sign-in flow stays single-frame because its face
-is compared with the portrait on the card.
+**Staff sign-in.** Face verification is controlled by `face_login_enabled`.
+When enabled, staff complete the Face++ and blink-checked login scan before the
+server issues a session. The former post-login duty face gate is disabled; the
+old `face_verification_enabled` value is ignored.
 
-**Where it is enforced.** Not only on the screen that asks for the face. The
-routes that move stock or change the catalogue (`POST /api/transactions`,
-`POST /api/items`, and the item edit and delete routes) refuse a staff session
-that still owes a check with a `403`, so calling them directly is not a way
-around the camera. Reads stay open — a person who cannot see today's figures is
-worse than the thing being guarded. The signed-in frame re-reads the status on
-load and on activity pings, so a window that runs out mid-shift sends the person
-to `/verify` instead of leaving them to discover it as a failed scan.
-
-**The two numbers.** How long one check covers (`face_duty_hours`) and how close
-two faces have to be (one threshold per engine) are editable on the same card.
-The threshold field follows the engine in use and carries that engine's own
-bounds, because the two scales are not comparable — and the other engine keeps
-its own value when the model is switched.
+**Match threshold.** The threshold field follows the engine in use and carries
+that engine's own bounds, because the two scales are not comparable — and the
+other engine keeps its own value when the model is switched.
 
 **The bands are provisional.** `FRONT_MAX_SIGNAL` and `SIDE_MIN_SIGNAL` in
 `src/lib/face.ts` bound a proxy, and no real front/left/right captures have been
@@ -282,7 +335,7 @@ this app's own stored enrolments:
 | same person, front vs side angle | 0.253 - 0.473 |
 | different people, closest pair | 0.559 (side), 0.653 (front vs front) |
 
-Staff login accepts at 0.5: every measured genuine reading is below it and every
+Face matching accepts at 0.5: every measured genuine reading is below it and every
 measured stranger above it. That still is not a guarantee against every possible
 impostor; re-measure from representative till-quality captures before relaxing the
 cap. Correcting the reader invalidated every stored SFace vector, so SFace accounts
@@ -290,13 +343,12 @@ need re-enrolment (descriptor version 3); the legacy engine's vectors are untouc
 Switching engines also invalidates every stored vector, so it needs a staged
 re-enrolment.
 
-**A tab open across a reader change.** The login screen sends the engine and
+**A tab open across a reader change.** Face verification sends the engine and
 descriptor revision it used with every attempt. A tab that has been open since
 before a reader fix keeps the old script in memory, and its vectors are in a space
 nothing on file can be compared with — the account holder's own face then lands
 about 1.0 from their own photograph and the only symptom is "that face did not
-match". The route answers those with a 409 that says to reload, and does not count
-them as failed second steps, so the ticket survives the reload. If a face that is
+match". The route answers those with a 409 that says to reload. If a face that is
 plainly on file stops matching after a deploy, reload the page before re-enrolling
 anybody.
 
@@ -310,7 +362,7 @@ check still refuses.
 
 The consequence is that flipping the setting does not fail silently — an account
 whose samples are all from the other engine reports *needs re-enrolling* instead of
-"not recognised", and a manager override gets them through a shift.
+"not recognised".
 
 **Changing engine.** `Settings → Face verification → Face model` switches it, and
 the button says plainly that everyone must be re-photographed first. The order that
@@ -324,8 +376,8 @@ does not lock anyone out:
    face, and can be brought in at the next shift.
 
 The capture screens read the engine from `GET /api/face/config` once per page, so
-sign-in, the duty check, step two and card sign-in cannot disagree about which
-model they are running. There is no silent fallback between engines: a missing
+sign-in, step two and card sign-in cannot disagree about which model they are
+running. There is no silent fallback between engines: a missing
 model file is reported as a missing model, because a vector from the other engine
 matches nothing and would be shown as an unrecognised face. Run both setup
 commands if the café may switch between them.
@@ -449,12 +501,17 @@ machine with no certificate — an explicit choice, not a silent fallback.
   never moves stock. Staff can read alerts, but **only an admin can resolve,
   re-open, or force a recompute** — the controls are hidden for staff and the
   API refuses them with `403`.
-- **Settings** — admins set the expiry-warning window, session timeout and
-  business name, and add or remove item categories, storage locations and
-  suppliers. Each supplier stores a contact name, telephone and email, and shows
-  the items currently linked to it. Each location also carries its minimum shelf
-  life on arrival, editable in place. Changes take effect immediately, not after
-  the settings cache expires.
+- **Settings** — admins use separate Email, Staff, Storage, Suppliers and
+  General tabs. They set expiry-warning windows, independent admin/staff
+  session timeouts, staff verification policies, business details, and an owner
+  recovery email. Admins can change their password in General; after three
+  failed admin sign-ins, a one-use code sent to the owner email can start a
+  password reset. Codes expire after ten minutes, and email delivery must be
+  configured in Settings → Email. Removing
+  a category, location or supplier requires a reason and the admin's password;
+  the reason is recorded in the audit history. Each supplier stores a contact
+  name, telephone and email, and shows the items currently linked to it. Each
+  location also carries its minimum shelf life on arrival, editable in place.
 - **Staff accounts** — admins create staff and admin accounts, print a staff
   barcode, reset passwords, and deactivate an account **with a reason**. The
   reason is shown to that person the next time they try to sign in.
@@ -579,12 +636,21 @@ routes are identical either way.
 `create or replace` throughout, and never drops or truncates — so pasting the
 whole file into the SQL Editor is always safe.
 
-When the change is only to a stored function, `npm run db:migrate` is less
-error-prone. It writes `db/migrate.sql`, containing just the `create or replace
-function` statements and any `add column if not exists` migrations, each with a
-header explaining the procedure. It cannot create, drop, or modify client data,
-so it is safe to run against a live project. Paste the result into the SQL
-Editor and run.
+`npm run db:migrate` writes `db/migrate.sql` with stored-function updates,
+additive columns, and the allow-listed batch-tracking migration. The batch
+migration creates its new table and indexes, enables row-level security, and
+adds one opening batch for each active item that has stock but no batch yet;
+it does not change item quantities or invent historical lots. Back up the
+hosted project before applying it, then paste the generated file into the SQL
+Editor and run it before deploying the matching app version. It is safe to run
+again.
+
+Staff profile photos are saved in `users.profile_photo_data`, separately from
+face-check images. If an upload reports that this column does not exist, the
+hosted database has not received the migration: run `npm run db:migrate`, then
+paste and run `db/migrate.sql` in the Supabase SQL Editor. In local mode, stop
+and restart the app so its startup schema update can add the columns. Existing
+staff records and face-check data are preserved.
 
 Two files in `db/` are generated — never edit them by hand or the next build
 overwrites your change:
@@ -625,12 +691,14 @@ overwrites your change:
 | Command             | What it does                                          |
 | ------------------- | ----------------------------------------------------- |
 | `npm run dev`       | Development server on :3100                            |
+| `npm run dev:https` | HTTPS development server for camera access from a phone |
 | `npm run build`     | Production build                                       |
 | `npm start`         | Serve the production build                             |
 | `npm run lint`      | ESLint                                                |
 | `npm run seed`      | Seed **Supabase** (local mode seeds itself)            |
 | `npm run setup:face`| Copy the face-model weights into `public/models/`      |
 | `npm run setup:face:sface`| Fetch the SFace engine (models + wasm) into `public/` |
+| `npm run setup:face:blink` | Install the local MediaPipe blink model and wasm runtime |
 | `npm run db:schema` | Regenerate `db/schema.local.sql` from `db/schema.sql`  |
 | `npm run db:migrate`| Write `db/migrate.sql` — paste-ready, data-safe updates for a hosted project |
 | `npm run db:reset`  | Delete the local database                              |
@@ -818,8 +886,8 @@ it visits.
 desktop and phone captures and admin/staff variants where applicable. It also
 captures the login modes, the no-reference-photo verification state, and the
 item, staff-details, and email-recipient forms. Facial-recognition coverage
-includes staff photo enrollment, the password sign-in face-or-ID step, and the
-enrolled duty check. ID-verification coverage includes the guided enrollment
+includes staff photo enrollment and the password sign-in face-or-ID step.
+ID-verification coverage includes the guided enrollment
 capture, ID-card sign-in, and admin review. Camera previews use a generated
 browser canvas stream, not a physical camera; no biometric sample is used. The
 script opens forms but does not submit them. Run it against the isolated test server:
@@ -973,20 +1041,27 @@ public/
   `AUTH_SECRET`) and never returned by any route — `GET /api/settings` excludes
   the key entirely, and the Email page reports only whether a password exists.
   Only an admin can set, change or remove it.
-- **Sign-in throttling** — five consecutive failed attempts for one credential (or
-  20 for a sign-in method as a whole) within 15 minutes are answered normally;
-  the next attempt gets `429` with a `Retry-After` header. A successful sign-in
-  clears the counter, so a shared till cannot lock a real person out
-  permanently. A blocked attempt is not written to `login_attempts`: that table
-  is the counter, and counting the refusal would keep the fifteen-minute window
-  full so the lockout could never end. The face-check route does record a
-  throttled refusal in the audit trail as a denied attempt; the audit trail is a
-  separate log and is not read by the throttle, so it cannot extend the lockout.
-  To clear a lockout early, stop the dev server and run `npm run db:wipe`.
+- **Sign-in throttling** — after five consecutive failures, a credential is
+  locked with `429` and a `Retry-After` header; other sign-in methods allow 20
+  consecutive failures across the method. Admin login uses one shared five-failure
+  streak across all usernames, including unrecognized names; other admin password
+  confirmations and recovery flows use separate counters. The “Forgot password?”
+  option appears after three failed admin login attempts and remains visible
+  through lockout. Staff failures are counted per staff account, whether
+  the username or barcode is used; unrecognized usernames and barcodes do not
+  build a failure streak or lock out. The first lockout lasts one minute; after
+  it expires, each further failed attempt adds one minute to the next lockout,
+  up to 15 minutes. A successful sign-in clears that credential's failure
+  streak and restarts escalation. A streak also resets after 24 hours without
+  a new failed attempt. Blocked attempts are not written to `login_attempts`,
+  so they do not extend the active countdown. The face-check route does record
+  a throttled refusal in the audit trail, which is not read by the throttle.
 - **Staff codes** are never written to the sign-in log for an unrecognised code
   — only a 12-character SHA-256 prefix of it.
 - **Sessions** are `httpOnly`, `SameSite=Lax`, `secure` in production, and
-  expire after `settings.session_timeout_minutes` (default 15) of inactivity.
+  have separate, admin-configurable idle timeouts for admins and staff. The
+  server also revokes idle session tokens periodically, so a closed tab does
+  not need to reconnect for its session to stop counting as active.
 - **Deactivating an account** records who did it, when, and why. The reason is
   shown to the account holder at sign-in, so it must not contain anything
   sensitive.
@@ -1133,3 +1208,21 @@ Before saying the system is ready for operational use:
   the approval it exists to get.
 - **A pending item has no barcode.** One is drawn only once the item is approved,
   so a label cannot be printed for stock that is not stock yet.
+
+## Privacy and identity processing
+
+Government-ID and face data are processed only under the basis and notice recorded
+through `GET /api/privacy` and `POST /api/privacy`. Consent in an employment
+context requires controller review and is never inferred from an administrator's
+workflow decision. The data subject can submit access, correction, erasure, and
+verification-dispute requests through `GET|POST /api/privacy/requests`.
+
+`DELETE /api/privacy/identity` immediately removes the identity evidence controlled
+by the subject. Scheduled retention also removes identity evidence after the
+365-day default recorded at acknowledgement. ID and face document reads are
+admin-only and are appended to the hash-chained audit log. Administrative review
+requires a different account from the account that uploaded the documents.
+
+The controller must record processor safeguards and breach contacts outside this
+runtime configuration. HyperVerge remains optional; see the ID-verification
+provider payload and administration settings before enabling it.

@@ -452,6 +452,7 @@ export function startSmtpStub({
           to: m.to,
           subject: m.subject,
           body: m.body,
+          raw: m.raw,
           envelope: m.envelope,
         })),
       });

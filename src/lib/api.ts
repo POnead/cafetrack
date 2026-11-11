@@ -71,6 +71,37 @@ export function badId(id: string, what = "id") {
 }
 
 /**
+ * Where a route would otherwise return `fail(error.message, 500)`.
+ *
+ * Raw database messages are a schema map for an attacker — "column
+ * users.session_token does not exist", constraint names, driver wording — so
+ * they are logged here and never leave the server. The client gets one sentence
+ * from the caller; when none is given it is a generic one that covers both
+ * "could not reach the database" and "the database refused the write", which is
+ * as specific as an unauthenticated caller should ever be allowed to learn.
+ *
+ * Not for errors the database was asked to produce on purpose: the `RAISE
+ * EXCEPTION USING MESSAGE` wording behind the 409 reviews ("already reviewed")
+ * is an app-authored sentence, not an internal, and routes show it directly.
+ */
+export function dbFail(
+  error: { message?: string; details?: string; hint?: string; code?: string } | null,
+  opts: { message?: string; status?: number; context?: string } = {}
+): Response {
+  console.error(
+    `database error${opts.context ? ` (${opts.context})` : ""}:`,
+    error?.code ?? "",
+    error?.message ?? "",
+    error?.details ?? "",
+    error?.hint ?? ""
+  );
+  return fail(
+    opts.message ?? "The request could not be completed. Try again in a moment.",
+    opts.status ?? 500
+  );
+}
+
+/**
  * Refuse a body larger than this before buffering it.
  *
  * App Router route handlers have no body size limit the way the old Pages
@@ -182,6 +213,70 @@ export function clientIp(req: Request): string | null {
 }
 
 /**
+ * Methods a malicious page could trick a signed-in browser into sending.
+ * GET/HEAD/OPTIONS never change data through this API, and EventSource
+ * (SSE) is GET-only, so none of those need the check.
+ */
+const CSRF_METHODS = new Set(["POST", "PATCH", "PUT", "DELETE"]);
+
+/**
+ * Refuse a state-changing request whose Origin (or, failing that, Referer)
+ * does not name this app.
+ *
+ * This is the Origin-verification shape of CSRF defence (OWASP API/API 9 and
+ * CSRF cheat-sheet), chosen over a synchroniser token for a reason: the client
+ * has no central fetch helper — thirty-odd raw `fetch` calls across fifteen
+ * screens — so a token would have to be threaded through every one of them,
+ * every multipart sign-in flow included, and one missed call site would break
+ * a screen. The check here is one place, touches no client code, and cannot
+ * drift out of sync with a new screen.
+ *
+ * What it stops: a third-party page causing the user's browser to POST with
+ * their cookies attached. Browsers attach Origin to fetching POSTs, and it is
+ * request-forgery-proof — client script cannot set it, only choose whether the
+ * request happens. A mismatched Origin is therefore a forged request, full
+ * stop. A same-origin POST carries this app's own origin and passes.
+ *
+ * A missing Origin *and* Referer is a non-browser client (curl, a cron job,
+ * the E2E scripts). Those can hold no session of this app for the victim's
+ * browser is the only thing that does — so they are passed through, and the
+ * deep layer that actually tasks the session cookie is its SameSite=strict
+ * flag (lib/auth.ts), which keeps it off cross-site requests even if some
+ * future client has neither header.
+ */
+function crossSiteRefusal(req: Request | undefined): Response | null {
+  if (!req || !CSRF_METHODS.has((req.method ?? "").toUpperCase())) {
+    return null;
+  }
+
+  const claims = [req.headers.get("origin"), req.headers.get("referer")]
+    .filter((value): value is string => Boolean(value && value.trim()))
+    .map((value) => {
+      try {
+        return new URL(value);
+      } catch {
+        return null;
+      }
+    })
+    .filter((url): url is URL => url !== null);
+
+  if (claims.length === 0) return null;
+
+  // Compare authority only. The app runs on plain-IP hosts in development and
+  // may sit behind a proxy in production, where the request URL's scheme can
+  // differ from the browser's view of it (x-forwarded-proto); the host is the
+  // part that cannot change under the user's feet.
+  const authority =
+    req.headers.get("host")?.trim() || new URL(req.url).host;
+  const foreign = claims.find(
+    (claimed) => claimed.host.toLowerCase() !== authority.toLowerCase()
+  );
+  if (!foreign) return null;
+
+  return fail("Request refused: it came from another site.", 403);
+}
+
+/**
  * Wraps a route handler so thrown HttpErrors become clean JSON responses.
  *
  * Unexpected failures are logged in full, keyed by a request id, but the caller
@@ -202,6 +297,11 @@ export function handler<T extends unknown[]>(
     };
 
     try {
+      // CSRF layer. Runs for every route — handler() wraps them all — so a new
+      // mutation route inherits the protection without remembering it.
+      const refused = crossSiteRefusal(args[0] as Request | undefined);
+      if (refused) return tag(refused);
+
       // Stamped here as well as in ok/fail, so a route that returns a
       // NextResponse of its own still declares which database answered.
       return tag(await fn(...args));

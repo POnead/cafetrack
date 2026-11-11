@@ -1,5 +1,5 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail, badId, readBody } from "@/lib/api";
+import { handler, ok, fail, badId, readBody, dbFail } from "@/lib/api";
 import { requireUser, requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { deleteRef } from "@/lib/ref-delete";
@@ -34,7 +34,7 @@ export const GET = handler(
       .eq("id", id)
       .maybeSingle();
 
-    if (error) return fail(error.message, 500);
+    if (error) return dbFail(error);
     if (!supplier) return fail("Supplier not found", 404);
 
     const { data: items, error: itemsError } = await db()
@@ -47,7 +47,7 @@ export const GET = handler(
       .eq("supplier_id", id)
       .order("name", { ascending: true });
 
-    if (itemsError) return fail(itemsError.message, 500);
+    if (itemsError) return dbFail(itemsError, { context: "supplier delete check" });
 
     return ok({ supplier, items: items ?? [] });
   }
@@ -135,7 +135,7 @@ export const PATCH = handler(
       .select(FIELDS)
       .maybeSingle();
 
-    if (error) return fail(error.message, 500);
+    if (error) return dbFail(error);
     if (!data) return fail("Supplier not found", 404);
 
     await audit(admin, "SUPPLIER_UPDATE", "supplier", data.id, patch);
@@ -149,8 +149,9 @@ export const PATCH = handler(
 // Next 15 delivers route `params` as a Promise, so it is awaited once here and
 // the resolved id is used for the rest of the handler.
 export const DELETE = handler(
-  async (_req: Request, { params }: { params: Promise<{ id: string }> }) => {
+  async (req: Request, { params }: { params: Promise<{ id: string }> }) => {
     const { id } = await params;
+    const body = await readBody(req);
 
     const malformed = badId(id, "supplier");
     if (malformed) return malformed;
@@ -159,9 +160,10 @@ export const DELETE = handler(
       table: "suppliers",
       column: "supplier_id",
       id,
-      label: "supplier",
       noun: "supplier",
       action: "SUPPLIER_DELETE",
+      reason: body.reason,
+      confirmPassword: body.confirm_password,
     });
     if (failed) return failed;
 

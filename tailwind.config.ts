@@ -26,26 +26,26 @@ const config: Config = {
       colors: {
         /* CafeTrack warm palette */
         cream: {
-          50: "#FEFAF3",
-          100: "#FDF3E3",
-          200: "#F8E6C8",
-          300: "#F5D5A8", // main peach panel
-          400: "#F0C582",
-          500: "#E8B563", // primary button
-          600: "#D99B3F",
-          700: "#B87A28",
+          50: "#FFFCF7",
+          100: "#F6F1E8",
+          200: "#EEE6D9",
+          300: "#EADBC8",
+          400: "#C8A274",
+          500: "#BD8C53",
+          600: "#A67642",
+          700: "#70482D",
         },
         cocoa: {
-          50: "#F5EFE9",
-          100: "#E8D9CC",
-          200: "#D3BCA6",
-          300: "#B08B6B",
-          400: "#96755A",
-          500: "#8B5E3C",
-          600: "#6E4526",
-          700: "#5E3A1F", // sidebar
-          800: "#4A2D17",
-          900: "#3D2B1F", // body text
+          50: "#F6F1E8",
+          100: "#EEE6D9",
+          200: "#E7DDCF",
+          300: "#A5978A",
+          400: "#8A7B6D",
+          500: "#8D6040",
+          600: "#70482D",
+          700: "#38261C",
+          800: "#4B3A2E",
+          900: "#2C211A",
         },
         /* Warm status tones — sit next to the cream/cocoa scale.
            Used by the status/type/stock tags (see Badge `variant="tag"`). */
@@ -75,12 +75,12 @@ const config: Config = {
         },
         /* Kept so existing pages keep working after the palette swap */
         brand: {
-          50: "#FDF3E3",
-          100: "#F8E6C8",
-          200: "#F5D5A8",
-          500: "#E8B563",
-          600: "#D99B3F",
-          700: "#B87A28",
+          50: "#FFFCF7",
+          100: "#F6F1E8",
+          200: "#EEE6D9",
+          500: "#BD8C53",
+          600: "#A67642",
+          700: "#70482D",
         },
       },
       fontFamily: {
@@ -89,8 +89,8 @@ const config: Config = {
         sans: ["var(--font-nunito)", "system-ui", "sans-serif"],
       },
       boxShadow: {
-        warm: "0 2px 12px rgba(93, 58, 31, 0.06)",
-        "warm-lg": "0 8px 28px rgba(93, 58, 31, 0.12)",
+        warm: "0 2px 6px rgba(47, 32, 22, 0.05), 0 10px 24px rgba(47, 32, 22, 0.06)",
+        "warm-lg": "0 18px 50px rgba(47, 32, 22, 0.09)",
       },
     },
   },

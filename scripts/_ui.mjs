@@ -44,6 +44,7 @@ let fail = 0;
 const failures = [];
 const consoleErrors = [];
 const failedRequests = [];
+let expectLoginFailureNoise = false;
 
 /**
  * Non-2xx responses this suite provokes on purpose. Chrome logs a console
@@ -86,6 +87,7 @@ async function newPage(context, label) {
     if (m.type() === "error") {
       const t = m.text();
       if (/Download the React DevTools/i.test(t)) return;
+      if (expectLoginFailureNoise && /status of 401 \(Unauthorized\)/i.test(t)) return;
       // Chrome logs a console error for ANY non-2xx fetch. Two of those are
       // this suite's own doing and are the behaviour under test, not a defect:
       // the deliberate bad-scan (404 from /api/items/lookup) and the staff
@@ -137,6 +139,48 @@ async function signInStaff(page, token) {
   await page.waitForURL(/dashboard/, { timeout: 15000 });
 }
 
+async function dispatchPullToRefresh(page) {
+  await page.locator("[data-pull-to-refresh] h1").evaluate((heading) => {
+    const x = 150;
+    const startY = 180;
+    const endY = 280;
+    const makeTouch = (clientY) =>
+      new Touch({
+        identifier: 1,
+        target: heading,
+        clientX: x,
+        clientY,
+        screenX: x,
+        screenY: clientY,
+        pageX: x,
+        pageY: clientY,
+      });
+    const start = makeTouch(startY);
+    const end = makeTouch(endY);
+    heading.dispatchEvent(
+      new TouchEvent("touchstart", {
+        bubbles: true,
+        touches: [start],
+        changedTouches: [start],
+      })
+    );
+    heading.dispatchEvent(
+      new TouchEvent("touchmove", {
+        bubbles: true,
+        touches: [end],
+        changedTouches: [end],
+      })
+    );
+    heading.dispatchEvent(
+      new TouchEvent("touchend", {
+        bubbles: true,
+        touches: [],
+        changedTouches: [end],
+      })
+    );
+  });
+}
+
 try {
   console.log(`CafeTrack browser tests against ${BASE}\n`);
 
@@ -155,10 +199,391 @@ try {
   );
   await admin.screenshot({ path: `${SHOTS}/01-login.png` });
 
+  section("admin forgot-password link follows shared failure streak");
+  await admin.getByRole("button", { name: /admin/i }).click();
+  await admin.getByPlaceholder(/username/i).first().fill("unknown-admin-1");
+  await admin.locator('input[type="password"]').first().fill("wrong-on-purpose");
+  expectLoginFailureNoise = true;
+  for (let i = 1; i <= 2; i++) {
+    const failedLoginResponse = admin.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/auth/login") && response.status() === 401
+    );
+    await admin.getByRole("button", { name: /^(login|sign in|log in)$/i }).first().click();
+    await failedLoginResponse;
+    await admin.getByPlaceholder(/username/i).first().fill(`unknown-admin-${i + 1}`);
+  }
+  await admin.goto(`${BASE}/login`, { waitUntil: "networkidle" });
+  await admin.getByRole("button", { name: /admin/i }).click();
+  await admin.getByPlaceholder(/username/i).first().fill("unknown-admin-after-reload");
+  await admin.locator('input[type="password"]').first().fill("wrong-on-purpose");
+  const thirdFailure = admin.waitForResponse(
+    (response) =>
+      response.url().endsWith("/api/auth/login") && response.status() === 401
+  );
+  await admin.getByRole("button", { name: /^(login|sign in|log in)$/i }).first().click();
+  await thirdFailure;
+  expectLoginFailureNoise = false;
+  await admin.getByRole("button", { name: /forgot password/i }).waitFor({
+    state: "visible",
+  });
+  check(
+    "forgot password appears after three admin login failures",
+    await admin.getByRole("button", { name: /forgot password/i }).isVisible()
+  );
+
+  const challengeId = "c53f1d8b-1e4a-4a43-92a1-23a5cb9a2614";
+  const resendAvailableAt = new Date(Date.now() + 45000).toISOString();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  let recoveryRequests = 0;
+  await admin.route("**/api/auth/password-recovery", async (route) => {
+    const body = route.request().postDataJSON();
+    if (body.action === "verify") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ reset_token: "mock-reset-token" }),
+      });
+      return;
+    }
+    if (body.action === "reset") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ message: "Password updated." }),
+      });
+      return;
+    }
+    recoveryRequests++;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        challenge_id: challengeId,
+        expires_at: expiresAt,
+        resend_available_at: resendAvailableAt,
+        message: "Check the recovery inbox for the code.",
+      }),
+    });
+  });
+  const loginButton = admin.getByRole("button", { name: "Login" });
+  const loginButtonYBefore = (await loginButton.boundingBox()).y;
+  const forgotLink = admin.getByRole("button", { name: "Forgot password?" });
+  const forgotLinkY = (await forgotLink.boundingBox()).y;
+  await forgotLink.click();
+  await admin.getByRole("status").filter({ hasText: "Sending recovery code..." }).waitFor({
+    state: "visible",
+  });
+  const recoveryStatus = admin.getByRole("status").filter({ hasText: "Sending recovery code..." });
+  check(
+    "the recovery link immediately becomes a spinner in its place",
+    !(await forgotLink.isVisible()) && await recoveryStatus.isVisible() &&
+      Math.abs((await recoveryStatus.boundingBox()).y - forgotLinkY) < 1
+  );
+  check(
+    "the sign-in button stays in its original position during the recovery request",
+    Math.abs((await loginButton.boundingBox()).y - loginButtonYBefore) < 1
+  );
+  await admin.getByLabel("Recovery code").waitFor({ state: "visible" });
+  check(
+    "the recovery-code form keeps its back-to-sign-in link",
+    await admin.getByRole("button", { name: "Back to sign in" }).isVisible()
+  );
+  await admin.getByRole("button", { name: "Back to sign in" }).click();
+  await admin.getByRole("button", { name: /forgot password/i }).click();
+  await admin.getByLabel("Recovery code").waitFor({ state: "visible" });
+  const resendLabel = await admin.getByRole("button", { name: /resend in/i }).innerText();
+  check(
+    "returning from the recovery-code form and reopening recovery preserves the original resend countdown",
+    recoveryRequests === 2 && /Resend in [1-5]\d?s/.test(resendLabel),
+    `requests=${recoveryRequests} ${resendLabel}`
+  );
+  await admin.getByLabel("Recovery code").fill("123456");
+  await admin.getByRole("button", { name: /verify|continue/i }).click();
+  await admin.getByLabel("New password", { exact: true }).waitFor({ state: "visible" });
+  check(
+    "the new-password form has one shared accessible visibility control and no back link",
+    (await admin.getByRole("button", { name: "Show passwords" }).count()) === 1 &&
+      (await admin.getByRole("button", { name: /back to sign in/i }).count()) === 0 &&
+      (await admin.getByRole("button", { name: "Show passwords" }).getAttribute("aria-pressed")) === "false"
+  );
+  await admin.getByRole("button", { name: "Show passwords" }).click();
+  check(
+    "the shared password visibility control reveals both recovery fields",
+    (await admin.getByLabel("New password", { exact: true }).getAttribute("type")) === "text" &&
+      (await admin.getByLabel("Confirm new password").getAttribute("type")) === "text" &&
+      (await admin.getByRole("button", { name: "Hide passwords" }).getAttribute("aria-pressed")) === "true"
+  );
+  await admin.getByRole("button", { name: "Hide passwords" }).click();
+  check(
+    "the shared password visibility control can hide both recovery fields again",
+    (await admin.getByLabel("New password", { exact: true }).getAttribute("type")) === "password" &&
+      (await admin.getByLabel("Confirm new password").getAttribute("type")) === "password" &&
+      (await admin.getByRole("button", { name: "Show passwords" }).getAttribute("aria-pressed")) === "false"
+  );
+  await admin.unroute("**/api/auth/password-recovery");
+
   await signInAdmin(admin);
   check("admin sign-in reaches the dashboard", admin.url().includes("/dashboard"), admin.url());
+  await admin.locator("header time[datetime]").waitFor({ state: "visible" });
+  const headerClock = await admin.locator("header time").evaluate((element) => {
+    const dateTime = element.getAttribute("datetime");
+    if (!dateTime) return false;
+    const currentTime = new Date(dateTime);
+    const dateText = element.children[0]?.textContent?.trim();
+    const timeText = element.children[1]?.textContent?.trim();
+    return (
+      dateText ===
+        new Intl.DateTimeFormat("en-US", {
+          weekday: "long",
+          month: "long",
+          day: "numeric",
+          year: "numeric",
+        }).format(currentTime) &&
+      timeText ===
+        new Intl.DateTimeFormat("en-US", {
+          hour: "numeric",
+          minute: "2-digit",
+          hour12: true,
+        }).format(currentTime) &&
+      /\b(?:AM|PM)$/.test(timeText ?? "")
+    );
+  });
+  check("header shows the current local date and 12-hour time", headerClock);
+  await admin.setViewportSize({ width: 320, height: 800 });
+  const narrowHeaderFits = await admin
+    .locator("header")
+    .evaluate((element) => element.scrollWidth <= element.clientWidth + 1);
+  check("header date and time fit on a narrow phone", narrowHeaderFits);
+  await admin.setViewportSize({ width: 1440, height: 900 });
   await admin.waitForTimeout(1200);
   await admin.screenshot({ path: `${SHOTS}/02-dashboard-admin.png`, fullPage: true });
+
+  section("PULL TO REFRESH - mobile gesture replaces page reload controls");
+  for (const [path, pageName] of [
+    ["/reports", "Stock Report"],
+    ["/history", "History"],
+    ["/audit", "Audit Trail"],
+  ]) {
+    await admin.goto(`${BASE}${path}`, { waitUntil: "networkidle" });
+    const reloadButton = admin.getByRole("button", { name: "Reload", exact: true });
+    check(`${pageName} keeps its desktop reload button`, await reloadButton.isVisible());
+    await admin.setViewportSize({ width: 390, height: 844 });
+    check(`${pageName} replaces its reload button on phone`, !(await reloadButton.isVisible()));
+    await admin.setViewportSize({ width: 1440, height: 900 });
+  }
+
+  let approvalRefreshRequests = 0;
+  const countApprovalRefreshes = (request) => {
+    const url = new URL(request.url());
+    if (
+      url.pathname === "/api/items" &&
+      url.searchParams.get("status") === "pending"
+    ) {
+      approvalRefreshRequests++;
+    }
+  };
+  admin.on("request", countApprovalRefreshes);
+  await admin.goto(`${BASE}/approvals`, { waitUntil: "networkidle" });
+  check("Approvals renders on desktop", await admin.getByRole("heading", { name: "Approvals" }).isVisible());
+  await admin.setViewportSize({ width: 390, height: 844 });
+  const approvalScrollBehavior = await admin.locator(".app-main").evaluate((main) => ({
+    overflowY: getComputedStyle(main).overflowY,
+    overscrollBehaviorY: getComputedStyle(main).overscrollBehaviorY,
+    scrollTop: main.scrollTop,
+  }));
+  check(
+    "phone Approvals captures pulls at the top without native overscroll refresh",
+    approvalScrollBehavior.overflowY === "auto" &&
+      approvalScrollBehavior.overscrollBehaviorY === "contain" &&
+      approvalScrollBehavior.scrollTop === 0,
+    `overflow=${approvalScrollBehavior.overflowY}, overscroll=${approvalScrollBehavior.overscrollBehaviorY}`
+  );
+  const previousApprovalRefreshes = approvalRefreshRequests;
+  const approvalRefreshRequest = admin
+    .waitForRequest(
+      (request) => {
+        const url = new URL(request.url());
+        return (
+          url.pathname === "/api/items" &&
+          url.searchParams.get("status") === "pending"
+        );
+      },
+      { timeout: 5000 }
+    )
+    .catch(() => null);
+  await dispatchPullToRefresh(admin);
+  const requestedApprovalRefresh = await approvalRefreshRequest;
+  check(
+    "phone pull-down reloads the pending approvals through the existing load callback",
+    requestedApprovalRefresh !== null &&
+      approvalRefreshRequests === previousApprovalRefreshes + 1,
+    `requests=${approvalRefreshRequests - previousApprovalRefreshes}`
+  );
+
+  let fixtureApprovalItems = [];
+  await admin.route("**/api/items**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/items" && url.searchParams.get("status") === "pending") {
+      await route.fulfill({ json: { items: fixtureApprovalItems } });
+    } else {
+      await route.continue();
+    }
+  });
+  await admin.route("**/api/change-requests**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("status") === "pending") {
+      await route.fulfill({ json: { requests: [] } });
+    } else {
+      await route.continue();
+    }
+  });
+  await admin.route("**/api/duty-bypass-requests**", (route) =>
+    route.fulfill({ json: { requests: [] } })
+  );
+
+  const emptyApprovalQueues = [
+    [
+      "Face-check requests",
+      "No face-check requests are waiting for review. New requests will appear here.",
+    ],
+    [
+      "Staff item submissions",
+      "No staff item submissions are waiting for review. New submissions will appear here.",
+    ],
+    [
+      "Staff item change requests",
+      "No staff item change requests are waiting for review. New requests will appear here.",
+    ],
+  ];
+  await admin.goto(`${BASE}/approvals`, { waitUntil: "networkidle" });
+  const emptyQueueMessagesVisible = await Promise.all(
+    emptyApprovalQueues.map(async ([heading, message]) => {
+      const section = admin
+        .getByRole("heading", { name: heading, exact: true })
+        .locator("xpath=ancestor::section[1]");
+      return (
+        (await section.isVisible()) &&
+        (await section.getByText(message, { exact: true }).isVisible())
+      );
+    })
+  );
+  check(
+    "all empty approval queues show a section-specific heading and message",
+    emptyQueueMessagesVisible.every(Boolean)
+  );
+
+  fixtureApprovalItems = [{
+    id: "ui-approval-fixture",
+    sku: "UI-APPROVAL",
+    name: "UI approval fixture",
+    physical_form: "liquid",
+    unit: "bottle",
+    quantity: 1,
+    low_stock_threshold: 0,
+    expiration_date: null,
+    expirable: false,
+    item_status: "pending",
+    submitted_at: null,
+    reviewed_at: null,
+    review_note: null,
+    category: null,
+    location: null,
+  }];
+  await admin.goto(`${BASE}/approvals`, { waitUntil: "networkidle" });
+  const emptyChangeSection = admin
+    .getByRole("heading", { name: "Staff item change requests", exact: true })
+    .locator("xpath=ancestor::section[1]");
+  const emptyFaceCheckSection = admin
+    .getByRole("heading", { name: "Face-check requests", exact: true })
+    .locator("xpath=ancestor::section[1]");
+  check(
+    "empty queues remain clearly identified when staff submissions are waiting",
+    (await admin.getByText("UI approval fixture", { exact: true }).isVisible()) &&
+      (await emptyChangeSection
+        .getByText(emptyApprovalQueues[2][1], { exact: true })
+        .isVisible()) &&
+      (await emptyFaceCheckSection
+        .getByText(emptyApprovalQueues[0][1], { exact: true })
+        .isVisible())
+  );
+  await admin.unroute("**/api/items**");
+  await admin.unroute("**/api/change-requests**");
+  await admin.unroute("**/api/duty-bypass-requests**");
+
+  await admin.setViewportSize({ width: 1440, height: 900 });
+  check("Approvals remains available at desktop width", await admin.getByRole("heading", { name: "Approvals" }).isVisible());
+  admin.off("request", countApprovalRefreshes);
+
+  let auditRefreshRequests = 0;
+  const countAuditRefreshes = (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === "/api/audit" && !url.searchParams.has("before")) {
+      auditRefreshRequests++;
+    }
+  };
+  admin.on("request", countAuditRefreshes);
+  await admin.goto(`${BASE}/audit`, { waitUntil: "networkidle" });
+  await admin.setViewportSize({ width: 390, height: 844 });
+  await admin.locator(".app-main").evaluate((main) => {
+    main.scrollTop = 0;
+  });
+  const previousAuditRefreshes = auditRefreshRequests;
+  const auditRefreshRequest = admin
+    .waitForRequest(
+      (request) => {
+        const url = new URL(request.url());
+        return url.pathname === "/api/audit" && !url.searchParams.has("before");
+      },
+      { timeout: 5000 }
+    )
+    .catch(() => null);
+  await dispatchPullToRefresh(admin);
+  const requestedAuditRefresh = await auditRefreshRequest;
+  check(
+    "phone pull-down invokes the audit page's existing reload callback",
+    requestedAuditRefresh !== null &&
+      auditRefreshRequests === previousAuditRefreshes + 1,
+    `requests=${auditRefreshRequests - previousAuditRefreshes}`
+  );
+  admin.off("request", countAuditRefreshes);
+  await admin.setViewportSize({ width: 1440, height: 900 });
+  await admin.goto(`${BASE}/dashboard`, { waitUntil: "networkidle" });
+
+  section("RESPONSIVE - sidebar scrolling in a short desktop viewport");
+  const sidebar = admin.locator('aside[aria-label="Main navigation"]');
+  const sidebarNav = sidebar.locator("nav.sidebar-nav");
+  await admin.setViewportSize({ width: 1280, height: 360 });
+  const desktopNavMetrics = await sidebarNav.evaluate((nav) => ({
+    clientHeight: nav.clientHeight,
+    scrollHeight: nav.scrollHeight,
+  }));
+  check(
+    "short desktop sidebar navigation has a scrollable region",
+    desktopNavMetrics.scrollHeight > desktopNavMetrics.clientHeight,
+    `${desktopNavMetrics.clientHeight}/${desktopNavMetrics.scrollHeight}px`
+  );
+  const desktopSidebarVisible = await sidebar.evaluate((aside) => {
+    const header = aside.firstElementChild?.getBoundingClientRect();
+    const nav = aside.querySelector("nav")?.getBoundingClientRect();
+    const footer = aside.lastElementChild?.getBoundingClientRect();
+    const lastLink = aside.querySelector('a[href="/audit"]')?.getBoundingClientRect();
+    const navElement = aside.querySelector("nav");
+    if (!header || !nav || !footer || !lastLink || !navElement) return false;
+    navElement.scrollTop = navElement.scrollHeight;
+    return (
+      header.top >= 0 &&
+      header.bottom <= window.innerHeight &&
+      footer.top >= 0 &&
+      footer.bottom <= window.innerHeight &&
+      lastLink.top >= nav.top &&
+      lastLink.bottom <= nav.bottom &&
+      navElement.scrollTop > 0
+    );
+  });
+  check("short desktop sidebar keeps its brand and profile visible while scrolled", desktopSidebarVisible);
+  await admin.setViewportSize({ width: 1440, height: 900 });
 
   /* ================================================================= */
   section("ITEMS - add an ingredient through the form");
@@ -371,6 +796,48 @@ const staffUser =
   });
   const phone = await newPage(phoneCtx, "phone");
   await phone.goto(`${BASE}/dashboard`, { waitUntil: "networkidle" });
+  await phone.setViewportSize({ width: 390, height: 540 });
+  await phone.getByRole("button", { name: "Open menu" }).click();
+  check(
+    "the phone navigation drawer opens",
+    (await phone.getByRole("button", { name: "Open menu" }).getAttribute("aria-expanded")) === "true"
+  );
+  const phoneSidebar = phone.locator('aside[aria-label="Main navigation"]');
+  const phoneNav = phoneSidebar.locator("nav.sidebar-nav");
+  const phoneNavMetrics = await phoneNav.evaluate((nav) => ({
+    clientHeight: nav.clientHeight,
+    scrollHeight: nav.scrollHeight,
+  }));
+  check(
+    "phone drawer navigation has a scrollable region",
+    phoneNavMetrics.scrollHeight > phoneNavMetrics.clientHeight,
+    `${phoneNavMetrics.clientHeight}/${phoneNavMetrics.scrollHeight}px`
+  );
+  const phoneSidebarVisible = await phoneSidebar.evaluate((aside) => {
+    const header = aside.firstElementChild?.getBoundingClientRect();
+    const nav = aside.querySelector("nav")?.getBoundingClientRect();
+    const footer = aside.lastElementChild?.getBoundingClientRect();
+    const lastLink = aside.querySelector('a[href="/email"]')?.getBoundingClientRect();
+    const navElement = aside.querySelector("nav");
+    if (!header || !nav || !footer || !lastLink || !navElement) return false;
+    navElement.scrollTop = navElement.scrollHeight;
+    return (
+      header.top >= 0 &&
+      header.bottom <= window.innerHeight &&
+      footer.top >= 0 &&
+      footer.bottom <= window.innerHeight &&
+      lastLink.top >= nav.top &&
+      lastLink.bottom <= nav.bottom &&
+      navElement.scrollTop > 0
+    );
+  });
+  check("phone drawer keeps its brand and profile visible while scrolled", phoneSidebarVisible);
+  await phone.getByRole("button", { name: "Close menu" }).click();
+  check(
+    "the phone navigation drawer still closes",
+    (await phone.getByRole("button", { name: "Open menu" }).getAttribute("aria-expanded")) === "false"
+  );
+  await phone.setViewportSize({ width: 390, height: 844 });
   await phone.waitForTimeout(1500);
   await phone.screenshot({ path: `${SHOTS}/14-phone-dashboard.png`, fullPage: true });
 

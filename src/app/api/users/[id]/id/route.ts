@@ -1,8 +1,9 @@
 ﻿import { db } from "@/lib/supabase";
-import { handler, ok, fail, badId, clientIp, readBody } from "@/lib/api";
+import { handler, ok, fail, badId, clientIp, readBody, dbFail } from "@/lib/api";
 import { requireAdmin, HttpError } from "@/lib/auth";
 import { audit } from "@/lib/audit";
-import { parseEmbedding } from "@/lib/face";
+import { compareFacePlusPlus, facePlusPlusMode } from "@/lib/facepp";
+import { ocrSpaceConfigured } from "@/lib/id-verification/ocr-space";
 import {
   exceedsDeclaredLength,
   fieldLabel,
@@ -10,10 +11,6 @@ import {
   readBoundedFormData,
   readIdImage,
 } from "@/lib/id-document";
-import {
-  getIdFaceMatchThreshold,
-  getIdProvider,
-} from "@/lib/settings";
 import {
   isIdDocType,
   providerSummary,
@@ -24,11 +21,11 @@ import {
 } from "@/lib/id-verification";
 import {
   DUPLICATE_DISTANCE,
-  duplicateDetail,
   hammingDistance,
   isValidFingerprint,
 } from "@/lib/id-verification/card-hash";
-import { checkIdNumber } from "@/lib/id-verification/id-number";
+import { checkIdNumber, normaliseIdNumber } from "@/lib/id-verification/id-number";
+import { idNumberSignal } from "@/lib/id-verification/specification";
 import { ID_DOC_TYPE_LABELS } from "@/lib/id-verification/types";
 import { auditIdReview } from "@/lib/audit-id-review";
 
@@ -37,8 +34,7 @@ export const runtime = "nodejs";
 /**
  * A staff member's government ID: attach it, read it, decide on it, remove it.
  *
- *   POST    multipart — the ID images plus whatever the browser could read from
- *            them, then runs the checks and stores the result
+ *   POST    multipart — the ID images, then runs the checks and stores the result
  *   GET               — one image, for the admin reviewing the two side by side
  *   PATCH             — approve or reject. A reason is required to reject.
  *   DELETE            — remove the stored documents, keeping the audit trail
@@ -49,10 +45,9 @@ export const runtime = "nodejs";
  * to a provider, and folding that into one branchy handler is how a validation
  * ends up skipped on the path nobody tested.
  *
- * **Nothing here decides anything.** The checks produce signals, the signals are
- * stored and returned, and `verification_status` moves only in PATCH, only on a
- * human's click. See lib/id-verification/types.ts for why that split is the
- * design rather than a limitation worked around.
+ * A clear face mismatch stops the upload before text checks run. A successful
+ * upload is still only evidence: `verification_status` moves only in PATCH,
+ * after a human makes the final decision.
  */
 
 /**
@@ -72,9 +67,9 @@ const REVIEW_COLUMNS =
  * A provider sees one image and nothing else — that is the interface in
  * lib/id-verification/types.ts, and it is what lets one be added without touching
  * anything else. Neither of these can be expressed that way: "is this the same
- * card as someone else's" and "is this number the right shape" are both questions
- * about an account's relationship to the rest of the system, and the second needs
- * no image at all.
+ * card as someone else's", "has this number already been used", and "does this
+ * number fit the selected type" are questions about the account's relationship to
+ * the rest of the system, and the number checks need no image at all.
  *
  * They are appended to the same `signals` array as everything else, so the review
  * screen and the stored `id_signals` do not need to know which checks came from
@@ -121,7 +116,8 @@ async function findDuplicateCard(hash: string, selfId: string): Promise<Duplicat
     .from("users")
     .select("id, full_name, username, id_card_hash");
 
-  if (error || !Array.isArray(data)) return null;
+  if (error) throw new Error(`Could not check for a reused ID card: ${error.message}`);
+  if (!Array.isArray(data)) throw new Error("Could not check for a reused ID card.");
 
   let closest: DuplicateHit | null = null;
 
@@ -144,7 +140,43 @@ async function findDuplicateCard(hash: string, selfId: string): Promise<Duplicat
   return closest;
 }
 
-function duplicateSignal(hash: string | null, hit: DuplicateHit | null): IdSignal {
+async function findDuplicateIdNumber(
+  number: string,
+  docType: IdDocType,
+  selfId: string
+): Promise<DuplicateHit | null> {
+  const normalised = normaliseIdNumber(number);
+  if (!normalised) return null;
+
+  const { data, error } = await db()
+    .from("users")
+    .select("id, full_name, username, role, id_doc_type, id_doc_number");
+
+  if (error) throw new Error(`Could not check whether this ID number was used: ${error.message}`);
+  if (!Array.isArray(data)) throw new Error("Could not check whether this ID number was used.");
+
+  for (const row of data as Array<{
+    id: string;
+    full_name: string | null;
+    username: string | null;
+    role: string;
+    id_doc_type: string | null;
+    id_doc_number: string | null;
+  }>) {
+    if (
+      row.id !== selfId &&
+      row.role === "staff" &&
+      row.id_doc_type === docType &&
+      normaliseIdNumber(row.id_doc_number) === normalised
+    ) {
+      return { id: row.id, full_name: row.full_name, username: row.username, distance: 0 };
+    }
+  }
+
+  return null;
+}
+
+function duplicateSignal(hash: string | null): IdSignal {
   if (!hash) {
     return {
       id: "card_duplicate",
@@ -156,50 +188,11 @@ function duplicateSignal(hash: string | null, hit: DuplicateHit | null): IdSigna
     };
   }
 
-  if (!hit) {
-    return {
-      id: "card_duplicate",
-      label: "Card already on file",
-      tone: "pass",
-      detail: "This card does not appear to have been uploaded for any other account.",
-    };
-  }
-
   return {
     id: "card_duplicate",
     label: "Card already on file",
-    // `warn`, never `fail`. The same card can be uploaded twice by accident — a
-    // re-shoot during a retry, a second admin re-uploading after a scroll — and a
-    // fail here would train admins to ignore the row that matters, which is the one
-    // where a relative's ID really was reused.
-    tone: "warn",
-    detail: duplicateDetail(hit.distance, DUPLICATE_DISTANCE, hit),
-  };
-}
-
-function numberSignal(declared: string, docType: IdDocType): IdSignal {
-  const verdict = checkIdNumber(declared, docType);
-
-  if (verdict.ok) {
-    return {
-      id: "id_number_shape",
-      label: "ID number shape",
-      tone: "pass",
-      detail: verdict.normalised
-        ? `"${verdict.normalised}" is the right shape for a ${ID_DOC_TYPE_LABELS[docType]}. ` +
-          "That says nothing about whether the number is real — only a government " +
-          "database can answer that."
-        : "No number was typed in, so there was nothing to check.",
-    };
-  }
-
-  return {
-    id: "id_number_shape",
-    label: "ID number shape",
-    tone: "warn",
-    detail:
-      (verdict.problem ?? "That is not the right shape for this card.") +
-      " Compare it with the card before approving.",
+    tone: "pass",
+    detail: "No matching card image was found on another staff account.",
   };
 }
 
@@ -248,7 +241,7 @@ export const POST = handler(
     // audit entry records what actually changed.
     const { data: before } = await db()
       .from("users")
-      .select("id, username, full_name, role, is_active, verification_status, id_provider")
+      .select("id, username, full_name, role, is_active, verification_status, id_provider, face_image")
       .eq("id", id)
       .maybeSingle();
 
@@ -302,52 +295,95 @@ export const POST = handler(
     const back = backPart ? await readIdImage(backPart, "back") : null;
     if (back && !back.ok) return fail(back.message);
 
-    const photoPart = form.get("photo");
-    const photo = photoPart ? await readIdImage(photoPart, "photo") : null;
-    if (photo && !photo.ok) return fail(photo.message);
+    if (!before.face_image) {
+      return fail("Enroll this account's face before uploading an ID for verification", 400);
+    }
 
-    /*
-     * Both embeddings are computed in the browser — with SFace, always, whatever
-     * `settings.face_engine` says for sign-in — and sent up, so the server has no
-     * ML runtime. See the note in components/IdUpload.tsx for why the reader
-     * follows `id_face_match_threshold`'s calibration rather than the cafe's
-     * sign-in engine.
-     *
-     * parseEmbedding does the real validation — 128 finite floats inside the
-     * model's norm band — and returns null for anything else.
-     *
-     * A missing or malformed one is not an error. It means "this check could not
-     * run", which becomes an `unknown` signal. Refusing the upload instead would
-     * turn the app's inability to read a face into a refusal to record an ID.
-     */
-    const cardEmbedding = parseEmbedding(form.get("card_embedding"));
-    const photoEmbedding = parseEmbedding(form.get("photo_embedding"));
+    let portraitCompared = false;
+    if (!ocrSpaceConfigured()) {
+      return fail(
+        "OCR.space is required to read ID documents, but its API key is not configured on this server.",
+        503
+      );
+    }
+
+    let faceSignal: IdSignal;
+    const facePlusPlusStatus = facePlusPlusMode();
+    if (facePlusPlusStatus !== "enabled") {
+      faceSignal = {
+        id: "face_match",
+        label: "Face match",
+        tone: "unknown",
+        adminOnly: true,
+        detail: "The photos could not be compared. Check them manually.",
+      };
+    } else {
+      const comparison = await compareFacePlusPlus(before.face_image, front.dataUrl);
+      portraitCompared = comparison.status !== "unavailable";
+      if (comparison.status === "rejected") {
+        return fail(
+          "The face on this ID does not match the staff photo. The ID was not saved. Check the images and try again.",
+          400
+        );
+      }
+
+      faceSignal = {
+        id: "face_match",
+        label: "Face match",
+        tone: comparison.status === "matched" ? "pass" : "unknown",
+        adminOnly: true,
+        detail:
+          comparison.status === "matched"
+            ? "The ID photo matches the staff photo."
+            : "The photos could not be compared. Check them manually.",
+      };
+    }
 
     const declaredNumber = String(form.get("id_number") ?? "").trim();
 
-    const [threshold, preferred] = await Promise.all([
-      getIdFaceMatchThreshold(),
-      getIdProvider(),
-    ]);
-
     /*
-     * Run the checks. Never throws for a provider problem — the orchestrator
-     * turns a failed provider into an `unknown` signal and carries on, which is
-     * the whole reason there is more than one.
+     * OCR.space is mandatory for ID text extraction. Other checks add evidence,
+     * but a failed OCR request must not be presented as a completed ID scan.
      */
     const result = await runIdVerification(
       {
         front: { bytes: front.bytes, type: front.type },
         back: back && back.ok ? { bytes: back.bytes, type: back.type } : null,
-        photo: photo && photo.ok ? { bytes: photo.bytes, type: photo.type } : null,
         docType,
         declaredNumber: declaredNumber || null,
         expectedName: before.full_name,
-        cardEmbedding,
-        photoEmbedding,
-      },
-      { faceMatchThreshold: threshold, preferredProvider: preferred }
+      }
     );
+
+    const ocrFailure = result.signals.find(
+      (signal) => signal.id === "provider_ocr_space"
+    );
+    if (ocrFailure) {
+      const detail = ocrFailure.detail.replace(/ The remaining checks still apply\.?$/, "");
+      return fail(`OCR.space could not read this ID. ${detail}`, 502);
+    }
+
+    if (result.signals.some((signal) => signal.id === "ocr_space_doc_type" && signal.tone === "fail")) {
+      return fail(
+        "The ID type does not match your selection. Choose the correct type and upload again.",
+        400
+      );
+    }
+
+    if (result.detectedDocType && result.detectedDocType !== docType) {
+      return fail(
+        `The scanned ID was detected as ${ID_DOC_TYPE_LABELS[result.detectedDocType]}, ` +
+        `but ${ID_DOC_TYPE_LABELS[docType]} was selected. Choose the matching ID type and upload again.`,
+        400
+      );
+    }
+
+    if (result.signals.some((signal) => signal.id === "name_match" && signal.tone === "fail")) {
+      return fail(
+        "The name read from this ID does not match the selected staff account. Check the account and card, then upload the correct ID.",
+        400
+      );
+    }
 
     /*
      * The two cross-account checks, appended to the same signal list so the review
@@ -361,21 +397,48 @@ export const POST = handler(
     const rawHash = String(form.get("card_hash") ?? "").trim().toLowerCase();
     const cardHash = isValidFingerprint(rawHash) ? rawHash : null;
 
-    const [duplicate] = await Promise.all([
+    const storedIdNumber = declaredNumber || String(result.fields?.id_number ?? "").trim();
+    const numberIsValid = storedIdNumber ? checkIdNumber(storedIdNumber, docType).ok : false;
+    const [duplicate, duplicateNumber] = await Promise.all([
       cardHash ? findDuplicateCard(cardHash, id) : Promise.resolve(null),
+      numberIsValid
+        ? findDuplicateIdNumber(storedIdNumber, docType, id)
+        : Promise.resolve(null),
     ]);
 
-    result.signals.push(duplicateSignal(cardHash, duplicate));
-    if (declaredNumber) result.signals.push(numberSignal(declaredNumber, docType));
+    if (duplicate || duplicateNumber) {
+      return fail(
+        duplicateNumber
+          ? "This ID number is already attached to another staff account. The ID was not saved."
+          : `This card image closely matches an ID already attached to ${
+              duplicate?.full_name || duplicate?.username || "another staff account"
+            }. The ID was not saved.`,
+        409
+      );
+    }
+
+    result.signals = result.signals.filter((signal) => signal.id !== "face_match");
+    result.signals.push(faceSignal);
+    result.provider = `${result.provider}+facepp${
+      facePlusPlusStatus === "enabled" ? "" : "(unavailable)"
+    }`;
+    result.signals.push(duplicateSignal(cardHash));
+    result.signals = result.signals.filter((signal) => signal.id !== "id_number_shape");
+    const numberCheck = idNumberSignal(storedIdNumber, docType);
+    if (numberCheck) result.signals.push(numberCheck);
 
     const { data, error } = await db()
       .from("users")
       .update({
         id_doc_front: front.dataUrl,
         id_doc_back: back && back.ok ? back.dataUrl : null,
-        id_photo: photo && photo.ok ? photo.dataUrl : null,
+        id_photo: null,
         id_doc_type: docType,
-        id_doc_number: declaredNumber || null,
+        id_doc_number: storedIdNumber || null,
+        id_doc_expiry: typeof result.fields?.date_of_expiry === "string"
+          && /^\d{4}-\d{2}-\d{2}$/.test(result.fields.date_of_expiry)
+            ? result.fields.date_of_expiry : null,
+        id_doc_uploaded_by: admin.id,
         // Kept so the next upload can be compared against this one. Not part of the
         // review payload and not audited: 64 bits that cannot become a photograph
         // have nothing an auditor needs to read.
@@ -396,7 +459,7 @@ export const POST = handler(
       .select(REVIEW_COLUMNS)
       .maybeSingle();
 
-    if (error) return fail(error.message, 500);
+    if (error) return dbFail(error);
     if (!data) return fail("User not found", 404);
 
     await audit(
@@ -409,8 +472,8 @@ export const POST = handler(
         full_name: data.full_name,
         doc_type: docType,
         has_back: Boolean(back?.ok),
-        has_photo: Boolean(photo?.ok),
-        portrait_compared: Boolean(cardEmbedding && photoEmbedding),
+        has_photo: false,
+        portrait_compared: portraitCompared,
         front_bytes: front.length,
         front_type: front.type,
         replaced_previous_verification: before.verification_status !== "unverified",
@@ -446,7 +509,7 @@ export const POST = handler(
  */
 export const GET = handler(
   async (req: Request, { params }: { params: Promise<{ id: string }> }) => {
-    await requireAdmin();
+    const admin = await requireAdmin();
     const { id } = await params;
 
     const malformed = badId(id, "user");
@@ -463,7 +526,7 @@ export const GET = handler(
       .eq("id", id)
       .maybeSingle();
 
-    if (error) return fail(error.message, 500);
+    if (error) return dbFail(error);
     if (!data) return fail("User not found", 404);
 
     const stored = String((data as Record<string, unknown>)[column] ?? "");
@@ -473,6 +536,10 @@ export const GET = handler(
 
     const match = /^data:([^;,]+);base64,(.*)$/.exec(stored);
     if (!match) return fail(`No ${fieldLabel(part)} stored for this account`, 404);
+
+    await audit(admin, "IDENTITY_DOCUMENT_READ", "user", id, {
+      part,
+    }, { ip: clientIp(req) });
 
     const [, type, base64] = match;
 
@@ -535,7 +602,7 @@ export const PATCH = handler(
       .from("users")
       .select(
         "id, username, full_name, role, is_active, verification_status, " +
-          "id_doc_front, id_provider, id_signals"
+          "id_doc_front, id_doc_type, id_doc_number, id_provider, id_signals"
       )
       .eq("id", id)
       .maybeSingle();
@@ -558,6 +625,36 @@ export const PATCH = handler(
       return fail("No ID has been attached to this account yet");
     }
 
+    const storedSignals = parseSignals(before.id_signals);
+    if (!storedSignals.some((signal) => signal.id === "id_fields_reviewed")) {
+      return fail("Review and save the ID details before recording a decision");
+    }
+
+    if (
+      decision === "approve" &&
+      storedSignals.some((signal) => signal.id === "name_match" && signal.tone === "fail")
+    ) {
+      return fail("The name on this ID does not match the staff account, so it cannot be approved");
+    }
+
+    if (
+      decision === "approve" &&
+      storedSignals.some((signal) => signal.id === "face_match" && signal.tone === "fail")
+    ) {
+      return fail(
+        "The face on this ID does not match the staff photo, so it cannot be approved."
+      );
+    }
+
+    if (
+      decision === "approve" &&
+      storedSignals.some((signal) => signal.id === "id_number_shape" && signal.tone === "warn")
+    ) {
+      return fail(
+        "The ID number does not match the format for this ID type. Correct or clear it before approval."
+      );
+    }
+
     const nextStatus = decision === "approve" ? "verified" : "rejected";
 
     const { data, error } = await db()
@@ -572,7 +669,7 @@ export const PATCH = handler(
       .select(REVIEW_COLUMNS)
       .maybeSingle();
 
-    if (error) return fail(error.message, 500);
+    if (error) return dbFail(error);
     if (!data) return fail("User not found", 404);
 
     await auditIdReview({
@@ -663,7 +760,7 @@ export const DELETE = handler(
       .select(REVIEW_COLUMNS)
       .maybeSingle();
 
-    if (error) return fail(error.message, 500);
+    if (error) return dbFail(error);
     if (!data) return fail("User not found", 404);
 
     await audit(

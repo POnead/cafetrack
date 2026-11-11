@@ -9,7 +9,7 @@
  *
  * It does **not** catch a well-made forgery. Someone with a printed PhilSys
  * template and a pasted photograph produces a different hash and sails past. What
- * stops that is the portrait comparison in local.ts, which is why this belongs
+ * stops that is the Face++ portrait comparison, which is why this belongs
  * alongside it rather than in place of it. Nothing local is a substitute for the
  * forgery module HyperVerge charges $0.04 for, and this file does not pretend to
  * be one.
@@ -36,8 +36,8 @@ export const HASH_HEX_LENGTH = HASH_BITS / 4;
 /**
  * Below this Hamming distance, two fingerprints are the same physical card.
  *
- * **This number is reasoned, not measured** — the same caveat as
- * `DEFAULT_ID_MATCH_THRESHOLD` in local.ts, and for the same reason.
+ * The duplicate-distance is a conservative image-similarity heuristic, not a
+ * proof that two cards are the same.
  *
  * Two photographs of one card differ in angle, glare, shadow and white balance,
  * all of which move a handful of the 64 comparisons. Two different cards disagree

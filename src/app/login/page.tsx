@@ -1,45 +1,87 @@
 ﻿"use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { StorefrontArt } from "@/components/BrandArt";
+import { createPortal } from "react-dom";
+import { CafeTrackBrand } from "@/components/CafeTrackBrand";
+import FeatureCarousel from "@/components/FeatureCarousel";
 import { fmtDateTime } from "@/lib/format";
 
-/*
- * The camera panel, loaded only when someone actually asks for it.
- *
- * Statically imported, this put face-client.ts and face-diagnostics.ts into the
- * initial download of /login — the first page every single person loads, and the
- * one nobody reaches the camera on unless face sign-in is switched on for their
- * cafe. `ssr: false` is valid because this page is a Client Component, and it
- * means the 6.7MB of TensorFlow and face-api weights behind those imports are
- * not even part of the graph until the button is pressed.
- */
-/*
- * Step two. Loaded the same way as the camera panels above, and for the same
- * reason: it pulls in the face model and the camera, neither of which belongs in
- * the initial bundle for someone who only ever types a password.
- */
+type Mode = "staff" | "admin";
+type RecoveryStage = "login" | "code" | "password";
+
 const StaffCheck = dynamic(
-  () => import("@/components/StaffCheck").then((m) => m.default),
+  () => import("@/components/StaffCheck").then((module) => module.default),
   {
     ssr: false,
     loading: () => (
       <div className="flex items-center justify-center py-10 text-sm text-cocoa-400">
-        Loading camera…
+        Loading face check…
       </div>
     ),
   }
 );
-
-type Mode = "staff" | "admin";
 
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) {
     return error.message;
   }
   return "Sign in failed";
+}
+
+async function readLoginResponse(response: Response): Promise<Record<string, unknown>> {
+  const body = await response.text();
+  if (!body.trim()) {
+    throw new Error(
+      `The sign-in service returned an empty response (HTTP ${response.status}). ` +
+        "Check the server and try again."
+    );
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    throw new Error(
+      `The sign-in service returned an invalid response (HTTP ${response.status}). ` +
+        "Check the server and try again."
+    );
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(
+      `The sign-in service returned an invalid response (HTTP ${response.status}). ` +
+        "Check the server and try again."
+    );
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function PasswordVisibilityIcon({ visible }: { visible: boolean }) {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinejoin="round"
+      />
+      <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.8" />
+      {visible && (
+        <line
+          x1="4"
+          y1="20"
+          x2="20"
+          y2="4"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+        />
+      )}
+    </svg>
+  );
 }
 
 export default function LoginPage() {
@@ -49,39 +91,61 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [checkingSession, setCheckingSession] = useState(true);
+  const [recoveryRequestBusy, setRecoveryRequestBusy] = useState(false);
   const [sessionConflict, setSessionConflict] = useState(false);
+  const [conflictRedirecting, setConflictRedirecting] = useState(false);
+  const [faceCheckResetNotice, setFaceCheckResetNotice] = useState(false);
+  const [pendingRedirect, setPendingRedirect] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
+  const [showRecoveryPasswords, setShowRecoveryPasswords] = useState(false);
+  const [step2, setStep2] = useState<{ ticket: string; fullName?: string } | null>(null);
+  const usernameInputRef = useRef<HTMLInputElement>(null);
+  const [adminFailedAttempts, setAdminFailedAttempts] = useState(0);
+  const [recoveryStage, setRecoveryStage] = useState<RecoveryStage>("login");
+  const [recoveryChallengeId, setRecoveryChallengeId] = useState("");
+  const [recoveryResetToken, setRecoveryResetToken] = useState("");
+  const [recoveryCode, setRecoveryCode] = useState("");
+  const [recoveryPassword, setRecoveryPassword] = useState("");
+  const [recoveryConfirmPassword, setRecoveryConfirmPassword] = useState("");
+  const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
+  const [resendSeconds, setResendSeconds] = useState(0);
 
-  /*
-   * Face sign-in, staff only.
+  useEffect(() => {
+    let active = true;
+    void fetch("/api/auth/me?session_check=1&login_check=1", { cache: "no-store" })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!active) return;
+        if (response.ok && data.authenticated === true) {
+          router.replace("/dashboard");
+        } else {
+          setCheckingSession(false);
+        }
+      })
+      .catch(() => {
+        // Login remains available when the session preflight cannot reach the server.
+        if (active) setCheckingSession(false);
+      });
 
-   * The identifier is always typed or scanned first, and the camera only confirms
-   * the face already enrolled against that one account. That makes the comparison
-   * one-to-one rather than a search across the whole roster — see the header of
-   * api/auth/face-login/route.ts for why the difference matters.
-   *
-   * Whether the option is offered at all comes from the server, not from a flag
-   * baked into the page: an admin switches it on in Settings and it appears with
-   * no deploy, and switching it off takes it away just as quickly.
-   */
+    return () => {
+      active = false;
+    };
+  }, [router]);
 
-  
-  /*
-   * Step two of two-step sign-in.
-   *
-   * Set only by a successful password step, and it is the *only* thing standing
-   * between that success and the app. There is deliberately no way to reach the
-   * dashboard from here without it, and no "skip" — which is why the button at
-   * the bottom of the password form is gone rather than moved.
-   *
-   * The ticket is held in state, not in a cookie, precisely so the session code
-   * cannot see it. It is signed with a key readSessionToken does not hold, so
-   * even if it were promoted to a cookie it would not authenticate anything.
-   */
-  const [step2, setStep2] = useState<{
-    ticket: string;
-    fullName?: string;
-  } | null>(null);
+  const step2Ticket = step2?.ticket;
+  useEffect(() => {
+    if (!step2Ticket) return;
+
+    const activeUrl = `${window.location.pathname}${window.location.search}`;
+    const keepFaceCheckOpen = () => {
+      window.history.pushState(null, "", activeUrl);
+    };
+
+    keepFaceCheckOpen();
+    window.addEventListener("popstate", keepFaceCheckOpen);
+    return () => window.removeEventListener("popstate", keepFaceCheckOpen);
+  }, [step2Ticket]);
 
   // A disabled account gets a distinct panel instead of the generic sign-in
   // error, carrying the reason an admin recorded.
@@ -90,28 +154,71 @@ export default function LoginPage() {
     when: string | null;
   } | null>(null);
 
+  useEffect(() => {
+    if (!window.matchMedia("(min-width: 1024px)").matches) return;
+    usernameInputRef.current?.focus({ preventScroll: true });
+  }, [mode]);
+
+  useEffect(() => {
+    setFaceCheckResetNotice(
+      new URLSearchParams(window.location.search).get("face_check_reset") === "1"
+    );
+  }, []);
+
+  useEffect(() => {
+    if (resendSeconds <= 0) return;
+    const timer = window.setTimeout(
+      () => setResendSeconds((seconds) => Math.max(0, seconds - 1)),
+      1000
+    );
+    return () => window.clearTimeout(timer);
+  }, [resendSeconds]);
+
+  function clearRecovery() {
+    setRecoveryStage("login");
+    setRecoveryChallengeId("");
+    setRecoveryResetToken("");
+    setRecoveryCode("");
+    setRecoveryPassword("");
+    setRecoveryConfirmPassword("");
+    setRecoveryMessage(null);
+    setResendSeconds(0);
+    setShowRecoveryPasswords(false);
+  }
+
+  function returnToSignIn() {
+    setRecoveryStage("login");
+    setRecoveryResetToken("");
+    setRecoveryCode("");
+    setRecoveryPassword("");
+    setRecoveryConfirmPassword("");
+    setRecoveryMessage(null);
+    setError(null);
+    setShowRecoveryPasswords(false);
+  }
+
   /** Shared by both routes, so they cannot drift on what "signed in" means. */
-  function afterSignIn(
-    data?: { user?: unknown; session_conflict?: boolean } | "face" | "id_card"
-  ) {
-    if (data && typeof data === "object" && data.session_conflict) {
+  function finishSignIn(destination: string, hasSessionConflict: boolean) {
+    if (hasSessionConflict) {
+      setPendingRedirect(destination);
       setSessionConflict(true);
+      setBusy(false);
+      return;
     }
 
-    /*
-     * Staff come here twice now: once from the badge panel, with the session
-     * already in hand, and once from StaffCheck, which has just been handed one
-     * by /api/auth/staff/confirm. Both need the duty check below — but that
-     * check reads /api/auth/me, which only answers for a real session, so it is
-     * reached at the same point either way.
-     */
-    router.replace("/dashboard");
+    router.replace(destination);
+  }
+
+  function finishStaffCheck(_matchedBy: "face", hasSessionConflict = false) {
+    setStep2(null);
+    finishSignIn("/dashboard", hasSessionConflict);
   }
 
   async function submit(e?: React.FormEvent) {
     e?.preventDefault();
-    if (busy) return;
+    if (busy || recoveryRequestBusy) return;
     setError(null);
+    setRecoveryMessage(null);
     setDeactivated(null);
     setBusy(true);
 
@@ -126,146 +233,290 @@ export default function LoginPage() {
         body: JSON.stringify({ username, password }),
       });
 
-      const data = await res.json();
+      const data = await readLoginResponse(res);
 
       if (!res.ok) {
+        if (mode === "admin") {
+          if (res.status === 401) {
+            const serverAttempts = Number(data.failed_attempts);
+            setAdminFailedAttempts((attempts) =>
+              Math.max(
+                attempts + 1,
+                Number.isSafeInteger(serverAttempts) ? serverAttempts : 0
+              )
+            );
+          } else if (res.status === 429) {
+            setAdminFailedAttempts((attempts) => Math.max(attempts, 3));
+          }
+        }
         if (data.deactivated) {
           setDeactivated({
-            reason: data.deactivation_reason ?? null,
-            when: data.deactivated_at ?? null,
+            reason:
+              typeof data.deactivation_reason === "string"
+                ? data.deactivation_reason
+                : null,
+            when:
+              typeof data.deactivated_at === "string"
+                ? data.deactivated_at
+                : null,
           });
         }
-        throw new Error(data.error || "Sign in failed");
+        throw new Error(
+          typeof data.error === "string" ? data.error : "Sign in failed"
+        );
       }
 
-      /*
-       * Staff: the password is half a login. The route hands back a ticket
-       * instead of a session, and the app is unreachable until that ticket is
-       * exchanged for one by a match with the enrolled face.
-       *
-       * Checked before anything else because it changes what happens next
-       * entirely — there is no session to be in conflict about yet, and the
-       * duty check below would answer 401 against a session that does not exist.
-       */
-      if (mode === "staff" && data.step2_required && data.ticket) {
-        setStep2({ ticket: data.ticket, fullName: data.full_name });
+      if (mode === "admin") setAdminFailedAttempts(0);
+      if (mode === "staff" && data.step2_required && typeof data.ticket === "string") {
+        setStep2({
+          ticket: data.ticket,
+          fullName: typeof data.full_name === "string" ? data.full_name : undefined,
+        });
         setBusy(false);
         return;
       }
 
-      // Session conflict: the same account is already logged in elsewhere.
-      // The new login has already overwritten the old session token server-side,
-      // so the old tab will be logged out on its next request. Show a popup
-      // so the user knows their account was open on another device.
-      if (data.session_conflict) {
-        setSessionConflict(true);
-      }
-
-      /*
-       * Send a staff member who still owes a duty check to the verify screen
-       * rather than into the app.
-       *
-       * The status is re-read from the database here rather than taken from the
-       * sign-in response, for the same reason lib/face-gate re-reads it instead
-       * of trusting the session token: a token minted a moment ago cannot know
-       * whether the feature is switched on, whether this account has a photo, or
-       * whether they are already inside their window.
-       *
-       * Only for staff. An admin is never gated, and sending one here would put
-       * an account they manage behind the screen that manages accounts.
-       */
-      if (mode === "staff") {
-        try {
-          const me = await fetch("/api/auth/me", { cache: "no-store" });
-          if (me.ok) {
-            const who = await me.json();
-            if (who?.face?.required) {
-              router.replace("/verify");
-              return;
-            }
-          }
-        } catch {
-          // If the status cannot be read, let them in rather than stranding them
-          // on a screen that will not load. The routes that move stock re-check
-          // the duty window themselves.
-        }
-      }
-
-      router.replace("/dashboard");
+      finishSignIn("/dashboard", Boolean(data.session_conflict));
     } catch (error) {
       setError(getErrorMessage(error));
       setBusy(false);
     }
   }
 
+  async function requestRecoveryCode() {
+    if (!username.trim() || busy || recoveryRequestBusy) return;
+    setRecoveryRequestBusy(true);
+    setError(null);
+    setRecoveryMessage(null);
+
+    try {
+      const res = await fetch("/api/auth/password-recovery", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "request", username }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not request a recovery code");
+      const challengeId =
+        typeof data.challenge_id === "string" ? data.challenge_id : "";
+      const isSameChallenge = challengeId !== "" && challengeId === recoveryChallengeId;
+      setRecoveryChallengeId(challengeId);
+      setRecoveryCode("");
+      setRecoveryStage("code");
+      setRecoveryMessage(
+        data.message ||
+          "If this admin account is eligible and has a recovery email configured, a code will be sent to that inbox."
+      );
+      const resendAvailableAt = Date.parse(data.resend_available_at);
+      if (Number.isFinite(resendAvailableAt)) {
+        setResendSeconds(Math.max(0, Math.ceil((resendAvailableAt - Date.now()) / 1000)));
+      } else if (
+        typeof data.resend_after_seconds === "number" &&
+        Number.isSafeInteger(data.resend_after_seconds) &&
+        data.resend_after_seconds >= 0
+      ) {
+        setResendSeconds(data.resend_after_seconds);
+      } else if (!isSameChallenge && !recoveryChallengeId) {
+        setResendSeconds(60);
+      }
+    } catch (requestError) {
+      setError(getErrorMessage(requestError));
+    } finally {
+      setRecoveryRequestBusy(false);
+    }
+  }
+
+  async function verifyRecoveryCode(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (busy || recoveryRequestBusy) return;
+    setBusy(true);
+    setError(null);
+
+    try {
+      const res = await fetch("/api/auth/password-recovery", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "verify",
+          challenge_id: recoveryChallengeId,
+          code: recoveryCode,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "That code is incorrect or expired");
+      setRecoveryResetToken(data.reset_token);
+      setRecoveryPassword("");
+      setRecoveryConfirmPassword("");
+      setRecoveryStage("password");
+      setRecoveryMessage(null);
+    } catch (verificationError) {
+      setError(getErrorMessage(verificationError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resetAdminPassword(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (busy || recoveryRequestBusy) return;
+    if (recoveryPassword !== recoveryConfirmPassword) {
+      setError("Passwords do not match");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+
+    try {
+      const res = await fetch("/api/auth/password-recovery", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "reset",
+          challenge_id: recoveryChallengeId,
+          reset_token: recoveryResetToken,
+          password: recoveryPassword,
+          confirm_password: recoveryConfirmPassword,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not reset the password");
+      clearRecovery();
+      setPassword("");
+      setAdminFailedAttempts(0);
+      setRecoveryMessage(data.message || "Password updated. Sign in with your new password.");
+    } catch (resetError) {
+      setError(getErrorMessage(resetError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (checkingSession) {
+    return (
+      <main className="grid min-h-dvh place-items-center bg-[#f6f1e8]">
+        <p role="status" className="flex items-center gap-3 text-sm font-medium text-cocoa-700">
+          <span
+            aria-hidden="true"
+            className="h-4 w-4 animate-spin rounded-full border-2 border-cocoa-300 border-t-cocoa-800"
+          />
+          Checking your session…
+        </p>
+      </main>
+    );
+  }
+
   return (
-    <div className="flex min-h-screen bg-white">
-      {/* ============ LEFT — peach panel ============ */}
-      <div className="relative hidden w-[52%] shrink-0 overflow-hidden bg-cream-300 lg:block">
-        <div className="relative z-10 flex h-full flex-col px-12 py-10">
-          <h1 className="script-logo text-4xl">CafeTrack</h1>
-
-          <div className="flex flex-1 items-center justify-center">
-            {/* The illustration is a JPEG with an opaque white background, so it
-                gets its own white panel instead of sitting straight on the
-                peach. See the note at the top of @/components/BrandArt. */}
-            <div className="w-full max-w-[380px] rounded-[28px] bg-white p-6 shadow-warm-lg">
-              {/* Preloaded: this is the desktop LCP element. It costs a phone
-                  one small fetch for a panel it never shows, which is the
-                  cheaper mistake than a late-loading hero. The panel is 380px
-                  and p-6 leaves the image 332px, so 380px is the honest
-                  `sizes`; the next candidate down, 256px, would be too small. */}
-              <StorefrontArt preload sizes="380px" />
-            </div>
-          </div>
-
-          <p className="text-xs font-medium text-cocoa-600/70">
-            Merrylane Cafe Foodhub · Lipa City
-          </p>
+    <main className="min-h-dvh bg-[#f6f1e8] lg:grid lg:h-dvh lg:grid-cols-2 lg:overflow-hidden">
+      <section className="relative z-0 hidden min-h-0 flex-col overflow-hidden bg-[#241811] px-9 py-8 text-cream-50 [@media(max-height:700px)]:py-4 lg:flex xl:px-14 xl:py-10 2xl:px-20">
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute -right-36 -top-40 h-[28rem] w-[28rem] rounded-full border border-cream-200/10"
+        />
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute -bottom-48 -left-36 h-[34rem] w-[34rem] rounded-full border border-cream-200/10"
+        />
+        <svg
+          aria-hidden="true"
+          viewBox="0 0 160 150"
+          fill="none"
+          className="pointer-events-none absolute right-8 top-3 z-0 hidden h-32 w-36 text-cream-300/40 xl:block"
+        >
+          <g stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M8 140C62 111 107 70 151 12" strokeWidth="1.5" />
+            <path d="M41 122C23 123 12 114 9 98c18-1 31 7 35 22Zm3-3c14-12 17-26 8-41-15 10-19 24-10 41Zm33-21C60 99 48 92 43 76c18-3 31 3 37 20Zm2-3c16-9 22-22 16-38C79 65 75 78 79 95Zm32-29C94 69 81 63 74 48c17-5 31 0 40 16Zm2-3c16-7 24-19 20-36-17 6-25 18-21 35Z" strokeWidth="1.4" />
+            <path d="M10 98c12 11 22 18 34 21M52 78c10 6 18 12 25 20m-2-50c11 6 21 12 34 18m2-18c9 2 17 4 25 5" strokeWidth="1" opacity=".8" />
+          </g>
+        </svg>
+        <div className="relative z-10">
+          <CafeTrackBrand onDark large />
         </div>
 
-        {/* wavy right edge */}
-        <svg
-          className="absolute right-0 top-0 h-full w-16 text-white lg:w-24"
-          viewBox="0 0 80 800"
-          preserveAspectRatio="none"
-          aria-hidden="true"
-        >
-          <path
-            d="M0 0 C 58 110, 4 210, 44 330 C 76 430, 0 550, 40 670 C 58 730, 18 775, 0 800 L 0 0 Z"
-            fill="currentColor"
-          />
-        </svg>
-      </div>
+        <div className="relative z-10 flex min-h-0 flex-1 flex-col py-4 [@media(max-height:700px)]:py-2">
+          <FeatureCarousel />
+          <div className="relative z-10 flex min-h-0 flex-1 items-start justify-center pt-2">
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-x-8 bottom-8 h-3/4 rounded-full bg-[#c89554]/10 blur-3xl"
+            />
+            <Image
+              src="/brand/merrylane-cafe-login.png"
+              alt="Illustration of the Merrylane Cafe dining room"
+              width={874}
+              height={597}
+              priority
+              sizes="(min-width: 1280px) 48vw, (min-width: 1024px) 46vw, 0px"
+              className="h-auto max-h-[410px] w-full object-contain object-center drop-shadow-[0_14px_18px_rgba(0,0,0,0.2)] [@media(min-height:850px)]:max-h-[460px] [@media(max-height:700px)]:max-h-[320px]"
+            />
+          </div>
+        </div>
 
-      {/* ============ RIGHT — form ============ */}
-      <div className="flex flex-1 items-center justify-center bg-white px-6 py-12">
-        <div className="w-full max-w-[400px]">
-          {/* mobile-only brand */}
-          <div className="mb-6 text-center lg:hidden">
-            <div className="script-logo-dark text-3xl">CafeTrack</div>
+      </section>
+
+      <section className="relative z-10 flex min-h-dvh items-start justify-center overflow-hidden bg-[#f8f2e8] px-5 py-6 sm:px-8 sm:py-8 lg:min-h-0 lg:items-center lg:overflow-visible lg:px-10 lg:py-10 before:pointer-events-none before:absolute before:-left-[72px] before:top-[-10%] before:hidden before:h-[120%] before:w-36 before:rounded-[50%] before:bg-[#f8f2e8] before:content-[''] lg:before:block">
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute -right-28 -top-32 hidden h-80 w-80 rounded-full border border-[#d9b98b]/35 lg:block"
+        />
+        <svg
+          aria-hidden="true"
+          viewBox="0 0 160 190"
+          fill="none"
+          className="pointer-events-none absolute bottom-4 right-5 hidden h-40 w-36 text-[#b58d57]/45 lg:block"
+        >
+          <g stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M150 184C102 137 65 78 15 8" strokeWidth="1.6" />
+            <path d="M117 147c16 2 29-6 34-22-17-2-29 5-33 20Zm-2-2c-16 2-27-6-31-21 16-2 28 5 32 19Zm-29-35c16 0 27-9 29-25-17 1-28 9-31 24Zm-2-2c-16-2-25-12-25-28 17 3 26 12 27 27Zm-27-35c16-3 24-14 22-30-16 5-24 15-22 30Zm-2-2c-16 0-25-9-27-25 16 1 26 9 28 24ZM25 29c15-5 21-16 16-31-15 6-22 17-17 31Zm-2-1C8 24 2 13 4-2c15 7 21 17 18 30Z" strokeWidth="1.4" />
+            <path d="M118 145c10-8 21-15 33-20m-64-17c10 1 20 2 31 3m-58-32c10-1 19-2 29-4m-52-43c7 5 14 11 21 17" strokeWidth="1" opacity=".8" />
+          </g>
+        </svg>
+        <div className="relative z-10 my-auto w-full max-w-[440px]">
+          <div className="mb-7 lg:hidden">
+            <CafeTrackBrand />
           </div>
 
-          {/* double-framed card */}
-          <div className="rounded-[32px] border border-cream-200 p-2">
-            <div className="rounded-[24px] border border-cream-200 px-8 py-9">
-              <div className="text-center">
-                <div className="script-logo-dark text-2xl">CafeTrack</div>
-                <h2 className="deco-title mt-0.5 text-5xl">Login</h2>
-              </div>
+          <div
+            aria-busy={recoveryRequestBusy}
+            className="rounded-[26px] border border-[#e7ddcf] bg-[#fffcf7] p-6 shadow-[0_24px_70px_rgba(47,32,22,0.12)] sm:p-9"
+          >
+            <div className="mb-6">
+              <p className="mb-2 text-[10px] font-extrabold uppercase tracking-[0.18em] text-cocoa-500">
+                {recoveryStage === "code"
+                  ? "Account recovery"
+                  : recoveryStage === "password"
+                    ? "Account recovery"
+                    : "Welcome back"}
+              </p>
+              <h2 className="font-serif text-4xl font-medium leading-none tracking-tight text-cocoa-900 sm:text-[2.65rem]">
+                {recoveryStage === "code"
+                  ? "Confirm your account."
+                  : recoveryStage === "password"
+                    ? "Set a new password."
+                    : "Sign in."}
+              </h2>
+            </div>
 
-              {/* mode switch */}
-              <div className="mt-6 mb-5 grid grid-cols-2 gap-1 rounded-full bg-cream-100 p-1">
+            {recoveryMessage && (
+              <p role="status" className="mb-4 rounded-xl bg-sage-50 px-3.5 py-3 text-sm text-sage-700">
+                {recoveryMessage}
+              </p>
+            )}
+
+            {recoveryStage === "login" && !(mode === "staff" && step2) && (
+              <div className="mb-5 grid grid-cols-2 gap-1 rounded-xl bg-cream-100 p-1">
                 {(["staff", "admin"] as Mode[]).map((m) => (
                   <button
                     key={m}
                     type="button"
+                    aria-pressed={mode === m}
+                    disabled={busy || recoveryRequestBusy}
                     onClick={() => {
                       setMode(m);
                       setError(null);
                       setDeactivated(null);
+                      clearRecovery();
                     }}
-                    className={`rounded-full px-3 py-1.5 text-xs font-bold uppercase tracking-wide transition-colors ${
+                    className={`rounded-lg px-3 py-2.5 text-xs font-bold uppercase tracking-[0.12em] transition-colors ${
                       mode === m
                         ? "bg-cream-400 text-cocoa-900 shadow-sm"
                         : "text-cocoa-400 hover:text-cocoa-600"
@@ -275,53 +526,147 @@ export default function LoginPage() {
                   </button>
                 ))}
               </div>
+            )}
 
-              {/*
-                Step two takes over the whole panel once the password is right.
-
-                It is a replacement rather than an addition, and it is not
-                dismissible: the panel below this one is the ordinary password
-                form, and letting both be visible at once would invite a person to
-                type a password while a camera is already running.
-              */}
-              {mode === "staff" && step2 ? (
-                <StaffCheck
-                  ticket={step2.ticket}
-                  fullName={step2.fullName}
-                  onVerified={afterSignIn}
-                  onBack={() => {
-                    setStep2(null);
-                    setBusy(false);
-                  }}
+            {mode === "staff" && step2 ? (
+              <StaffCheck
+                ticket={step2.ticket}
+                fullName={step2.fullName}
+                onVerified={finishStaffCheck}
+                onBack={() => {
+                  setStep2(null);
+                  setBusy(false);
+                }}
+              />
+            ) : recoveryStage === "code" ? (
+              <form onSubmit={verifyRecoveryCode} className="space-y-4">
+                <p className="text-sm leading-6 text-cocoa-600">
+                  Enter the code sent to this admin account&apos;s recovery inbox. If it has not arrived,
+                  check spam or ask an administrator to verify the recovery email and sending account.
+                </p>
+                <input
+                  aria-label="Recovery code"
+                  className="input !min-h-12 !rounded-xl !border-cream-300 !bg-white !px-4 text-center text-lg tracking-[0.3em]"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={6}
+                  pattern="[0-9]{6}"
+                  placeholder="Enter code"
+                  required
+                  value={recoveryCode}
+                  disabled={busy}
+                  onChange={(event) => setRecoveryCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
                 />
-              ) : (
+                {error && (
+                  <div role="alert" className="rounded-xl bg-terracotta-50 px-3.5 py-3 text-sm text-terracotta-700">
+                    {error}
+                  </div>
+                )}
+                <button type="submit" className="btn-primary w-full !min-h-12 !rounded-full" disabled={busy || recoveryRequestBusy}>
+                  {busy ? "Checking..." : "Continue"}
+                </button>
+                <button
+                  type="button"
+                  className="w-full rounded-full bg-cream-100 px-4 py-3 text-sm font-semibold text-cocoa-700 transition hover:bg-cream-200 disabled:opacity-50"
+                  disabled={busy || recoveryRequestBusy || resendSeconds > 0}
+                  onClick={requestRecoveryCode}
+                >
+                  {recoveryRequestBusy
+                    ? "Sending code..."
+                    : resendSeconds > 0
+                    ? `Didn't get a code? Resend in ${resendSeconds}s`
+                    : "Didn't get a code? Send again"}
+                </button>
+                <button type="button" className="w-full py-2 text-sm text-cocoa-500 underline" onClick={returnToSignIn}>
+                  Back to sign in
+                </button>
+              </form>
+            ) : recoveryStage === "password" ? (
+              <form onSubmit={resetAdminPassword} className="space-y-3.5">
+                <p className="text-sm leading-6 text-cocoa-600">
+                  Your email is confirmed. Choose a new password to continue to the admin account.
+                </p>
+                <div className="relative">
+                  <input
+                    aria-label="New password"
+                    className="input !min-h-12 !rounded-xl pr-12"
+                    type={showRecoveryPasswords ? "text" : "password"}
+                    autoComplete="new-password"
+                    minLength={8}
+                    placeholder="New password"
+                    required
+                    value={recoveryPassword}
+                    disabled={busy}
+                    onChange={(event) => setRecoveryPassword(event.target.value)}
+                  />
+                </div>
+                <div className="relative">
+                  <input
+                    aria-label="Confirm new password"
+                    className="input !min-h-12 !rounded-xl pr-12"
+                    type={showRecoveryPasswords ? "text" : "password"}
+                    autoComplete="new-password"
+                    minLength={8}
+                    placeholder="Confirm new password"
+                    required
+                    value={recoveryConfirmPassword}
+                    disabled={busy}
+                    onChange={(event) => setRecoveryConfirmPassword(event.target.value)}
+                  />
+                  <button
+                    type="button"
+                    aria-label={showRecoveryPasswords ? "Hide passwords" : "Show passwords"}
+                    aria-pressed={showRecoveryPasswords}
+                    title={showRecoveryPasswords ? "Hide passwords" : "Show passwords"}
+                    className="password-visibility-toggle absolute right-0 top-1/2 size-11 -translate-y-1/2 rounded-lg text-cocoa-400 transition hover:bg-transparent hover:text-cocoa-700"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => setShowRecoveryPasswords((visible) => !visible)}
+                  >
+                    <PasswordVisibilityIcon visible={showRecoveryPasswords} />
+                  </button>
+                </div>
+                {error && (
+                  <div role="alert" className="rounded-xl bg-terracotta-50 px-3.5 py-3 text-sm text-terracotta-700">
+                    {error}
+                  </div>
+                )}
+                <button type="submit" className="btn-primary w-full !min-h-12 !rounded-xl" disabled={busy || recoveryRequestBusy}>
+                  {busy ? "Saving..." : "Save new password"}
+                </button>
+              </form>
+            ) : (
               <form onSubmit={submit} className="space-y-3.5">
                 {mode === "admin" ? (
                   <input
                     aria-label="Username"
-                    className="input"
+                    ref={usernameInputRef}
+                    className="input !min-h-12 !rounded-xl !border-cream-600 !bg-[#fffcf7] !px-4 !ring-2 !ring-cream-500"
                     placeholder="Username"
                     value={username}
-                    onChange={(e) => setUsername(e.target.value)}
+                    disabled={busy || recoveryRequestBusy}
+                    onChange={(e) => {
+                      setUsername(e.target.value);
+                      setRecoveryMessage(null);
+                    }}
                     autoComplete="username"
                     required
                   />
                 ) : (
-                  <div>
-                    <label className="label" htmlFor="staff-username">
-                      Username
-                    </label>
-                    <input
-                      id="staff-username"
-                      className="input"
-                      placeholder="Username"
-                      value={username}
-                      onChange={(e) => setUsername(e.target.value)}
-                      autoComplete="username"
-                      autoFocus={true}
-                      required
-                    />
-                  </div>
+                  <input
+                    id="staff-username"
+                    aria-label="Username"
+                    ref={usernameInputRef}
+                    className="input !min-h-12 !rounded-xl !border-cream-600 !bg-[#fffcf7] !px-4 !ring-2 !ring-cream-500"
+                    placeholder="Username"
+                    value={username}
+                    disabled={busy || recoveryRequestBusy}
+                    onChange={(e) => {
+                      setUsername(e.target.value);
+                      setRecoveryMessage(null);
+                    }}
+                    autoComplete="username"
+                    required
+                  />
                 )}
 
                 {/*
@@ -340,21 +685,22 @@ export default function LoginPage() {
                 <div className="relative">
                   <input
                     aria-label="Password"
-                    className="input pr-11"
+                    className="input !min-h-12 !rounded-xl !border-cream-200 !bg-[#fffcf7] !px-4 pr-12"
                     type={showPassword ? "text" : "password"}
                     placeholder="Password"
                     value={password}
+                    disabled={busy || recoveryRequestBusy}
                     onChange={(e) => setPassword(e.target.value)}
                     autoComplete="current-password"
                     required
                   />
                   <button
                     type="button"
-                    tabIndex={-1}
                     aria-label={showPassword ? "Hide password" : "Show password"}
                     aria-pressed={showPassword}
                     title={showPassword ? "Hide password" : "Show password"}
-                    className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-lg p-2 text-cocoa-400 transition hover:bg-cream-200 hover:text-cocoa-700"
+                    className="password-visibility-toggle absolute right-0 top-1/2 size-11 -translate-y-1/2 rounded-lg text-cocoa-400 transition hover:bg-transparent hover:text-cocoa-700"
+                    onMouseDown={(event) => event.preventDefault()}
                     onClick={() => setShowPassword((v) => !v)}
                   >
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -380,6 +726,16 @@ export default function LoginPage() {
                   </button>
                 </div>
 
+                {faceCheckResetNotice && (
+                  <div
+                    role="status"
+                    className="rounded-xl border border-ochre-200 bg-ochre-50 px-3.5 py-3 text-center text-sm leading-5 text-ochre-800"
+                  >
+                    An administrator reset your face check. Sign in with your password to scan
+                    your face again.
+                  </div>
+                )}
+
                 {deactivated ? (
                   <div className="rounded-xl bg-ochre-50 px-3.5 py-3 text-center text-sm text-ochre-700">
                     <div className="font-bold">This account is deactivated</div>
@@ -399,7 +755,10 @@ export default function LoginPage() {
                   </div>
                 ) : (
                   error && (
-                    <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-center text-sm text-terracotta-700">
+                    <div
+                      role="alert"
+                      className="rounded-xl border border-terracotta-100 bg-terracotta-50 px-3.5 py-3 text-sm leading-5 text-terracotta-700"
+                    >
                       {error}
                     </div>
                   )
@@ -407,59 +766,110 @@ export default function LoginPage() {
 
                 <button
                   type="submit"
-                  className="btn-primary w-full !py-2.5"
-                  disabled={busy}
+                  className="btn-primary w-full !min-h-12 !rounded-xl !bg-cocoa-700 !py-3 !text-cream-50 hover:!bg-cocoa-800"
+                  disabled={busy || recoveryRequestBusy}
                 >
                   {busy ? "Signing in..." : "Login"}
                 </button>
 
-                {/*
-                  Neither alternative is here any more.
+                {mode === "admin" && adminFailedAttempts >= 3 && (
+                  recoveryRequestBusy ? (
+                    <div
+                      role="status"
+                      aria-live="polite"
+                      className="flex min-h-12 items-center justify-center gap-2 rounded-xl bg-cream-100 px-4 py-2 text-sm text-cocoa-600"
+                    >
+                      <svg
+                        aria-hidden="true"
+                        className="h-4 w-4 animate-spin text-ochre-700"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                      >
+                        <circle
+                          className="opacity-25"
+                          cx="12"
+                          cy="12"
+                          r="10"
+                          stroke="currentColor"
+                          strokeWidth="4"
+                        />
+                        <path
+                          className="opacity-75"
+                          fill="currentColor"
+                          d="M4 12a8 8 0 0 1 8-8V0C5.373 0 0 5.373 0 12h4z"
+                        />
+                      </svg>
+                      Sending recovery code...
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      className="min-h-12 w-full py-2 text-sm font-semibold text-ochre-800 underline underline-offset-2"
+                      disabled={busy || !username.trim()}
+                      onClick={requestRecoveryCode}
+                    >
+                      Forgot password?
+                    </button>
+                  )
+                )}
 
-                  Both used to be links under this button - "use my face instead
-                  of my password" and "sign in with my ID card and my face" - and
-                  both were ways into the app *without* a password. With the
-                  password now a mandatory first step they are unreachable states:
-                  their routes answer with a session, and there is no longer a
-                  point in the flow where a session can be issued before step two
-                  has run.
-
-                  So the links are gone rather than moved. Keeping them visible
-                  would be a promise the code cannot keep, and the replacement is
-                  in StaffCheck: one camera and one button, and the face has to
-                  match the one enrolled on the account.
-
-                  The routes themselves are untouched and still work, which is
-                  what lets this land without dismantling the badge flow.
-                */}
               </form>
+            )}
+          </div>
+        </div>
+
+      {/* Session conflict popup */}
+      {sessionConflict && createPortal(
+        <div className="fixed inset-0 z-[100] grid place-items-center bg-cocoa-900/70 p-4">
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="session-conflict-title"
+            className="relative w-full max-w-md overflow-hidden rounded-[24px] border border-cream-200 bg-white p-7 text-center shadow-[0_24px_70px_rgba(61,43,31,0.24)]"
+          >
+            <div className="absolute inset-x-0 top-0 h-1 bg-ochre-500" />
+            <span
+              aria-hidden="true"
+              className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-ochre-50 text-xl font-bold text-ochre-700"
+            >
+              !
+            </span>
+            <h3 id="session-conflict-title" className="text-xl font-bold text-cocoa-800">
+              Session conflict
+            </h3>
+            <p className="mt-3 text-sm leading-6 text-cocoa-600">
+              Your account was signed in on another browser or site. That session
+              has been signed out, and you are now signed in here.
+            </p>
+            <div className="mt-6 flex justify-center">
+              {conflictRedirecting ? (
+                <p role="status" className="flex items-center gap-2 text-sm font-semibold text-cocoa-600">
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-cream-300 border-t-cocoa-700" />
+                  Opening your account…
+                </p>
+              ) : (
+                <button
+                  type="button"
+                  className="btn-primary min-w-32"
+                  onClick={() => {
+                    setConflictRedirecting(true);
+                    if (pendingRedirect) {
+                      router.replace(pendingRedirect);
+                      setPendingRedirect(null);
+                    } else {
+                      setSessionConflict(false);
+                    }
+                  }}
+                >
+                  Got it
+                </button>
               )}
             </div>
           </div>
-        </div>
-      </div>
-
-      {/* Session conflict popup */}
-      {sessionConflict && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-cocoa-900/40 p-4">
-          <div className="w-full max-w-md rounded-2xl border border-cream-200 bg-white p-6 shadow-warm-lg">
-            <h3 className="text-lg font-bold text-cocoa-800">Session Conflict</h3>
-            <p className="mt-3 text-sm text-cocoa-600">
-              Your account was already logged in on another device or browser.
-              That session has been logged out. You are now signed in here.
-            </p>
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                type="button"
-                className="btn-ghost"
-                onClick={() => setSessionConflict(false)}
-              >
-                Got it
-              </button>
-            </div>
-          </div>
-        </div>
+        </div>,
+        document.body
       )}
-    </div>
+      </section>
+    </main>
   );
 }

@@ -226,7 +226,26 @@ function nowStamp(): string {
  * it cannot see is scoped. The paths that *are* statically analysable (the
  * stamp file, the per-backup dest) are left alone.
  */
+/*
+ * A root that is a filesystem or drive root — "C:\" or "/" — would make the
+ * cafetrack-auto-* match run outside anything CafeTrack set up, and the delete
+ * below is `force: true`. A dedicated backup folder (including an external
+ * drive, which is a sane place to keep backups) is fine; a mount root is not.
+ */
+function backupRootUnsafe(): boolean {
+  const trimmed = BACKUP_ROOT.replace(/[\\/]+$/, "");
+  return /^[A-Za-z]:$/.test(trimmed) || trimmed === "/" || trimmed === "";
+}
+
 function pruneAuto(): void {
+  if (backupRootUnsafe()) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `CafeTrack: auto-backup dir "${BACKUP_ROOT}" looks like a filesystem root — ` +
+        "pruning skipped. Point CAFETRACK_BACKUP_DIR at a dedicated folder."
+    );
+    return;
+  }
   if (!existsSync(/* turbopackIgnore: true */ BACKUP_ROOT)) return;
 
   const stale = readdirSync(/* turbopackIgnore: true */ BACKUP_ROOT, {

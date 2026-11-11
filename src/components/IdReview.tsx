@@ -1,33 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Badge, DataField, Spinner } from "@/components/ui";
+import { Badge, Spinner } from "@/components/ui";
+import { isIdDocType } from "@/lib/id-verification/types";
+import { idTypeHasExpiry } from "@/lib/id-verification/specification";
+import { formatIdNameForDisplay } from "@/lib/id-verification/name-signal";
 
-/**
- * The review screen: the two images side by side, what the checks said, and the
- * approve/reject decision.
- *
- * ## The layout is the point
- *
- * The images sit next to each other at the same size, because the decision being
- * made is "are these the same person" and that question is answered by looking,
- * not by reading. Everything the checks found sits below them as evidence, not
- * above them — an admin who reads a verdict before seeing the card has already
- * decided.
- *
- * ## Signals show their reasoning
- *
- * Each one is a sentence with the numbers in it, not a status word. That is a
- * deliberate contract with whoever wrote the checks: a bare "FAILED" would tell
- * an admin nothing they can act on, and would be indistinguishable from a model
- * being wrong. "Distance 0.61, threshold 0.55" can be argued with.
- *
- * ## Nothing decides itself
- *
- * There is no auto-approve, however clean the signals are, and there is no
- * auto-reject however bad they are. The buttons are always both present and
- * always the admin's to press.
- */
+/** Review the ID images and read details, then let an admin make the decision. */
 
 export type ReviewSignal = {
   id: string;
@@ -43,26 +22,166 @@ export type ReviewUser = {
   verification_status: string;
   id_doc_type: string | null;
   id_doc_number: string | null;
+  id_doc_expiry: string | null;
   verification_notes: string | null;
   verified_at: string | null;
   has_front: boolean;
   has_back: boolean;
-  has_photo: boolean;
 };
 
 type Props = {
   userId: string;
   /** Called after a decision lands, so the roster can refresh. */
-  onDone: (message: string) => void;
+  onDone: (message: string, documentsRemoved?: boolean) => void;
   onClose: () => void;
 };
 
+type EditableIdFields = {
+  full_name: string;
+  id_number: string;
+  date_of_birth: string;
+  date_of_expiry: string;
+};
+
+const EMPTY_FIELDS: EditableIdFields = {
+  full_name: "",
+  id_number: "",
+  date_of_birth: "",
+  date_of_expiry: "",
+};
+
 const TONE: Record<ReviewSignal["tone"], { badge: "green" | "amber" | "red" | "slate"; label: string }> = {
-  pass: { badge: "green", label: "Passed" },
-  warn: { badge: "amber", label: "Check this" },
+  pass: { badge: "green", label: "Pass" },
+  warn: { badge: "amber", label: "Check" },
   fail: { badge: "red", label: "Problem" },
   unknown: { badge: "slate", label: "Not checked" },
 };
+
+function signalCopy(
+  signal: ReviewSignal,
+  fieldsReviewed: boolean,
+  availableFieldCount: number,
+  totalFieldCount: number
+): Pick<ReviewSignal, "label" | "detail"> {
+  switch (signal.id) {
+    case "face_match":
+      return {
+        label: "Face match",
+        detail:
+          signal.tone === "pass"
+            ? "The ID photo matches the staff photo."
+            : signal.tone === "fail"
+              ? "The ID photo does not match the staff photo."
+              : "The photos could not be compared. Check them manually.",
+      };
+    case "name_match":
+      return {
+        label: "Name",
+        detail:
+          signal.tone === "pass"
+            ? "The name matches the staff account."
+            : signal.tone === "fail"
+              ? "The name does not match the staff account."
+              : "The name could not be checked. Compare it with the account.",
+      };
+    case "hv_ocr":
+      return {
+        label: "Text on ID",
+        detail:
+          signal.tone === "pass"
+            ? "Text was read from the card. Check it against the details below."
+            : "Text could not be read. Check the image and enter the details manually.",
+      };
+    case "hv_forgery":
+      return {
+        label: "Image check",
+        detail:
+          signal.tone === "pass"
+            ? "No image tampering was detected."
+            : signal.tone === "fail"
+              ? "Possible image tampering detected. Check the card closely."
+              : "Image tampering could not be checked.",
+      };
+    case "ocr_summary":
+      return {
+        label: fieldsReviewed ? "Details reviewed" : "Text on ID",
+        detail: fieldsReviewed
+          ? "Checked and saved by an admin."
+          : availableFieldCount > 0
+            ? `${availableFieldCount} of ${totalFieldCount} details found. Check them against the card.`
+            : "No text could be read. Check the card and enter the details manually.",
+      };
+    case "ocr_space_summary":
+      return {
+        label: fieldsReviewed ? "Details reviewed" : "Text on ID",
+        detail: fieldsReviewed
+          ? "Checked and saved by an admin."
+          : signal.tone === "pass"
+            ? "Text was read from the ID."
+            : "Text could not be read. Check the image and enter the details manually.",
+      };
+    case "id_fields_reviewed":
+      return {
+        label: "Details reviewed",
+        detail: "Checked and saved by an admin.",
+      };
+    case "ocr_space_doc_type":
+      return {
+        label: "ID type",
+        detail:
+          signal.tone === "pass"
+            ? "The ID type matches your selection."
+            : "The ID type could not be confirmed. Check the card.",
+      };
+    case "id_number_shape":
+      return {
+        label: "ID number",
+        detail:
+          signal.tone === "pass"
+            ? "The number format looks correct."
+            : "The number format looks wrong. Check it against the card.",
+      };
+    case "card_duplicate":
+      return {
+        label: "Duplicate ID",
+        detail:
+          signal.tone === "pass"
+            ? "No matching ID was found on another account."
+            : "A duplicate check could not be completed.",
+      };
+    case "front_shape":
+    case "back_shape":
+      return {
+        label: signal.id === "front_shape" ? "Front image" : "Back image",
+        detail:
+          signal.tone === "pass"
+            ? "The image shape looks consistent with an ID card."
+            : "The image shape may not match an ID card.",
+      };
+    default:
+      if (signal.id.startsWith("provider_")) {
+        return {
+          label: signal.id.includes("ocr") ? "Text scan" : "ID check",
+          detail: "This check could not be completed. Review the ID details manually.",
+        };
+      }
+
+      return {
+        label: signal.label
+          .replace(/OCR\.space/gi, "Text scan")
+          .replace(/Face\+\+/gi, "Face check")
+          .replace(/HyperVerge/gi, "ID check"),
+        detail: signal.detail
+          .replace(/OCR\.space/gi, "text scan")
+          .replace(/Face\+\+/gi, "face check")
+          .replace(/HyperVerge/gi, "ID check")
+          .replace(
+            /\s*This text read stayed on this machine\. Other configured checks may send images to their providers\./gi,
+            ""
+          ),
+      };
+  }
+}
 
 /** Maps the stored doc type onto the label shown. Mirrors ID_DOC_TYPE_LABELS. */
 const DOC_LABEL: Record<string, string> = {
@@ -85,8 +204,9 @@ const STATUS: Record<string, { tone: "green" | "amber" | "red"; label: string }>
 export default function IdReview({ userId, onDone, onClose }: Props) {
   const [user, setUser] = useState<ReviewUser | null>(null);
   const [signals, setSignals] = useState<ReviewSignal[]>([]);
-  const [fields, setFields] = useState<Record<string, string | null>>({});
-  const [providers, setProviders] = useState<{ id: string; label: string }[]>([]);
+  const [fields, setFields] = useState<EditableIdFields>(EMPTY_FIELDS);
+  const [savedFields, setSavedFields] = useState<EditableIdFields>(EMPTY_FIELDS);
+  const [fieldsReviewed, setFieldsReviewed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reason, setReason] = useState("");
@@ -101,8 +221,21 @@ export default function IdReview({ userId, onDone, onClose }: Props) {
 
       setUser(data.user);
       setSignals(data.signals ?? []);
-      setFields(data.fields ?? {});
-      setProviders(data.providers ?? []);
+      const source = data.fields ?? {};
+      const loadedFields: EditableIdFields = {
+        full_name: formatIdNameForDisplay(source.full_name),
+        id_number: String(source.id_number ?? data.user.id_doc_number ?? ""),
+        date_of_birth: String(source.date_of_birth ?? ""),
+        date_of_expiry:
+          isIdDocType(data.user.id_doc_type) && idTypeHasExpiry(data.user.id_doc_type)
+            ? String(source.date_of_expiry ?? data.user.id_doc_expiry ?? "").slice(0, 10)
+            : "",
+      };
+      setFields(loadedFields);
+      setSavedFields(loadedFields);
+      setFieldsReviewed(
+        (data.signals ?? []).some((signal: ReviewSignal) => signal.id === "id_fields_reviewed")
+      );
       setError(null);
     } catch (e: any) {
       setError(e.message);
@@ -139,6 +272,46 @@ export default function IdReview({ userId, onDone, onClose }: Props) {
     }
   }
 
+  const hasUnsavedFields = (Object.keys(EMPTY_FIELDS) as (keyof EditableIdFields)[]).some(
+    (key) => fields[key] !== savedFields[key]
+  );
+  const canDecide = fieldsReviewed && !hasUnsavedFields;
+
+  async function saveFields() {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/users/${userId}/id/status`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fields }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not save the ID details");
+
+      setUser(data.user);
+      setSignals(data.signals ?? []);
+      const source = data.fields ?? {};
+      const updatedFields: EditableIdFields = {
+        full_name: formatIdNameForDisplay(source.full_name),
+        id_number: String(source.id_number ?? data.user.id_doc_number ?? ""),
+        date_of_birth: String(source.date_of_birth ?? ""),
+        date_of_expiry:
+          isIdDocType(data.user.id_doc_type) && idTypeHasExpiry(data.user.id_doc_type)
+            ? String(source.date_of_expiry ?? data.user.id_doc_expiry ?? "").slice(0, 10)
+            : "",
+      };
+      setFields(updatedFields);
+      setSavedFields(updatedFields);
+      setFieldsReviewed(true);
+      setError(null);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Could not save the ID details");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function purge() {
     setBusy(true);
     setError(null);
@@ -147,8 +320,7 @@ export default function IdReview({ userId, onDone, onClose }: Props) {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not remove the documents");
 
-      await load();
-      onDone("ID documents removed");
+      onDone("ID documents removed", true);
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -170,7 +342,37 @@ export default function IdReview({ userId, onDone, onClose }: Props) {
   }
 
   const status = STATUS[user.verification_status] ?? STATUS.unverified;
-  const hasDocuments = user.has_front || user.has_back || user.has_photo;
+  const isApproved = user.verification_status === "verified";
+  const hasDocuments = user.has_front || user.has_back;
+  const expiryApplicable =
+    isIdDocType(user.id_doc_type) && idTypeHasExpiry(user.id_doc_type);
+  const nameMismatch = signals.some(
+    (signal) => signal.id === "name_match" && signal.tone === "fail"
+  );
+  const faceMismatch = signals.some(
+    (signal) => signal.id === "face_match" && signal.tone === "fail"
+  );
+  const numberFormatProblem = signals.some(
+    (signal) => signal.id === "id_number_shape" && signal.tone === "warn"
+  );
+  const hasLocalTextSummary = signals.some((signal) => signal.id === "ocr_summary");
+  const hasTextSummary = signals.some(
+    (signal) => signal.id === "ocr_summary" || signal.id === "ocr_space_summary"
+  );
+  const visibleSignals = signals.filter(
+    (signal) =>
+      signal.id !== "hv_face" &&
+      signal.id !== "photo_shape" &&
+      !(signal.id === "ocr_space_summary" && hasLocalTextSummary) &&
+      !(fieldsReviewed && hasTextSummary && signal.id === "id_fields_reviewed")
+  );
+  const totalFieldCount = expiryApplicable ? 4 : 3;
+  const availableFieldCount = [
+    savedFields.full_name,
+    savedFields.id_number,
+    savedFields.date_of_birth,
+    ...(expiryApplicable ? [savedFields.date_of_expiry] : []),
+  ].filter((value) => value.trim().length > 0).length;
 
   return (
     <div className="space-y-4">
@@ -198,7 +400,11 @@ export default function IdReview({ userId, onDone, onClose }: Props) {
       */}
       {hasDocuments ? (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <figure className="min-w-0 space-y-2 rounded-2xl border border-cream-200 bg-cream-50 p-3">
+          <figure
+            className={`min-w-0 space-y-2 rounded-2xl border border-cream-200 bg-cream-50 p-3 ${
+              user.has_back ? "" : "sm:col-span-2"
+            }`}
+          >
             <figcaption className="flex items-center justify-between gap-2 text-xs font-semibold text-cocoa-700">
               <span>Front of ID</span>
               <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-medium text-cocoa-400">
@@ -219,29 +425,8 @@ export default function IdReview({ userId, onDone, onClose }: Props) {
             </div>
           </figure>
 
-          <figure className="min-w-0 space-y-2 rounded-2xl border border-cream-200 bg-cream-50 p-3">
-            <figcaption className="flex items-center justify-between gap-2 text-xs font-semibold text-cocoa-700">
-              <span>Photo of person</span>
-              <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-medium text-cocoa-400">
-                Portrait
-              </span>
-            </figcaption>
-            <div className="flex aspect-[4/3] items-center justify-center overflow-hidden rounded-xl border border-cream-200 bg-white">
-              {user.has_photo ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={`/api/users/${user.id}/id?part=photo`}
-                  alt={`Photo of ${user.full_name}`}
-                  className="h-full w-full object-contain"
-                />
-              ) : (
-                <span className="text-xs text-cocoa-400">No photo</span>
-              )}
-            </div>
-          </figure>
-
           {user.has_back && (
-            <figure className="space-y-2 rounded-2xl border border-cream-200 bg-cream-50 p-3 sm:col-span-2">
+            <figure className="space-y-2 rounded-2xl border border-cream-200 bg-cream-50 p-3">
               <figcaption className="text-xs font-semibold text-cocoa-700">Back of ID</figcaption>
               <div className="flex aspect-[85.6/54] max-h-64 items-center justify-center overflow-hidden rounded-xl border border-cream-200 bg-white">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -256,57 +441,155 @@ export default function IdReview({ userId, onDone, onClose }: Props) {
         </div>
       ) : (
         <div className="rounded-xl bg-cream-50 px-3.5 py-3 text-xs text-cocoa-500">
-          Nothing attached yet. Use “Verify ID” on this account to upload the card and a photo of
-          the person.
+          No ID attached yet. Upload the front of the card to begin.
         </div>
       )}
 
-      {/* ---- what was read off the card ---- */}
-      {fields.full_name && (
-        <DataField label="Read from the card">
-          <span className="text-xs text-cocoa-700">
-            {fields.full_name}
-            {fields.id_number ? ` · ${fields.id_number}` : ""}
-            {fields.date_of_birth ? ` · born ${fields.date_of_birth}` : ""}
-          </span>
-        </DataField>
+      {/* ---- review and correct OCR suggestions ---- */}
+      {hasDocuments && (
+        <section className="space-y-3 rounded-2xl border border-cream-200 bg-cream-50 p-3.5">
+          <div>
+            <p className="text-sm font-semibold text-cocoa-800">
+              {isApproved ? "ID details" : "Review ID details"}
+            </p>
+            <p className="mt-1 text-[11px] leading-snug text-cocoa-500">
+              {isApproved
+                ? "This approved ID is view-only."
+                : "Check these details against the card, correct any mistakes, and save before making a decision."}
+            </p>
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3">
+            <div className="sm:col-span-2 md:col-span-3">
+              <label className="label" htmlFor="review-id-name">Name on ID</label>
+              <input
+                id="review-id-name"
+                className="input"
+                maxLength={160}
+                title={fields.full_name}
+                value={fields.full_name}
+                disabled={busy || isApproved}
+                onChange={(event) =>
+                  setFields((current) => ({ ...current, full_name: event.target.value }))
+                }
+              />
+            </div>
+            <div>
+              <label className="label" htmlFor="review-id-number">ID number</label>
+              <input
+                id="review-id-number"
+                className="input font-mono"
+                maxLength={80}
+                value={fields.id_number}
+                disabled={busy || isApproved}
+                onChange={(event) =>
+                  setFields((current) => ({ ...current, id_number: event.target.value }))
+                }
+              />
+            </div>
+            <div>
+              <label className="label" htmlFor="review-id-birth">Date of birth</label>
+              <input
+                id="review-id-birth"
+                className="input"
+                type="date"
+                value={fields.date_of_birth}
+                disabled={busy || isApproved}
+                onChange={(event) =>
+                  setFields((current) => ({ ...current, date_of_birth: event.target.value }))
+                }
+              />
+            </div>
+            {expiryApplicable && (
+              <div>
+                <label className="label" htmlFor="review-id-expiry">Date of expiry</label>
+                <input
+                  id="review-id-expiry"
+                  className="input"
+                  type="date"
+                  value={fields.date_of_expiry}
+                  disabled={busy || isApproved}
+                  onChange={(event) =>
+                    setFields((current) => ({ ...current, date_of_expiry: event.target.value }))
+                  }
+                />
+              </div>
+            )}
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-[11px] text-ochre-700">
+              {isApproved
+                ? "Approved ID details are shown read-only."
+                : hasUnsavedFields
+                  ? "Unsaved changes. Save before deciding."
+                  : fieldsReviewed
+                    ? nameMismatch
+                      ? "The ID name does not match the account. Approval is blocked."
+                      : faceMismatch
+                        ? "The ID face does not match the staff photo. Approval is blocked."
+                        : numberFormatProblem
+                          ? "The ID number format does not match this type. Correct or clear it before approval."
+                          : "Details saved. Compare them with the ID image before deciding."
+                    : "Check these details against the card and save your review before deciding."}
+            </p>
+            {!isApproved && (
+              <button
+                type="button"
+                className="btn-ghost text-xs"
+                onClick={() => void saveFields()}
+                disabled={busy || (!hasUnsavedFields && fieldsReviewed)}
+              >
+                {busy ? "Saving..." : "Save ID details"}
+              </button>
+            )}
+          </div>
+        </section>
       )}
 
       {/* ---- what the checks concluded ---- */}
-      {signals.length > 0 && (
+      {visibleSignals.length > 0 && (
         <div className="space-y-2">
           <div>
-            <p className="label !mb-0">Scan and verification checks</p>
+            <p className="label !mb-0">ID checks</p>
             <p className="mt-1 text-[11px] leading-snug text-cocoa-400">
-              These checks are decision aids, not proof that a document is genuine. Compare the
-              images and make the final decision yourself.
+              Use these as a guide; compare the card before deciding.
             </p>
           </div>
-          {signals.map((s) => (
-            <div
-              key={s.id}
-              className="rounded-xl bg-cream-50 px-3.5 py-2.5 text-xs text-cocoa-600"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-semibold text-cocoa-800">{s.label}</span>
-                <Badge tone={TONE[s.tone]?.badge ?? "slate"} variant="tag">
-                  {TONE[s.tone]?.label ?? s.tone}
-                </Badge>
-              </div>
-              <p className="mt-1 leading-snug">{s.detail}</p>
-            </div>
-          ))}
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            {visibleSignals.map((s, index) => {
+              const copy = signalCopy(
+                s,
+                fieldsReviewed,
+                availableFieldCount,
+                totalFieldCount
+              );
+              const tone =
+                fieldsReviewed &&
+                (s.id === "ocr_summary" || s.id === "ocr_space_summary")
+                  ? "pass"
+                  : s.id === "ocr_summary" && availableFieldCount === totalFieldCount
+                    ? "pass"
+                  : s.tone;
+              return (
+                <div
+                  key={`${s.id}-${index}`}
+                  className="rounded-xl bg-cream-50 px-3 py-2 text-xs text-cocoa-600"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-cocoa-800">{copy.label}</span>
+                    <Badge tone={TONE[tone]?.badge ?? "slate"} variant="tag">
+                      {TONE[tone]?.label ?? tone}
+                    </Badge>
+                  </div>
+                  <p className="mt-1 leading-snug">{copy.detail}</p>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
-      {providers.length > 0 && (
-        <p className="text-[11px] text-cocoa-400">
-          Checked by: {providers.map((p) => p.label).join(", ")}.
-        </p>
-      )}
-
       {/* ---- the decision ---- */}
-      {hasDocuments && (
+      {hasDocuments && !isApproved && (
         <div className="space-y-2.5 border-t border-cream-200 pt-3.5">
           <label className="label" htmlFor="id-review-reason">
             Reason (required to reject, optional to approve)
@@ -339,16 +622,29 @@ export default function IdReview({ userId, onDone, onClose }: Props) {
             <button
               className="btn-danger"
               onClick={() => decide("reject")}
-              disabled={busy || reason.trim().length < 3}
+              disabled={busy || !canDecide || reason.trim().length < 3}
             >
               {busy ? "Saving..." : "Reject"}
             </button>
             <button
               className="btn-primary"
               onClick={() => decide("approve")}
-              disabled={busy}
+              disabled={busy || !canDecide || nameMismatch || faceMismatch || numberFormatProblem}
             >
               {busy ? "Saving..." : "Approve"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {hasDocuments && isApproved && (
+        <div className="space-y-3">
+          <p className="rounded-xl bg-sage-50 px-3.5 py-2.5 text-sm text-sage-700">
+            This ID is approved and can only be viewed. Replace it from the staff profile to start a new review.
+          </p>
+          <div className="flex justify-end">
+            <button className="btn-ghost" onClick={onClose}>
+              Close
             </button>
           </div>
         </div>

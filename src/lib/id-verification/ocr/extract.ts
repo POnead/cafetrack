@@ -42,6 +42,7 @@ import {
   type NameRole,
   type TemplateField,
 } from "./templates";
+import { idTypeHasExpiry } from "../specification";
 
 export type ExtractionStrategy = "mrz" | "label" | "heuristic" | "none";
 
@@ -783,7 +784,9 @@ export function extract(
   const date_of_birth = extractDate(layout, docType, mrz, "date_of_birth", claimed);
   claim(date_of_birth.value);
 
-  const date_of_expiry = extractDate(layout, docType, mrz, "date_of_expiry", claimed);
+  const date_of_expiry = idTypeHasExpiry(docType)
+    ? extractDate(layout, docType, mrz, "date_of_expiry", claimed)
+    : nothing();
   claim(date_of_expiry.value);
 
   const full_name = extractName(layout, docType, mrz, template.valuePosition === "above");

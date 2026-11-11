@@ -649,10 +649,37 @@ async function captureStaffCheck(browser, size) {
   await page.getByRole("button", { name: /^login$/i }).click();
   await page.getByRole("heading", { name: "Hello Demo" }).waitFor({ state: "visible" });
   await settle(page);
+  await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        window.addEventListener("popstate", () => window.setTimeout(resolve, 0), {
+          once: true,
+        });
+        window.history.back();
+      })
+  );
+  await page.getByRole("heading", { name: "Hello Demo" }).waitFor({ state: "visible" });
+  const faceCheckRemainsOpen =
+    new URL(page.url()).pathname === "/login" &&
+    (await page.getByRole("button", { name: "Back to password sign-in" }).isVisible()) &&
+    (await page.getByRole("button", { name: /^login$/i }).count()) === 0;
+  check(
+    `browser back keeps the staff face check open on ${size}`,
+    faceCheckRemainsOpen
+  );
   await screenshot(page, `${size}/staff/facial-step-two-ready`);
   await page.getByRole("button", { name: "Start face check" }).click();
   await page.getByText(/camera is blocked for this site/i).waitFor({ state: "visible" });
   await screenshot(page, `${size}/staff/facial-step-two-camera-denied`);
+  check(
+    `camera failure offers restart on ${size}`,
+    await page.getByRole("button", { name: "Restart face check" }).isVisible()
+  );
+  await page.getByRole("button", { name: "Restart face check" }).click();
+  check(
+    `idle face check offers return to password on ${size}`,
+    await page.getByRole("button", { name: "Back to password sign-in" }).isVisible()
+  );
   await context.close();
 }
 

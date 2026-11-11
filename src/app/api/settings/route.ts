@@ -1,5 +1,5 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail, readBody } from "@/lib/api";
+import { handler, ok, fail, readBody, dbFail } from "@/lib/api";
 import { requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { clearSettingsCache } from "@/lib/settings";
@@ -36,7 +36,7 @@ export const GET = handler(async () => {
 
   const { data, error } = await db().from("settings").select("key, value").order("key");
 
-  if (error) return fail(error.message, 500);
+  if (error) return dbFail(error);
 
   const values: Record<string, string> = {};
   for (const row of (data ?? []) as { key: string; value: string }[]) {
@@ -69,7 +69,8 @@ const EDITABLE: Record<
   string,
   { min: number; max: number; label: string; decimals?: number }
 > = {
-  session_timeout_minutes: { min: 1, max: 480, label: "Session timeout" },
+  admin_session_timeout_minutes: { min: 1, max: 480, label: "Admin session timeout" },
+  staff_session_timeout_minutes: { min: 1, max: 480, label: "Staff session timeout" },
   expiry_warning_days: { min: 1, max: 365, label: "Expiry warning window" },
   // Email (FR-11).
   email_dedupe_hours: { min: 1, max: 168, label: "Duplicate alert window" },
@@ -102,23 +103,6 @@ const EDITABLE: Record<
     decimals: 3,
     label: "Face match threshold (SFace)",
   },
-  /*
-   * The ID-card portrait threshold, which is a different number from the one
-   * above and for a different reason.
-   *
-   * face_match_threshold compares two photographs of one person taken seconds
-   * apart; this compares a *printed* portrait against a live photo. The second
-   * is a much harder problem and every vendor uses a much looser threshold for
-   * it. The bounds are MIN/MAX_ID_MATCH_THRESHOLD from lib/id-verification/local.ts,
-   * which also carries the reasoning and the caveat that the default is reasoned
-   * rather than measured.
-   */
-  id_face_match_threshold: {
-    min: 0.1,
-    max: 0.95,
-    decimals: 3,
-    label: "ID portrait match threshold",
-  },
 };
 
 /**
@@ -141,7 +125,35 @@ const TEXT_SETTINGS: Record<
   }
 > = {
   business_name: { maxLength: 120, label: "Business name" },
-  email_from: { maxLength: 200, label: "Sender address" },
+  password_recovery_email: {
+    maxLength: 254,
+    label: "Password recovery email",
+    allowEmpty: true,
+    validate: (value) => {
+      if (value && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)) {
+        return "Enter a valid password recovery email address";
+      }
+      return null;
+    },
+  },
+  email_from: {
+    maxLength: 200,
+    label: "Sender address",
+    // Blank falls back to the SMTP account's own address (smtp-config.ts),
+    // which is a normal state, so blank stays allowed.
+    allowEmpty: true,
+    validate: (value) => {
+      // This value is handed to nodemailer as the From address. A malformed
+      // one reaches nobody, and a value with header tricks in it
+      // ("victim@x <>,bcc:…") is exactly the thing address-shaped validation
+      // refuses. Only a bare address is accepted — display names are not part
+      // of this setting.
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)) {
+        return "Enter a valid sender email address";
+      }
+      return null;
+    },
+  },
   // The address a staff phone opens to run the check, when the register itself
   // has no camera. Blank is the normal state and means no phone fallback.
   //
@@ -162,31 +174,9 @@ const TEXT_SETTINGS: Record<
     },
   },
   /*
-   * Which engine reads an ID. Free text with a whitelist rather than a closed
-   * list, because "auto" is a real and useful value here and the set of
-   * providers grows by adding a file.
-   *
-   * A name that is not available is accepted on purpose. The orchestrator falls
-   * back to whatever *is* configured, so a typo leaves the feature working with
-   * fewer checks rather than taking it down — see chooseProviders.
-   */
-  id_provider: {
-    maxLength: 40,
-    label: "ID verification provider",
-    allowEmpty: true,
-    validate: (value) => {
-      const v = value.trim().toLowerCase();
-      if (!v) return null;
-      if (!["auto", "local", "local_ocr", "hyperverge"].includes(v)) {
-        return 'Provider must be "auto", "local", "local_ocr" or "hyperverge"';
-      }
-      return null;
-    },
-  },
-  /*
    * Which face engine the cafe runs: "legacy" or "sface".
    *
-   * A closed list, because unlike `id_provider` there is no safe fallback — an
+   * A closed list, because there is no safe fallback — an
    * unrecognised value here would mean "compare against vectors from a model
    * that does not exist", and the safe reading of that is the default engine,
    * which is what the reader does. Refusing the value at the door means the
@@ -222,7 +212,7 @@ const TEXT_SETTINGS: Record<
 const TOGGLES: Record<string, string> = {
   email_enabled: "Email notifications",
   face_verification_enabled: "Duty face verification",
-  face_login_enabled: "Sign in with a face",
+  face_login_enabled: "Staff login face check",
   /*
    * Whether a duty check asks for the two turned-head photos as well as the
    * straight-on one.
@@ -241,18 +231,6 @@ const TOGGLES: Record<string, string> = {
   // unable to sign in. It does not make an account verified — that still needs a
   // document and an admin pressing Approve. See lib/id-gate.ts.
   id_verification_required: "Require a checked ID before sign-in",
-  /*
-   * The on-device text reader. On by default when the key is absent, so an
-   * existing install gets it without a migration.
-   *
-   * Separate from `id_provider` because that setting chooses *which* engine runs
-   * and this one switches one engine off. Without a way to disable it, a café whose
-   * cards the hand-written templates misread would have to remove the whole ID
-   * verification feature — see the header note in
-   * src/lib/id-verification/ocr/templates.ts on why that is a realistic thing to
-   * need.
-   */
-  local_ocr_enabled: "Read ID text on this machine (free — nothing leaves the device)",
   /*
    * Sign in by ID card and face rather than badge and password.
    *
@@ -366,14 +344,14 @@ export const PATCH = handler(async (req: Request) => {
       .eq("key", key)
       .select("key");
 
-    if (error) return fail(error.message, 500);
+    if (error) return dbFail(error);
 
     // No row matched — the key is new to this database, so add it.
     if (!data || data.length === 0) {
       const { error: insertError } = await db()
         .from("settings")
         .insert({ key, value });
-      if (insertError) return fail(insertError.message, 500);
+      if (insertError) return dbFail(insertError, { context: "settings ensure" });
     }
   }
 

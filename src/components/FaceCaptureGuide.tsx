@@ -16,9 +16,8 @@
  * top identifies the requested angle; a small instruction panel at the bottom
  * explains the next adjustment and shows the angle/hold progress.
  *
- * Avoid a face-shaped target over the camera image: real faces sit at different
- * heights and the illustration can obscure the very features the camera needs.
- * The yaw meter and `hintFor` expose the gate's actionable feedback instead.
+ * A subtle head outline gives the person a framing target without blocking the
+ * camera image. Its border turns green only when the requested pose is accepted.
  *
  * ## No scores
  *
@@ -57,6 +56,10 @@ type Props = {
   flashPose: FacePose | null;
   /** A refusal from the loop, which outranks the derived hint. */
   message: string | null;
+  /** This step accepts either profile, not a particular direction. */
+  eitherSide?: boolean;
+  /** Renders the instruction and angle meter below the camera. */
+  display?: "overlay" | "instructions";
 };
 
 /** The yaw range the meter covers, in degrees either side of straight on. */
@@ -100,17 +103,19 @@ function hintFor(
   active: FacePose,
   state: PoseState | null,
   holdProgress: number,
-  message: string | null
+  message: string | null,
+  eitherSide: boolean
 ): string {
   if (message) return message;
   if (!state) return "Looking for your face — move into the light and face the camera.";
 
   const { pose, block, yaw, pitch } = state;
-  if (pose === active) {
+  if (pose === active || (eitherSide && (pose === "left" || pose === "right"))) {
     return holdProgress >= 1 ? "Hold still…" : "That is it — hold still.";
   }
 
   if (block === "too-far") return "A little less — that is too far round.";
+  if (block === "signal") return "Adjust your turn slightly and hold until the outline turns green.";
   if (block === "tilted") {
     return active === "front"
       ? "Keep your head level and look straight ahead."
@@ -124,6 +129,7 @@ function hintFor(
 
   // Between straight on and turned.
   if (active === "front") return "Straighten up to face the camera.";
+  if (eitherSide) return "Turn your head a little to either side.";
   if (pose === "front") return `Turn your head to your ${active}.`;
 
   // A decided pose on the other side.
@@ -145,11 +151,17 @@ export default function FaceCaptureGuide({
   holdProgress,
   flashPose,
   message,
+  eitherSide = false,
+  display = "overlay",
 }: Props) {
-  const inBand = state?.pose === activePose;
+  const inBand =
+    state?.pose === activePose ||
+    (eitherSide && (state?.pose === "left" || state?.pose === "right"));
   const yaw = state && Number.isFinite(state.yaw) ? state.yaw : null;
-  const hint = hintFor(activePose, state, holdProgress, message);
+  const hint = hintFor(activePose, state, holdProgress, message, eitherSide);
   const [bandFrom, bandTo] = targetBand(activePose);
+  const leftBand = targetBand("left");
+  const rightBand = targetBand("right");
 
   /*
    * The raw angles, for the one question a meter cannot answer: is the gate
@@ -162,26 +174,21 @@ export default function FaceCaptureGuide({
     setDebug(new URLSearchParams(window.location.search).get("pose") === "debug");
   }, []);
 
-  return (
-    <div className="pointer-events-none absolute inset-0 z-10 flex flex-col justify-between p-3 sm:p-4">
-      <div className="flex items-center justify-between self-center rounded-full bg-cocoa-900/80 px-3.5 py-2 text-xs text-cream-100 shadow-sm backdrop-blur-sm">
-        <span className="font-semibold">{POSE_COPY[activePose].label}</span>
-        <span className="ml-2 border-l border-cream-100/25 pl-2 text-cream-100/70">
-          View {Math.min(done.length + 1, poses.length)} of {poses.length}
-        </span>
-      </div>
-
-      <div className="space-y-2 rounded-2xl bg-cocoa-900/85 px-3.5 py-3 text-center text-cream-100 shadow-lg backdrop-blur-sm sm:px-4 sm:py-3.5">
+  if (display === "instructions") {
+    return (
+      <div className="space-y-2 rounded-xl border border-cream-200 bg-cream-50 px-3.5 py-3 text-center text-cocoa-800">
         {flashPose ? (
-          <p role="status" className="text-sm font-semibold text-sage-300">
+          <p role="status" className="text-sm font-semibold text-sage-700">
             ✓ Got it — {DONE_COPY[flashPose]}
           </p>
         ) : (
           <>
-            <p className="text-sm font-semibold leading-snug sm:text-base">
-              {POSE_COPY[activePose].instruction}
+            <p className="text-sm font-semibold leading-snug">
+              {eitherSide
+                ? "Turn your head a little to either your left or right."
+                : POSE_COPY[activePose].instruction}
             </p>
-            <p role="status" aria-live="polite" className="text-xs leading-relaxed text-cream-100/80 sm:text-sm">
+            <p role="status" aria-live="polite" className="text-xs leading-relaxed text-cocoa-600">
               {hint}
             </p>
           </>
@@ -194,41 +201,46 @@ export default function FaceCaptureGuide({
             aria-valuemin={0}
             aria-valuemax={100}
             aria-valuenow={Math.round(holdProgress * 100)}
-            className="h-1 overflow-hidden rounded-full bg-cream-100/20"
+            className="h-1 overflow-hidden rounded-full bg-cream-200"
           >
             <div
-              className="h-full rounded-full bg-sage-400 transition-[width] duration-150"
+              className="h-full rounded-full bg-sage-500 transition-[width] duration-150"
               style={{ width: `${Math.round(holdProgress * 100)}%` }}
             />
           </div>
         )}
 
-        <div className="mx-auto w-full max-w-[220px]">
-          <div className="relative h-1.5 overflow-hidden rounded-full bg-cream-100/20">
-            <div
-              className={`absolute inset-y-0 rounded-full ${inBand ? "bg-sage-400" : "bg-cream-100/70"}`}
-              style={{
-                left: `${meterPercent(bandFrom)}%`,
-                width: `${meterPercent(bandTo) - meterPercent(bandFrom)}%`,
-              }}
-            />
+        <div className="mx-auto w-full max-w-[200px]">
+          <div className="relative h-1 overflow-hidden rounded-full bg-cream-200">
+            {(eitherSide ? [leftBand, rightBand] : [[bandFrom, bandTo]]).map(
+              ([from, to], index) => (
+                <div
+                  key={index}
+                  className={`absolute inset-y-0 rounded-full ${inBand ? "bg-sage-500" : "bg-cocoa-400"}`}
+                  style={{
+                    // The preview is mirrored, so the meter runs backwards: a turn
+                    // to the person's own left (positive yaw) lands on screen-left.
+                    left: `${meterPercent(-to)}%`,
+                    width: `${meterPercent(-from) - meterPercent(-to)}%`,
+                  }}
+                />
+              )
+            )}
             {yaw !== null && (
               <div
-                className={`absolute inset-y-0 w-0.5 rounded-full ${
-                  inBand ? "bg-white" : "bg-cream-100"
-                }`}
-                style={{ left: `${meterPercent(yaw)}%` }}
+                className="absolute inset-y-0 w-0.5 rounded-full bg-cocoa-900"
+                style={{ left: `${meterPercent(-yaw)}%` }}
               />
             )}
           </div>
-          <div className="mt-1 flex justify-between text-[9px] text-cream-100/60">
-            <span>your right</span>
+          <div className="mt-1 flex justify-between text-[9px] text-cocoa-500">
             <span>your left</span>
+            <span>your right</span>
           </div>
         </div>
 
         {debug && (
-          <p className="font-mono text-[10px] leading-tight text-cream-100/65">
+          <p className="font-mono text-[10px] leading-tight text-cocoa-500">
             yaw {Number.isFinite(state?.yaw ?? NaN) ? state!.yaw.toFixed(1) : "—"}° ·
             pitch {Number.isFinite(state?.pitch ?? NaN) ? state!.pitch.toFixed(1) : "—"}° ·
             roll {Number.isFinite(state?.roll ?? NaN) ? state!.roll.toFixed(1) : "—"}° ·
@@ -236,6 +248,28 @@ export default function FaceCaptureGuide({
           </p>
         )}
       </div>
+    );
+  }
+
+  return (
+    <div className="pointer-events-none absolute inset-0 z-10 p-2.5 sm:p-3">
+      <div
+        aria-hidden="true"
+        className={`absolute left-1/2 top-[17%] h-[57%] w-[68%] -translate-x-1/2 rounded-[48%_48%_44%_44%/38%_38%_58%_58%] border-2 transition-colors duration-200 ${
+          inBand ? "border-sage-300/90" : "border-cream-100/55"
+        }`}
+      />
+      <div className="absolute left-2 right-2 top-2 flex items-center justify-between gap-2 sm:left-3 sm:right-3 sm:top-3">
+        <span className="rounded-full bg-cocoa-900/80 px-3 py-1.5 text-xs font-semibold text-cream-100 shadow-sm backdrop-blur-sm">
+          {eitherSide ? "Turn either way" : POSE_COPY[activePose].label}
+        </span>
+        <span className="rounded-full bg-cocoa-900/70 px-2.5 py-1.5 text-[11px] font-medium text-cream-100/80 shadow-sm backdrop-blur-sm">
+          View {Math.min(done.length + 1, poses.length)} of {poses.length}
+        </span>
+      </div>
+      <p className="absolute left-1/2 top-[14%] max-w-[85%] -translate-x-1/2 rounded-full bg-cocoa-900/60 px-2.5 py-1 text-center text-[10px] font-medium text-cream-100/85 shadow-sm backdrop-blur-sm">
+        Keep your head inside the outline
+      </p>
     </div>
   );
 }

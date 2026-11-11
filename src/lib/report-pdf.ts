@@ -31,12 +31,14 @@ import PDFDocument from "pdfkit";
 const COCOA = "#3D2B1F";
 const COCOA_MID = "#8B5E3C";
 const COCOA_SOFT = "#96755A";
-const CREAM = "#F6EDE3";
 const RULE = "#E8D9CC";
 const ROW_RULE = "#F0E4D8";
 const TERRACOTTA = "#8A3423";
 const OCHRE = "#8A611A";
 const SAGE = "#4A6638";
+const SAGE_WASH = "#EEF3E9";
+const OCHRE_WASH = "#F8F1E2";
+const TERRACOTTA_WASH = "#F8EBE7";
 
 /**
  * A4 portrait, in PDF points. Rounded, because a fractional content width makes
@@ -48,6 +50,8 @@ const PAGE_HEIGHT = 842;
 const MARGIN = 40;
 
 const CONTENT_WIDTH = PAGE_WIDTH - MARGIN * 2;
+const RUNNING_HEADER_Y = 24;
+const RUNNING_HEADER_CONTENT_Y = 62;
 
 /**
  * Every column list has to sum to exactly CONTENT_WIDTH, because the layout walks
@@ -117,6 +121,7 @@ export type PdfReport = {
   movementSummary: PdfMovementSummary[];
   waste: { sku: string; name: string; qty: string; count: number }[];
   movementLines: PdfMovementLine[];
+  warnings: string[];
 };
 
 /**
@@ -165,6 +170,7 @@ export function buildStockReportPdf(report: PdfReport): Promise<Buffer> {
     const doc = new PDFDocument({
       size: "A4",
       margin: MARGIN,
+      bufferPages: true,
       info: {
         Title: `${report.businessName} — Stock Report`,
         Author: "CafeTrack",
@@ -181,6 +187,9 @@ export function buildStockReportPdf(report: PdfReport): Promise<Buffer> {
     doc.on("error", reject);
 
     try {
+      // Continuation pages get a compact running masthead. Registering this
+      // before rendering means pages created by any table share the same chrome.
+      doc.on("pageAdded", () => writeRunningHeader(doc, report.businessName));
       writeHeader(doc, report);
       writeTiles(doc, report.tiles);
 
@@ -217,30 +226,176 @@ export function buildStockReportPdf(report: PdfReport): Promise<Buffer> {
 /* ------------------------------------------------------------------ */
 
 function writeHeader(doc: PDFKit.PDFDocument, report: PdfReport) {
+  const top = doc.y;
+  doc
+    .roundedRect(MARGIN, top, 82, 20, 4)
+    .fill(COCOA);
+  doc
+    .fillColor("#FFFFFF")
+    .font("Helvetica-Bold")
+    .fontSize(8)
+    .text("CAFETRACK", MARGIN + 9, top + 6, {
+      width: 64,
+      characterSpacing: 0.9,
+      lineBreak: false,
+    });
+
+  doc
+    .fillColor(COCOA_MID)
+    .font("Helvetica-Bold")
+    .fontSize(8)
+    .text(report.businessName.toUpperCase(), MARGIN + 92, top + 6, {
+      width: CONTENT_WIDTH - 92,
+      align: "right",
+      characterSpacing: 0.45,
+      lineBreak: false,
+      ellipsis: true,
+    });
+
+  const titleTop = top + 31;
   doc
     .fillColor(COCOA)
     .font("Helvetica-Bold")
-    .fontSize(17)
-    .text(`${report.businessName} — Stock Report`, { align: "left" });
+    .fontSize(22)
+    .text("Stock report", MARGIN, titleTop, {
+      align: "left",
+      lineBreak: false,
+    });
 
   doc
     .font("Helvetica")
-    .fontSize(9)
+    .fontSize(9.5)
     .fillColor(COCOA_MID)
-    .text(
-      `Generated ${report.generated}  ·  ${report.items.length} items  ·  ${report.filterDescription}`,
-      { lineGap: 1 }
-    );
+    .text(report.businessName, MARGIN, titleTop + 27, {
+      width: CONTENT_WIDTH,
+      lineBreak: false,
+      ellipsis: true,
+    });
+
+  const metaTop = titleTop + 43;
+  const metaGap = 9;
+  const metaWidth = (CONTENT_WIDTH - metaGap) / 2;
+  const metaValueWidth = metaWidth - 18;
+  const metaCards = [
+    { label: "GENERATED", value: report.generated },
+    { label: "FILTER RANGE", value: report.filterDescription },
+  ];
+  doc.font("Helvetica").fontSize(8.5);
+  const metaHeight = Math.max(
+    42,
+    ...metaCards.map(
+      (meta) =>
+        26 +
+        doc.heightOfString(meta.value, {
+          width: metaValueWidth,
+          lineGap: 0,
+        })
+    )
+  );
+  metaCards.forEach((meta, index) => {
+    const x = MARGIN + index * (metaWidth + metaGap);
+    doc
+      .roundedRect(x, metaTop, metaWidth, metaHeight, 5)
+      .fillAndStroke("#FEFAF3", RULE);
+    doc
+      .fillColor(COCOA_SOFT)
+      .font("Helvetica-Bold")
+      .fontSize(6.5)
+      .text(meta.label, x + 9, metaTop + 7, {
+        width: metaWidth - 18,
+        characterSpacing: 0.65,
+        lineBreak: false,
+      });
+    doc
+      .fillColor(COCOA)
+      .font("Helvetica")
+      .fontSize(8.5)
+      .text(meta.value, x + 9, metaTop + 19, {
+        width: metaValueWidth,
+        height: metaHeight - 24,
+        lineGap: 0,
+      });
+  });
+  doc.y = metaTop + metaHeight + 9;
+
+  const itemCountTop = doc.y;
+  doc
+    .fillColor(COCOA_SOFT)
+    .font("Helvetica")
+    .fontSize(8)
+    .text(`${report.items.length} inventory items included`, MARGIN, itemCountTop, {
+      lineBreak: false,
+    });
+  doc.x = MARGIN;
+  doc.y = itemCountTop + 13;
+
+  for (const warning of report.warnings) {
+    doc
+      .roundedRect(MARGIN, doc.y, CONTENT_WIDTH, 19, 3)
+      .fill(TERRACOTTA_WASH);
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(8)
+      .fillColor(TERRACOTTA)
+      .text(warning, MARGIN + 8, doc.y + 5, {
+        width: CONTENT_WIDTH - 16,
+        lineBreak: false,
+      });
+    doc.y += 23;
+  }
 
   doc.moveDown(0.6);
+}
+
+function writeRunningHeader(doc: PDFKit.PDFDocument, businessName: string) {
+  const y = RUNNING_HEADER_Y;
+  doc
+    .roundedRect(MARGIN, y, 65, 16, 3)
+    .fill(COCOA);
+  doc
+    .fillColor("#FFFFFF")
+    .font("Helvetica-Bold")
+    .fontSize(7)
+    .text("CAFETRACK", MARGIN + 6, y + 5, {
+      width: 53,
+      characterSpacing: 0.6,
+      lineBreak: false,
+    });
+  doc
+    .fillColor(COCOA_MID)
+    .font("Helvetica-Bold")
+    .fontSize(8)
+    .text(businessName, MARGIN + 76, y + 4, {
+      width: CONTENT_WIDTH - 160,
+      lineBreak: false,
+      ellipsis: true,
+    });
+  doc
+    .fillColor(COCOA_SOFT)
+    .font("Helvetica-Bold")
+    .fontSize(7)
+    .text("STOCK REPORT", PAGE_WIDTH - MARGIN - 78, y + 5, {
+      width: 78,
+      align: "right",
+      characterSpacing: 0.45,
+      lineBreak: false,
+    });
+  doc
+    .moveTo(MARGIN, y + 27)
+    .lineTo(PAGE_WIDTH - MARGIN, y + 27)
+    .lineWidth(0.7)
+    .strokeColor(RULE)
+    .stroke();
+  doc.x = MARGIN;
+  doc.y = RUNNING_HEADER_CONTENT_Y;
 }
 
 function writeTiles(doc: PDFKit.PDFDocument, tiles: PdfReport["tiles"]) {
   if (tiles.length === 0) return;
 
-  const width = 108;
-  const height = 44;
-  const gap = 8;
+  const width = 122;
+  const height = 50;
+  const gap = 9;
 
   // Rows, because four tiles at 116pt plus gaps is 488pt and a fifth would run
   // off the page. Measured rather than assumed so the layout survives a label
@@ -261,21 +416,28 @@ function writeTiles(doc: PDFKit.PDFDocument, tiles: PdfReport["tiles"]) {
         .strokeColor(RULE)
         .fillAndStroke("#FEFAF3", RULE);
 
+      const accent = [COCOA_MID, OCHRE, TERRACOTTA, SAGE][
+        (r * perRow + i) % 4
+      ];
+      doc
+        .roundedRect(left, top, 3, height, 1.5)
+        .fill(accent);
+
       doc
         .fillColor(COCOA)
         .font("Helvetica-Bold")
-        .fontSize(15)
-        .text(String(tile.value), left + 10, top + 8, { width: width - 20 });
+        .fontSize(18)
+        .text(String(tile.value), left + 11, top + 7, { width: width - 20 });
 
       doc
         .fillColor(COCOA_MID)
         .font("Helvetica")
-        .fontSize(7.5)
+        .fontSize(7)
         .text(
           String(tile.label).toUpperCase(),
-          left + 10,
-          top + 27,
-          { width: width - 20, characterSpacing: 0.4 }
+          left + 11,
+          top + 32,
+          { width: width - 20, characterSpacing: 0.35, lineBreak: false }
         );
     });
 
@@ -310,30 +472,26 @@ function ensure(
 function writeSectionTitle(doc: PDFKit.PDFDocument, title: string) {
   // Room for the heading and its first rows, so a heading never lands alone at
   // the foot of a page with its table overleaf.
-  ensure(doc, 46);
+  ensure(doc, 62);
 
   // x is restored to the margin. pdfkit's text() draws from the current x, and
   // the last cell of a table leaves it at the right edge of that table — so
   // without this, every heading after the first one is right-aligned wherever
   // the previous table happened to end.
   doc.x = MARGIN;
-  doc.moveDown(0.4);
+  const titleTop = doc.y + 4;
   doc
-    .fillColor(COCOA_MID)
+    .fillColor(COCOA)
     .font("Helvetica-Bold")
-    .fontSize(8.5)
-    .text(title.toUpperCase(), { characterSpacing: 0.8 });
-  doc.moveDown(0.3);
-  // A rule under the heading, drawn at the current y so it tracks the text
-  // rather than a guessed offset.
-  const y = doc.y;
-  doc
-    .moveTo(MARGIN, y)
-    .lineTo(PAGE_WIDTH - MARGIN, y)
-    .lineWidth(1.25)
-    .strokeColor(COCOA_MID)
-    .stroke();
-  doc.moveDown(0.35);
+    .fontSize(10)
+    .text(title, MARGIN, titleTop, {
+      characterSpacing: 0.15,
+      lineBreak: false,
+    });
+  const ruleY = titleTop + 14;
+  doc.rect(MARGIN, ruleY, CONTENT_WIDTH, 1).fill(RULE);
+  doc.x = MARGIN;
+  doc.y = ruleY + 7;
 }
 
 /**
@@ -350,17 +508,17 @@ function writeColumnHeaders(
 ) {
   const y = doc.y;
 
-  doc.rect(MARGIN, y, CONTENT_WIDTH, 16).fill(CREAM);
+  doc.rect(MARGIN, y, CONTENT_WIDTH, 19).fill(COCOA);
 
   let x = PAGE_WIDTH - MARGIN;
   for (let i = columns.length - 1; i >= 0; i--) {
     const col = columns[i];
     x -= col.width;
     doc
-      .fillColor(COCOA)
+      .fillColor("#FFFFFF")
       .font("Helvetica-Bold")
-      .fontSize(7.5)
-      .text(col.label.toUpperCase(), x + 4, y + 5, {
+      .fontSize(7)
+      .text(col.label.toUpperCase(), x + 4, y + 6, {
         width: col.width - 8,
         align: col.align ?? "left",
         characterSpacing: 0.4,
@@ -368,7 +526,7 @@ function writeColumnHeaders(
       });
   }
 
-  doc.y = y + 16;
+  doc.y = y + 19;
 }
 
 /**
@@ -564,22 +722,39 @@ function writeItemTable(doc: PDFKit.PDFDocument, items: PdfReport["items"], widt
       // different heights and the row reads as two misaligned lines.
       const y = top + 4;
 
-      // Status becomes a coloured word with the dot that `Badge variant="tag"`
-      // draws on screen. A PDF has no CSS, so the dot is a circle.
+      // The muted status capsule keeps the inventory state easy to scan in print.
       if (colIndex === 7) {
         const colour =
           item.tone === "out" ? TERRACOTTA : item.tone === "low" ? OCHRE : SAGE;
+        const wash =
+          item.tone === "out"
+            ? TERRACOTTA_WASH
+            : item.tone === "low"
+              ? OCHRE_WASH
+              : SAGE_WASH;
+        doc.font("Helvetica-Bold").fontSize(6.5);
+        const badgeWidth = Math.min(
+          width - 8,
+          Math.max(
+            43,
+            doc.widthOfString(text.toUpperCase(), {
+              characterSpacing: 0.25,
+            }) + 15
+          )
+        );
+        doc
+          .roundedRect(left + 4, y - 1, badgeWidth, 13, 6)
+          .fill(wash);
         doc
           .fillColor(colour)
           .font("Helvetica-Bold")
-          .fontSize(7)
-          .text(text.toUpperCase(), left + 11, y, {
-            width: width - 15,
+          .fontSize(6.5)
+          .text(text.toUpperCase(), left + 10, y + 2, {
+            width: badgeWidth - 12,
             align: "left",
-            characterSpacing: 0.4,
+            characterSpacing: 0.25,
             lineBreak: false,
           });
-        doc.circle(left + 7, y + 3.5, 2).fill(colour);
         return;
       }
 
@@ -599,7 +774,7 @@ function writeItemTable(doc: PDFKit.PDFDocument, items: PdfReport["items"], widt
         .text(text, left + 4, y, {
           width: width - 8,
           align: right ? "right" : "left",
-          lineBreak: false,
+          lineBreak: colIndex > 0 && colIndex < 4,
         });
     },
   });
@@ -738,7 +913,13 @@ function stampPageNumbers(doc: PDFKit.PDFDocument, businessName: string) {
   for (let i = range.start; i < range.start + range.count; i++) {
     doc.switchToPage(i);
 
-    const y = PAGE_HEIGHT - MARGIN + 6;
+    const y = PAGE_HEIGHT - MARGIN - 12;
+    doc
+      .moveTo(MARGIN, y - 8)
+      .lineTo(PAGE_WIDTH - MARGIN, y - 8)
+      .lineWidth(0.7)
+      .strokeColor(RULE)
+      .stroke();
     doc
       .font("Helvetica")
       .fontSize(7.5)

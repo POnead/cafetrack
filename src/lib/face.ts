@@ -517,6 +517,8 @@ export const PRIMARY_POSE: FacePose = "front";
  * on" still means something.
  */
 export const FRONT_MAX_SIGNAL = 0.14;
+/** Front band for YuNet's five-point signal, calibrated against 3D yaw. */
+export const SFACE_FRONT_MAX_SIGNAL = 0.08;
 
 /**
  * How far the signal has to travel before a frame counts as turned.
@@ -527,14 +529,12 @@ export const FRONT_MAX_SIGNAL = 0.14;
  * happens to be nearer. A sample filed under the wrong angle is worse than no
  * sample, because it will be compared against the wrong pose expectation later.
  *
- * Both numbers are provisional. They are bounds on a *proxy*, not a measured
- * angle — face-api supplies 2D landmarks and there is no head-pose solver here —
- * and no real front/left/right captures have been measured against them yet. The
- * enrolment records the signal it actually saw for every angle, which is what
- * makes them calibratable: `npm run test:angles:measure` prints the observed
- * spread, and these two constants are what it would change.
+ * These are the legacy 68-point bands. The SFace/YuNet five-point detector has a
+ * separate profile below; its signal is on a different scale.
  */
 export const SIDE_MIN_SIGNAL = 0.18;
+/** Side band for YuNet's five-point signal; approximately 25 degrees of yaw. */
+export const SFACE_SIDE_MIN_SIGNAL = 0.16;
 
 /**
  * How far a head is turned, as a signed proxy in roughly [-1, 1].
@@ -588,12 +588,17 @@ export function headTurnSignal(
  * someone to turn a little further on, and what stops a half-turned frame being
  * stored as a side sample.
  */
-export function poseFromSignal(signal: number | null | undefined): FacePose | null {
+export function poseFromSignal(
+  signal: number | null | undefined,
+  engine: FaceEngine = "legacy"
+): FacePose | null {
   if (signal === null || signal === undefined || !Number.isFinite(signal)) return null;
 
-  if (Math.abs(signal) <= FRONT_MAX_SIGNAL) return "front";
-  if (signal >= SIDE_MIN_SIGNAL) return "left";
-  if (signal <= -SIDE_MIN_SIGNAL) return "right";
+  const frontMax = engine === "sface" ? SFACE_FRONT_MAX_SIGNAL : FRONT_MAX_SIGNAL;
+  const sideMin = engine === "sface" ? SFACE_SIDE_MIN_SIGNAL : SIDE_MIN_SIGNAL;
+  if (Math.abs(signal) <= frontMax) return "front";
+  if (signal >= sideMin) return "left";
+  if (signal <= -sideMin) return "right";
 
   // The dead zone between a frontal frame and a decided turn.
   return null;
@@ -602,6 +607,21 @@ export function poseFromSignal(signal: number | null | undefined): FacePose | nu
 /** Does a frame showing `actual` satisfy a request for `expected`? */
 export function poseSatisfies(expected: FacePose, actual: FacePose | null): boolean {
   return actual !== null && actual === expected;
+}
+
+/**
+ * Whether the measured signal confirms a pose before the browser captures it.
+ *
+ * The display pose is estimated from head angles, but the server rechecks the
+ * image-derived signal. Requiring both to agree prevents a frame from showing
+ * as captured when the server will reject it as not turned far enough.
+ */
+export function poseConfirmedBySignal(
+  pose: FacePose,
+  signal: number | null | undefined,
+  engine: FaceEngine = "legacy"
+): boolean {
+  return poseFromSignal(signal, engine) === pose;
 }
 
 /**
@@ -781,6 +801,36 @@ export function parseFaceEvidence(raw: unknown): string | null {
     return null;
   }
   return raw;
+}
+
+export type FaceBlinkEvidence = {
+  before: string;
+  closed: string;
+  after: string;
+  closedAgain?: string;
+  afterAgain?: string;
+};
+
+/** Frontal frames showing one blink, or two when required by the login challenge. */
+export function parseFaceBlinkEvidence(
+  raw: unknown,
+  requireDoubleBlink = false
+): FaceBlinkEvidence | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  const before = parseFaceEvidence(record.before);
+  const closed = parseFaceEvidence(record.closed);
+  const after = parseFaceEvidence(record.after);
+  if (!before || !closed || !after) return null;
+  const hasSecondClosed = record.closedAgain !== undefined;
+  const hasSecondAfter = record.afterAgain !== undefined;
+  if (hasSecondClosed !== hasSecondAfter) return null;
+  if (requireDoubleBlink && !hasSecondClosed) return null;
+  if (!hasSecondClosed) return { before, closed, after };
+  const closedAgain = parseFaceEvidence(record.closedAgain);
+  const afterAgain = parseFaceEvidence(record.afterAgain);
+  if (!closedAgain || !afterAgain) return null;
+  return { before, closed, after, closedAgain, afterAgain };
 }
 
 /**

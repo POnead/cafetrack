@@ -8,10 +8,9 @@ import { assertTestTarget } from "./_guard.mjs";
  * the fact that only an admin can reach any of it, and the fact that an approval
  * with nothing attached behind it is refused.
  *
- * No camera and no model are involved. The two face embeddings a browser would
- * normally compute are simply not sent, so the comparison reports "unknown" —
- * which is itself one of the outcomes worth asserting on, because an unknown
- * must never be presented as a pass.
+ * No camera or face model is involved. Fixture uploads without required face
+ * embeddings must be rejected, while valid uploads can be exercised with
+ * synthetically supplied embeddings.
  */
 
 const BASE = process.env.BASE_URL || "http://localhost:3100";
@@ -57,6 +56,11 @@ const TINY_JPEG = Uint8Array.from(
   (c) => c.charCodeAt(0)
 );
 
+const FIXTURE_EMBEDDING = Array.from({ length: 128 }, (_, i) =>
+  0.08838834764831844
+);
+const FIXTURE_EMBEDDING_TEXT = FIXTURE_EMBEDDING.join(",");
+
 /** A PNG header followed by junk — correctly identified, never decodable. */
 function fakePng() {
   const b = new Uint8Array(64);
@@ -100,6 +104,15 @@ async function upload(path, form, cookie) {
     data: ct.includes("json") ? await r.json() : null,
     headers: r.headers,
   };
+}
+
+async function enrolFixtureFace(userId, cookie) {
+  const f = new FormData();
+  for (const pose of ["front", "left", "right"]) {
+    f.append(`embedding_${pose}`, FIXTURE_EMBEDDING_TEXT);
+    f.append(`image_${pose}`, file(TINY_JPEG, `${pose}.jpg`, "image/jpeg"));
+  }
+  return upload(`/api/users/${userId}/face`, f, cookie);
 }
 
 /**
@@ -150,8 +163,28 @@ if (!cookie) {
   process.exit(1);
 }
 
-// A staff account to attach an ID to. Deleted at the end.
 const uniq = Date.now().toString(36);
+const reviewerUser = await call(
+  "POST",
+  "/api/users",
+  {
+    username: `idreviewer${uniq}`,
+    password: "review123",
+    first_name: "ID",
+    last_name: "Reviewer",
+    role: "admin",
+    recovery_email: `idreviewer${uniq}@example.test`,
+  },
+  cookie
+);
+const reviewer = await login(`idreviewer${uniq}`, "review123");
+const reviewerCookie = reviewer.cookie;
+if (!reviewerUser.data?.user?.id || !reviewerCookie) {
+  console.error("\n  Could not create a separate ID reviewer admin.\n");
+  process.exit(1);
+}
+
+// A staff account to attach an ID to. Deleted at the end.
 const created = await call(
   "POST",
   "/api/users",
@@ -169,6 +202,9 @@ const userId = created.data?.user?.id;
 check("staff account created for the test", Boolean(userId), userId ?? JSON.stringify(created.data));
 
 if (userId) {
+  const enrolled = await enrolFixtureFace(userId, cookie);
+  check("the staff account has a required enrolled face", enrolled.status === 200, `status ${enrolled.status}`);
+
   /* ---- status defaults ---- */
   section("status");
 
@@ -264,7 +300,6 @@ if (userId) {
       const f = new FormData();
       f.append("doc_type", "lto_license");
       f.append("front", file(TINY_JPEG, "front.jpg", "image/jpeg"));
-      f.append("photo", file(TINY_JPEG, "person.jpg", "image/jpeg"));
       f.append("id_number", "N01-23-456789");
       return f;
     })(),
@@ -274,16 +309,36 @@ if (userId) {
   check("a valid upload is accepted", good.status === 200, `status ${good.status}`);
   check("signals come back", Array.isArray(good.data?.signals) && good.data.signals.length > 0);
   check(
-    "the local provider ran",
+    "OCR.space and local document checks ran",
     String(good.data?.user?.id_provider ?? "").includes("local"),
+    good.data?.user?.id_provider
+  );
+  check(
+    "OCR.space is recorded as a provider",
+    String(good.data?.user?.id_provider ?? "").includes("ocr_space"),
+    good.data?.user?.id_provider
+  );
+  check(
+    "local OCR is not selected for staff ID verification",
+    !String(good.data?.user?.id_provider ?? "").includes("local_ocr"),
     good.data?.user?.id_provider
   );
 
   const signals = good.data?.signals ?? [];
   check(
-    "the face comparison reports that it could not run, rather than passing",
-    signals.some((s) => s.id === "face_match" && s.tone === "unknown"),
-    JSON.stringify(signals.find((s) => s.id === "face_match")?.tone)
+    "an unavailable face comparison stays unconfirmed",
+    signals.some(
+      (s) =>
+        s.id === "face_match" &&
+        s.tone === "unknown" &&
+        /could not be compared/i.test(s.detail) &&
+        !/Face\+\+|SFace/i.test(s.detail)
+    ),
+    JSON.stringify(signals.find((s) => s.id === "face_match"))
+  );
+  check(
+    "the upload does not attach a separate person photo",
+    good.data?.user?.has_photo === false
   );
   check(
     "the shape check ran and had something to say about a 1x1 image",
@@ -299,6 +354,51 @@ if (userId) {
     "no signal claims an automatic approval",
     !signals.some((s) => s.tone === "pass" && s.id === "name_match"),
     "the name check must never pass on nothing"
+  );
+
+  const approvalBeforeReview = await call(
+    "PATCH",
+    `/api/users/${userId}/id`,
+    { decision: "approve", reason: "" },
+    cookie
+  );
+  check(
+    "approval is blocked until OCR details are reviewed",
+    approvalBeforeReview.status === 400,
+    `status ${approvalBeforeReview.status}`
+  );
+
+  const savedDetails = await call(
+    "PATCH",
+    `/api/users/${userId}/id/status`,
+    {
+      fields: {
+        full_name: "",
+        id_number: "",
+        date_of_birth: "",
+        date_of_expiry: "",
+      },
+    },
+    cookie
+  );
+  check(
+    "the ID details must be reviewed and saved before a decision",
+    savedDetails.status === 200 &&
+      savedDetails.data?.signals?.some((signal) => signal.id === "id_fields_reviewed"),
+    `status ${savedDetails.status}`
+  );
+
+  const sameAdminApprove = await call(
+    "PATCH",
+    `/api/users/${userId}/id`,
+    { decision: "approve", reason: "" },
+    cookie
+  );
+  check(
+    "the administrator who uploaded an ID can also approve it",
+    sameAdminApprove.status === 200 &&
+      sameAdminApprove.data?.user?.verification_status === "verified",
+    `status ${sameAdminApprove.status}`
   );
 
   /* ---- the cross-account checks ---- */
@@ -340,6 +440,24 @@ if (userId) {
     signalOf(first, "id_number_shape")?.tone === "pass",
     JSON.stringify(signalOf(first, "id_number_shape"))
   );
+  const philSysExpiry = await call(
+    "PATCH",
+    `/api/users/${userId}/id/status`,
+    {
+      fields: {
+        full_name: "",
+        id_number: "1234-5678-9012-3456",
+        date_of_birth: "",
+        date_of_expiry: "2030-01-01",
+      },
+    },
+    cookie
+  );
+  check(
+    "PhilSys expiry is not accepted or requested",
+    philSysExpiry.status === 400,
+    `status ${philSysExpiry.status}`
+  );
 
   /*
    * A second account, so the duplicate check has someone to find.
@@ -364,44 +482,42 @@ if (userId) {
   check("a second staff account was created", Boolean(secondId), secondId ?? "none");
 
   if (secondId) {
+    const secondEnrolled = await enrolFixtureFace(secondId, cookie);
+    check(
+      "the duplicate-check account also has an enrolled face",
+      secondEnrolled.status === 200,
+      `status ${secondEnrolled.status}`
+    );
     const dupe = await uploadWith(secondId, { card_hash: HASH_A_AGAIN });
-    const dupeSignal = signalOf(dupe, "card_duplicate");
+    check(
+      "a re-photographed duplicate ID is rejected before saving",
+      dupe.status === 409,
+      `status ${dupe.status}`
+    );
+    check(
+      "the duplicate refusal explains that it was not saved",
+      /not saved/i.test(dupe.data?.error ?? ""),
+      dupe.data?.error
+    );
 
-    check("the same card on a second account is flagged", dupeSignal?.tone === "warn", JSON.stringify(dupeSignal));
+    const reusedNumber = await uploadWith(secondId, {
+      card_hash: HASH_B,
+      id_number: "1234 5678 9012 3456",
+    });
     check(
-      "the warning names the account it is already on",
-        /Ana/.test(dupeSignal?.detail ?? ""),
-      (dupeSignal?.detail ?? "").slice(0, 80)
+      "a number already attached to another account is rejected",
+      reusedNumber.status === 409,
+      `status ${reusedNumber.status}`
     );
-    /*
-     * The distance in the message must be the real one.
-     *
-     * Computed here from the two fixtures rather than hardcoded, because a
-     * hardcoded number is a trap: `d` (1101) and `f` (1111) differ by one bit, not
-     * four, so asserting "4" against that pair failed while the application was
-     * reporting exactly the right value. Written out independently of the app's own
-     * helper, so comparing the two means something.
-     */
-    const distanceOf = (a, b) => {
-      let d = 0;
-      for (let i = 0; i < a.length; i++) {
-        let x = parseInt(a[i], 16) ^ parseInt(b[i], 16);
-        while (x) {
-          d += x & 1;
-          x >>= 1;
-        }
-      }
-      return d;
-    };
-    const expected = distanceOf(HASH_A, HASH_A_AGAIN);
+
+    const reusedImage = await uploadWith(secondId, {
+      card_hash: HASH_A,
+      id_number: "1111-2222-3333-4444",
+    });
     check(
-      `the warning gives the real distance (${expected})`,
-      new RegExp(`in ${expected} of 64`).test(dupeSignal?.detail ?? ""),
-      (dupeSignal?.detail ?? "").slice(0, 140)
-    );
-    check(
-      "it does not accuse outright",
-      !/(fraud|forged|stolen)/i.test(dupeSignal?.detail ?? "")
+      "an exact ID image already attached to another account is rejected",
+      reusedImage.status === 409,
+      `status ${reusedImage.status}`
     );
 
     const different = await uploadWith(secondId, { card_hash: HASH_B });
@@ -435,6 +551,38 @@ if (userId) {
   check(
     "and the warning says what the shape should be",
     /sixteen digits/.test(signalOf(wrongShape, "id_number_shape")?.detail ?? "")
+  );
+  const reviewedWrongShape = await call(
+    "PATCH",
+    `/api/users/${userId}/id/status`,
+    {
+      fields: {
+        full_name: "",
+        id_number: "12345",
+        date_of_birth: "",
+        date_of_expiry: "",
+      },
+    },
+    cookie
+  );
+  check(
+    "review keeps the type-specific number-format warning",
+    reviewedWrongShape.status === 200 &&
+      reviewedWrongShape.data?.signals?.some(
+        (signal) => signal.id === "id_number_shape" && signal.tone === "warn"
+      ),
+    `status ${reviewedWrongShape.status}`
+  );
+  const approveWrongShape = await call(
+    "PATCH",
+    `/api/users/${userId}/id`,
+    { decision: "approve", reason: "" },
+    cookie
+  );
+  check(
+    "a type-invalid number cannot be approved",
+    approveWrongShape.status === 400,
+    `status ${approveWrongShape.status}`
   );
 
   const noNumber = await uploadWith(userId, { card_hash: HASH_A });
@@ -514,6 +662,26 @@ if (userId) {
     JSON.stringify(status.data?.providers?.map((p) => p.id))
   );
 
+  const reviewedDetails = await call(
+    "PATCH",
+    `/api/users/${userId}/id/status`,
+    {
+      fields: {
+        full_name: "",
+        id_number: "",
+        date_of_birth: "",
+        date_of_expiry: "",
+      },
+    },
+    reviewerCookie
+  );
+  check(
+    "reviewed ID details are saved before a decision",
+    reviewedDetails.status === 200 &&
+      reviewedDetails.data?.signals?.some((signal) => signal.id === "id_fields_reviewed"),
+    `status ${reviewedDetails.status}`
+  );
+
   /* ---- serving an image ---- */
   section("serving the image");
 
@@ -546,16 +714,6 @@ if (userId) {
     `status ${noBack.status}`
   );
 
-  const photoImage = await fetch(`${BASE}/api/users/${userId}/id?part=photo`, {
-    headers: { cookie },
-    redirect: "manual",
-  });
-  check(
-    "the photo of the person is served too",
-    photoImage.status === 200,
-    `status ${photoImage.status}`
-  );
-
   /* ---- the decision ---- */
   section("approve and reject");
 
@@ -563,7 +721,7 @@ if (userId) {
     "PATCH",
     `/api/users/${userId}/id`,
     { decision: "reject" },
-    cookie
+    reviewerCookie
   );
   check("rejecting without a reason is refused", noReason.status === 400, `status ${noReason.status}`);
 
@@ -571,7 +729,7 @@ if (userId) {
     "PATCH",
     `/api/users/${userId}/id`,
     { decision: "maybe" },
-    cookie
+    reviewerCookie
   );
   check(
     "an unrecognised decision is refused",
@@ -583,7 +741,7 @@ if (userId) {
     "PATCH",
     `/api/users/${userId}/id`,
     { decision: "approve", reason: "" },
-    cookie
+    reviewerCookie
   );
   check(
     "approving without a reason is allowed",
@@ -604,7 +762,7 @@ if (userId) {
     "PATCH",
     `/api/users/${userId}/id`,
     { decision: "reject", reason: "The surname on the card does not match the roster." },
-    cookie
+    reviewerCookie
   );
   check(
     "rejecting with a reason works",
@@ -633,7 +791,7 @@ if (userId) {
       "PATCH",
       `/api/users/${bare.data.user.id}/id`,
       { decision: "approve", reason: "" },
-      cookie
+      reviewerCookie
     );
     check(
       "approving an account with no ID attached is refused",
@@ -748,11 +906,26 @@ if (userId) {
       `status ${staffSignInRes.status}`
     );
 
+    const finalReview = await call(
+      "PATCH",
+      `/api/users/${userId}/id/status`,
+      {
+        fields: {
+          full_name: "",
+          id_number: "",
+          date_of_birth: "",
+          date_of_expiry: "",
+        },
+      },
+      cookie
+    );
+    check("the final ID details can be reviewed", finalReview.status === 200, `status ${finalReview.status}`);
+
     await call(
       "PATCH",
       `/api/users/${userId}/id`,
       { decision: "approve", reason: "" },
-      cookie
+      reviewerCookie
     );
 
     const afterApprove = await staffSignIn(`idtest${uniq}`, "staff123");

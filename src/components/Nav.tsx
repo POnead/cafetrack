@@ -1,9 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import type { SessionUser } from "@/lib/auth";
+import { CafeTrackBrand } from "@/components/CafeTrackBrand";
+import { ConfirmDialog } from "@/components/ui";
+import { useLiveRefresh } from "@/lib/use-live-refresh";
+import { alertSeenStorageKey } from "@/lib/alert-read-state";
 import {
   BellIcon,
   BoxIcon,
@@ -37,10 +41,6 @@ const ADMIN_NAV: NavGroup[] = [
     title: "Inventory Management",
     items: [
       { href: "/items", label: "All Items", icon: BoxIcon },
-      // FR-03: the approval queue. Admin-only for decisions — the API refuses a
-      // staff decision with a 403 — but the page renders read-only for staff so
-      // a barista can see their own submission is still waiting.
-      { href: "/approvals", label: "Approvals", icon: BoxIcon },
       { href: "/alerts", label: "Alerts", icon: BellIcon },
     ],
   },
@@ -48,6 +48,8 @@ const ADMIN_NAV: NavGroup[] = [
     title: "User Management",
     items: [
       { href: "/users", label: "Staff Accounts", icon: UsersIcon },
+      // FR-03: staff submissions and change requests are reviewed by admins.
+      { href: "/approvals", label: "Approvals", icon: UsersIcon },
       { href: "/settings", label: "Settings", icon: CogIcon },
       // FR-11.
       { href: "/email", label: "Email", icon: BellIcon },
@@ -108,6 +110,94 @@ export function Nav({
   const pathname = usePathname();
   const router = useRouter();
   const groups = user.role === "admin" ? ADMIN_NAV : STAFF_NAV;
+  const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
+  const [logoutBusy, setLogoutBusy] = useState(false);
+  const [logoutError, setLogoutError] = useState<string | null>(null);
+  const [unreadAlertCount, setUnreadAlertCount] = useState(0);
+  const [pendingApprovalCount, setPendingApprovalCount] = useState(0);
+
+  const requestSessionCheck = useCallback(() => {
+    window.dispatchEvent(new Event("cafetrack:session-invalid"));
+  }, []);
+
+  const loadUnreadAlerts = useCallback(async () => {
+    try {
+      // Do not seed a "seen at" value here. The server stores the account's
+      // seen time, and a timestamp invented in this browser made the two
+      // disagree: the badge kept counting every open alert while the alerts
+      // page believed it had already marked them seen and never told the
+      // server. Visiting the alerts page is what marks them seen.
+      const storageKey = alertSeenStorageKey(user.id);
+      const seenAt = window.localStorage.getItem(storageKey);
+
+      const params = new URLSearchParams({ unread_count: "1" });
+      // Only used by a database from before the column existed.
+      if (seenAt) params.set("seen_at", seenAt);
+      const response = await fetch(`/api/alerts?${params}`);
+      if (response.status === 401) {
+        requestSessionCheck();
+        return;
+      }
+      if (!response.ok) return;
+      const data = await response.json();
+      setUnreadAlertCount(Number(data.unreadCount) || 0);
+    } catch {
+      // Badge counts are best-effort; the live refresh retries on the next poll.
+    }
+  }, [requestSessionCheck, user.id]);
+
+  const loadPendingApprovals = useCallback(async () => {
+    if (user.role !== "admin") {
+      setPendingApprovalCount(0);
+      return;
+    }
+
+    try {
+      const [itemsResponse, changesResponse, dutyResponse] = await Promise.all([
+        fetch("/api/items?status=pending&limit=1"),
+        fetch("/api/change-requests?pending_count=1"),
+        fetch("/api/duty-bypass-requests?pending_count=1"),
+      ]);
+      if (
+        itemsResponse.status === 401 ||
+        changesResponse.status === 401 ||
+        dutyResponse.status === 401
+      ) {
+        requestSessionCheck();
+        return;
+      }
+      if (!itemsResponse.ok || !changesResponse.ok || !dutyResponse.ok) return;
+      const [itemsData, changesData, dutyData] = await Promise.all([
+        itemsResponse.json(),
+        changesResponse.json(),
+        dutyResponse.json(),
+      ]);
+
+      setPendingApprovalCount(
+        (Number(itemsData.total) || 0) +
+          (Number(changesData.pendingCount) || 0) +
+          (Number(dutyData.pendingCount) || 0)
+      );
+    } catch {
+      // Badge counts are best-effort; the live refresh retries on the next poll.
+    }
+  }, [requestSessionCheck, user.role]);
+
+  const loadNavBadges = useCallback(async () => {
+    await Promise.all([loadUnreadAlerts(), loadPendingApprovals()]);
+  }, [loadPendingApprovals, loadUnreadAlerts]);
+
+  useLiveRefresh(loadNavBadges);
+
+  useEffect(() => {
+    void loadNavBadges();
+  }, [pathname, loadNavBadges]);
+
+  useEffect(() => {
+    const onAlertsSeen = () => void loadNavBadges();
+    window.addEventListener("cafetrack:alerts-seen", onAlertsSeen);
+    return () => window.removeEventListener("cafetrack:alerts-seen", onAlertsSeen);
+  }, [loadNavBadges]);
 
   // Navigating should dismiss the drawer, otherwise the panel stays over the
   // page the person just asked for. Reached by tapping a link *or* by any other
@@ -133,12 +223,44 @@ export function Nav({
   // dependency that could leave the page frozen.
 
   async function logout() {
-    await fetch("/api/auth/logout", { method: "POST" });
-    router.replace("/login");
+    if (logoutBusy) return;
+    setLogoutBusy(true);
+    setLogoutError(null);
+
+    try {
+      const response = await fetch("/api/auth/logout", { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Could not log out.");
+      setLogoutConfirmOpen(false);
+      router.replace("/login");
+    } catch (error) {
+      setLogoutError(
+        error instanceof Error ? error.message : "Could not log out. Please try again."
+      );
+    } finally {
+      setLogoutBusy(false);
+    }
   }
 
   return (
     <>
+      <ConfirmDialog
+        open={logoutConfirmOpen}
+        onCancel={() => {
+          if (logoutBusy) return;
+          setLogoutConfirmOpen(false);
+          setLogoutError(null);
+        }}
+        onConfirm={logout}
+        title="Log out?"
+        message={
+          logoutError ??
+          `Are you sure you want to log out of your ${user.role} account?`
+        }
+        confirmLabel={logoutBusy ? "Logging out..." : "Log out"}
+        tone="warning"
+      />
+
       {/* Tap-to-close backdrop. lg:hidden because the sidebar is permanent there. */}
       <div
         onClick={onClose}
@@ -150,37 +272,25 @@ export function Nav({
 
       <aside
         aria-label="Main navigation"
-        className={`fixed inset-y-0 left-0 z-40 flex w-64 shrink-0 flex-col bg-cocoa-700 transition-transform duration-200 lg:static lg:z-auto lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-40 flex min-h-0 w-60 shrink-0 flex-col bg-[#241811] text-cream-50 transition-transform duration-200 lg:sticky lg:top-0 lg:h-dvh lg:z-auto lg:translate-x-0 ${
           open ? "translate-x-0" : "-translate-x-full"
         }`}
       >
-        {/* ---- brand + user ---- */}
-        <div className="flex items-center gap-3 border-b border-white/10 px-4 py-5">
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-cream-100 text-sm font-bold text-cocoa-700">
-            {initials(user.fullName) || <CupMark className="h-5 w-5" />}
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-sm font-semibold text-cream-50">
-              {user.fullName}
-            </div>
-            <div className="text-[10px] font-bold uppercase tracking-wider text-cream-300/60">
-              {user.role}
-            </div>
-          </div>
+        <div className="flex shrink-0 items-center justify-between border-b border-white/10 px-4 py-4">
+          <CafeTrackBrand onDark />
           <button
             onClick={onClose}
             aria-label="Close menu"
-            className="-mr-1 rounded-lg p-2 text-cream-100/70 transition-colors hover:bg-white/10 hover:text-cream-50 lg:hidden"
+            className="-mr-2 rounded-lg p-2 text-cream-100/70 transition-colors hover:bg-white/10 hover:text-cream-50 lg:hidden"
           >
             <CloseIcon className="h-5 w-5" />
           </button>
         </div>
 
-        {/* ---- nav ---- */}
-        <nav className="flex-1 overflow-y-auto px-2 py-3">
+        <nav className="sidebar-nav min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-3 py-2 lg:overflow-hidden">
           {groups.map((group) => (
-            <div key={group.title} className="mb-4">
-              <div className="px-3 pb-1.5 text-[10px] font-bold uppercase tracking-wider text-cream-300/50">
+            <div key={group.title} className="mb-2">
+              <div className="px-3 pb-1 pt-1 text-[10px] font-bold uppercase tracking-[0.16em] text-cream-300/40">
                 {group.title}
               </div>
               <div className="space-y-0.5">
@@ -192,14 +302,36 @@ export function Nav({
                       key={item.href}
                       href={item.href}
                       onClick={onClose}
-                      className={`flex min-h-[44px] items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm transition-[background-color,color,transform] duration-150 ease-out active:scale-[0.98] lg:min-h-0 lg:py-2 ${
+                      aria-label={
+                        item.href === "/alerts" && unreadAlertCount > 0
+                          ? `Alerts, ${unreadAlertCount} unread`
+                          : item.href === "/approvals" && pendingApprovalCount > 0
+                            ? `Approvals, ${pendingApprovalCount} awaiting review`
+                            : undefined
+                      }
+                      aria-current={active ? "page" : undefined}
+                      className={`flex min-h-[44px] items-center gap-3 rounded-lg border px-3 py-2.5 text-sm transition-[background-color,color,border-color,transform] duration-150 ease-out active:scale-[0.98] lg:min-h-0 lg:py-2 ${
                         active
-                          ? "bg-cream-300 font-semibold text-cocoa-900"
-                          : "text-cream-100/75 hover:bg-white/10 hover:text-cream-50"
+                          ? "border-[#c8a274]/35 bg-[#38261c] font-semibold text-cream-50"
+                          : "border-transparent text-cream-100/65 hover:bg-white/5 hover:text-cream-50"
                       }`}
                     >
-                      <item.icon className="h-4 w-4 shrink-0" />
+                      <item.icon
+                        className={`h-4 w-4 shrink-0 ${
+                          active ? "text-cream-400" : "text-cream-100/65"
+                        }`}
+                      />
                       <span className="truncate">{item.label}</span>
+                      {item.href === "/alerts" && unreadAlertCount > 0 && (
+                        <span className="ml-auto min-w-5 rounded-full bg-terracotta-700 px-1.5 py-0.5 text-center text-[10px] font-bold leading-none text-white">
+                          {unreadAlertCount > 99 ? "99+" : unreadAlertCount}
+                        </span>
+                      )}
+                      {item.href === "/approvals" && pendingApprovalCount > 0 && (
+                        <span className="ml-auto min-w-5 rounded-full bg-terracotta-700 px-1.5 py-0.5 text-center text-[10px] font-bold leading-none text-white">
+                          {pendingApprovalCount > 99 ? "99+" : pendingApprovalCount}
+                        </span>
+                      )}
                     </Link>
                   );
                 })}
@@ -208,15 +340,54 @@ export function Nav({
           ))}
         </nav>
 
-        {/* ---- footer ---- */}
-        <div className="border-t border-white/10 p-3">
-          <button
-            onClick={logout}
-            className="flex min-h-[44px] w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-sm font-medium text-cream-100/75 transition-[background-color,color,transform] duration-150 ease-out hover:bg-white/10 hover:text-cream-50 active:scale-[0.98] lg:min-h-0 lg:py-2"
-          >
-            <LogOutIcon className="h-4 w-4 shrink-0" />
-            Log out
-          </button>
+        <div className="shrink-0 border-t border-white/10 p-3">
+          <div className="flex items-center gap-2.5 rounded-lg px-2 py-2">
+            {user.role === "staff" ? (
+              <Link
+                href="/profile"
+                aria-label="My Profile"
+                title="My Profile"
+                className="flex min-w-0 flex-1 items-center gap-2.5 rounded-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cream-300"
+              >
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#38261c] text-xs font-bold text-cream-300">
+                  {initials(user.fullName) || <CupMark className="h-5 w-5" />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-semibold text-cream-50">
+                    {user.fullName}
+                  </div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-cream-300/55">
+                    My Profile · {user.role}
+                  </div>
+                </div>
+              </Link>
+            ) : (
+              <div className="flex min-w-0 flex-1 items-center gap-2.5 rounded-md px-2 py-1.5">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#38261c] text-xs font-bold text-cream-300">
+                  {initials(user.fullName) || <CupMark className="h-5 w-5" />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-semibold text-cream-50">
+                    {user.fullName}
+                  </div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-cream-300/55">
+                    {user.role}
+                  </div>
+                </div>
+              </div>
+            )}
+            <button
+              onClick={() => {
+                setLogoutError(null);
+                setLogoutConfirmOpen(true);
+              }}
+              aria-label="Log out"
+              title="Log out"
+              className="rounded-lg p-2 text-cream-100/55 transition-colors hover:bg-white/10 hover:text-cream-50"
+            >
+              <LogOutIcon className="h-4 w-4" />
+            </button>
+          </div>
         </div>
       </aside>
     </>

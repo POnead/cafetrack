@@ -21,7 +21,7 @@
  * the join paths for the four embeds the app uses live in RELATIONS below.
  */
 import { PGlite } from "@electric-sql/pglite";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { startAutoBackup } from "./backup";
 import { startEmailScheduler } from "./email";
@@ -160,6 +160,12 @@ const RELATIONS: Record<
     foreignKey: "transaction_id",
     many: true,
   },
+  "items.inventory_batches": {
+    table: "inventory_batches",
+    localKey: "id",
+    foreignKey: "item_id",
+    many: true,
+  },
   "email_notifications.email_recipients": {
     table: "email_recipients",
     localKey: "recipient_id",
@@ -242,6 +248,41 @@ function parseSelect(select: string): {
 /* ------------------------------------------------------------------ */
 
 const DB_DIR = process.env.CAFETRACK_DB_DIR || join(process.cwd(), ".pglite");
+
+if (!process.env.CAFETRACK_DB_DIR) {
+  const isGeneratedRestoreDir = (name: string) =>
+    name === ".pglite.replaced" ||
+    /^\.pglite\.replaced-[0-9T:.+-]+$/i.test(name) ||
+    /^\.pglite\.restore-(?:old|staging)-[0-9A-Za-z.-]+$/i.test(name);
+
+  const strayDirs = (() => {
+    try {
+      return readdirSync(process.cwd(), { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && /^\.pglite(?:[-.].+)?$/i.test(entry.name))
+        .map((entry) => entry.name)
+        // dev:test deliberately keeps its separate database here. The normal
+        // app always opens only .pglite, so its presence is not a stale restore
+        // directory and must not prevent API routes from starting.
+        .filter(
+          (name) =>
+            name !== ".pglite" &&
+            name !== ".pglite-test" &&
+            !isGeneratedRestoreDir(name)
+        );
+    } catch {
+      return [] as string[];
+    }
+  })();
+
+  if (strayDirs.length > 0) {
+    const message =
+      `[local-db] Found stale local DB directories: ${strayDirs.join(", ")}. ` +
+      "A running dev:test server or an earlier password-recovery run can leave them behind. " +
+      "Stop the stale server and remove those directories or set CAFETRACK_DB_DIR to the database you want to use.";
+    console.error(message);
+    throw new Error(message);
+  }
+}
 
 // Next.js re-evaluates modules on hot reload, so keep the instance on
 // globalThis — otherwise dev mode would open the same database twice.
@@ -380,14 +421,15 @@ async function seedIfEmpty(pg: PGlite) {
     await pg.query(
       `insert into items
          (sku, name, category_id, location_id, physical_form, unit,
-          quantity, low_stock_threshold, expiration_date)
+          quantity, low_stock_threshold, expiration_date, expirable)
        values (
          'CT-' || upper(substr(regexp_replace($1, '[^A-Za-z]', '', 'g'), 1, 3))
                 || '-' || upper(substr(md5(random()::text), 1, 4)),
          $1,
          (select id from categories where name = $2),
          (select id from locations where name = $3),
-         $4, $5, $6, $7, $8
+         $4, $5, $6, $7, $8,
+         case when $1 in ('16oz Paper Cups', 'Cup Lids') then false else true end
        )`,
       [name, cat, loc, form, unit, qty, low, exp]
     );
@@ -997,6 +1039,16 @@ const RPC: Record<
       p.p_actor_id ?? null,
       p.p_decision,
       p.p_note ?? null,
+    ],
+  },
+  correct_item_batch_counts: {
+    sql: `select to_jsonb(x) as out from correct_item_batch_counts($1,$2,$3::jsonb,$4::jsonb,$5) as x`,
+    args: (p) => [
+      p.p_item_id,
+      p.p_expected_version,
+      JSON.stringify(p.p_patch ?? {}),
+      JSON.stringify(p.p_batch_adjustments ?? []),
+      p.p_reason,
     ],
   },
   enqueue_daily_summary: {

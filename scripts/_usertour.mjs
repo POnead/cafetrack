@@ -373,6 +373,7 @@ try {
 
   await admin.goto(`${BASE}/settings`, { waitUntil: "networkidle" });
   await settled(admin);
+  await admin.getByRole("tab", { name: /storage/i }).click();
 
   // --- create the category and location this tour needs ---------------
   // Each list is its own Card with a heading, so the Add button is found
@@ -441,7 +442,14 @@ try {
     const list = await (await fetch("/api/refs/categories")).json();
     const seeded = (list.items ?? []).find((c) => c.name === "Coffee");
     if (!seeded) return { skipped: true };
-    const r = await fetch(`/api/refs/categories/${seeded.id}`, { method: "DELETE" });
+    const r = await fetch(`/api/refs/categories/${seeded.id}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        reason: "User tour in-use category guard",
+        confirm_password: "admin123",
+      }),
+    });
     const d = await r.json().catch(() => ({}));
     return { status: r.status, error: d.error ?? "" };
   });
@@ -672,12 +680,12 @@ try {
 
   // --- the ids have to be unique across the two rendered copies ----------
   // Regression guard: the restock line used to emit the same id twice, which
-  // left the "New expiry date" label pointing at the copy hidden by the
+  // left the "Expiration date" label pointing at the copy hidden by the
   // current breakpoint, so clicking it did nothing on a desktop.
   const dupes = await duplicateIds(admin);
   check("no id on the restock cart is duplicated", dupes.length === 0, dupes.slice(0, 4).join(", "));
 
-  const visibleLabel = admin.getByText(/^new expiry date$/i).filter({ visible: true }).first();
+  const visibleLabel = admin.getByText(/^expiration date$/i).filter({ visible: true }).first();
   await visibleLabel.click();
   await admin.waitForTimeout(400);
   const focusedIsVisible = await admin.evaluate((s) => {
@@ -696,7 +704,7 @@ try {
   // A batch that is too close to its date is warned about before the commit.
   const tooSoon = day(3);
   const expField = admin.locator(`input[id^="exp-${sku}-"]:visible`).first();
-  check("the restock line offers a new expiry date", await expField.isVisible());
+  check("the restock line offers an expiration date", await expField.isVisible());
   await expField.fill(tooSoon);
   await admin.waitForTimeout(800);
   check(
@@ -1348,7 +1356,14 @@ try {
     const l = (ls.items ?? []).find((x) => x.name === loc);
     out.push(
       l
-        ? `location: ${(await fetch(`/api/refs/locations/${l.id}`, { method: "DELETE" })).status}`
+        ? `location: ${(await fetch(`/api/refs/locations/${l.id}`, {
+            method: "DELETE",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              reason: "User tour cleanup",
+              confirm_password: "admin123",
+            }),
+          })).status}`
         : `location: not found (looking for "${loc}", saw ${(ls.items ?? []).length})`
     );
 
@@ -1356,7 +1371,14 @@ try {
     const c = (cs.items ?? []).find((x) => x.name === cat);
     out.push(
       c
-        ? `category: ${(await fetch(`/api/refs/categories/${c.id}`, { method: "DELETE" })).status}`
+        ? `category: ${(await fetch(`/api/refs/categories/${c.id}`, {
+            method: "DELETE",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              reason: "User tour cleanup",
+              confirm_password: "admin123",
+            }),
+          })).status}`
         : `category: not found (looking for "${cat}", saw ${(cs.items ?? []).length})`
     );
     return out;

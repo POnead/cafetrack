@@ -8,6 +8,7 @@ import {
 } from "node:crypto";
 import type { DbFacade } from "./supabase";
 import { resolveAuthSecret } from "./secret";
+import type { SessionRole } from "./session-policy";
 
 /*
  * The signing key, resolved on first use rather than at import time.
@@ -32,20 +33,26 @@ function secret(): Uint8Array {
 export const COOKIE_NAME = "cafetrack_session";
 
 /**
- * Fallback session lifetime. The live value lives in `settings` under
- * session_timeout_minutes and is read by the route handlers, which then pass it
- * in here — auth.ts deliberately does not import the settings module because
- * settings -> supabase -> local-db -> auth would be an import cycle.
+ * Fallback session lifetime. The live value is role-specific and read by the
+ * route handlers, which then pass it in here — auth.ts deliberately does not
+ * import settings statically because settings -> supabase -> local-db -> auth
+ * would be an import cycle.
  */
 export const SESSION_MINUTES = 15;
 
-export type Role = "admin" | "staff";
+export type Role = SessionRole;
+
+export async function sessionIdleLimitMs(role: Role): Promise<number> {
+  const { getRoleIdleMinutes } = await import("./settings");
+  return (await getRoleIdleMinutes(role)) * 60_000;
+}
 
 export type SessionUser = {
   id: string;
   username: string;
   fullName: string;
   role: Role;
+  baseRole?: Role;
 };
 
 /* ---------------- password hashing (scrypt, no deps) ---------------- */
@@ -71,11 +78,13 @@ export async function signSession(
   user: SessionUser,
   minutes: number = SESSION_MINUTES
 ): Promise<string> {
+  const baseRole = user.baseRole ?? user.role;
   return await new SignJWT({
     id: user.id,
     username: user.username,
     fullName: user.fullName,
-    role: user.role,
+    role: baseRole,
+    baseRole,
   })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
@@ -91,10 +100,33 @@ export async function readSessionToken(token: string): Promise<SessionUser | nul
       username: String(payload.username),
       fullName: String(payload.fullName),
       role: payload.role as Role,
+      baseRole: (payload.baseRole as Role | undefined) ?? (payload.role as Role),
     };
   } catch {
     return null;
   }
+}
+
+export async function hasActiveSession(
+  token: string | null | undefined,
+  lastActiveAt: string | Date | null | undefined
+): Promise<boolean> {
+  if (!token || !lastActiveAt) return false;
+  const user = await readSessionToken(token);
+  if (!user) return false;
+
+  const lastActive = timestampMilliseconds(lastActiveAt);
+  const idleFor = Date.now() - lastActive;
+  return (
+    Number.isFinite(lastActive) &&
+    idleFor >= 0 &&
+    idleFor < (await sessionIdleLimitMs(user.role))
+  );
+}
+
+function timestampMilliseconds(value: unknown): number {
+  if (value instanceof Date) return value.getTime();
+  return typeof value === "string" ? Date.parse(value) : Number.NaN;
 }
 
 // Next 15 made `cookies()` async. Every caller of this (getSession, and the
@@ -119,7 +151,10 @@ export async function getSessionToken(): Promise<string | null> {
  */
 const SESSION_CHECK_TTL_MS = 5_000;
 const SESSION_CACHE_MAX = 5_000;
-const sessionChecks = new Map<string, { at: number; ok: boolean }>();
+const sessionChecks = new Map<
+  string,
+  { at: number; ok: boolean; role: Role; fullName: string }
+>();
 
 function sessionCacheKey(token: string): string {
   return createHash("sha256").update(token).digest("base64url");
@@ -130,9 +165,14 @@ export function clearSessionCache(): void {
   sessionChecks.clear();
 }
 
-function rememberSessionCheck(key: string, ok: boolean): void {
+function rememberSessionCheck(
+  key: string,
+  ok: boolean,
+  role: Role,
+  fullName: string
+): void {
   if (sessionChecks.size >= SESSION_CACHE_MAX) sessionChecks.clear();
-  sessionChecks.set(key, { at: Date.now(), ok });
+  sessionChecks.set(key, { at: Date.now(), ok, role, fullName });
 }
 
 export async function getSession(): Promise<SessionUser | null> {
@@ -154,32 +194,67 @@ export async function getSession(): Promise<SessionUser | null> {
   const key = sessionCacheKey(token);
   const cached = sessionChecks.get(key);
   if (cached && Date.now() - cached.at < SESSION_CHECK_TTL_MS) {
-    return cached.ok ? user : null;
+    return cached.ok
+      ? { ...user, role: cached.role, fullName: cached.fullName }
+      : null;
   }
 
   try {
     const { db } = await import("@/lib/supabase");
     const { data: row, error } = await db()
       .from("users")
-      .select("session_token, is_active")
+      .select("session_token, is_active, session_last_active_at, role, position, full_name")
       .eq("id", user.id)
       .maybeSingle();
 
     if (error) {
       // Infrastructure failure, not an authentication decision. Log it so the
-      // failure is visible, then fall back to the JWT's own expiry rather than
-      // turning a transient database blip into a cafe-wide logout.
+      // failure is visible, then fall back to JWT expiry for transient outages.
+      // A missing idle-tracking column is different: enforcement is impossible
+      // until the migration is applied, so refuse the session instead.
       console.error("session revocation check failed:", error.message);
+      if (error.message.includes("session_last_active_at")) return null;
       return user;
     }
 
+    let effectiveRole: Role = row?.role === "admin" ? "admin" : "staff";
+    if (row?.role === "staff" && row.position) {
+      try {
+        const { getPositionAccess } = await import("./staff-positions");
+        if (await getPositionAccess(String(row.position)) === "admin") {
+          effectiveRole = "admin";
+        }
+      } catch (error) {
+        console.error(
+          "staff position access could not be resolved:",
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+    }
+
+    const lastActive = timestampMilliseconds(row?.session_last_active_at);
+    const idleFor = Date.now() - lastActive;
     const ok =
       Boolean(row) &&
       row.is_active !== false &&
-      row.session_token === token;
+      row.session_token === token &&
+      Number.isFinite(lastActive) &&
+      idleFor >= 0 &&
+      idleFor < (await sessionIdleLimitMs(effectiveRole));
 
-    rememberSessionCheck(key, ok);
-    return ok ? user : null;
+    const fullName =
+      typeof row?.full_name === "string" && row.full_name.trim()
+        ? row.full_name
+        : "Admin";
+    rememberSessionCheck(key, ok, effectiveRole, fullName);
+    return ok
+      ? {
+          ...user,
+          role: effectiveRole,
+          fullName,
+          baseRole: row?.role === "admin" ? "admin" : "staff",
+        }
+      : null;
   } catch (e) {
     console.error(
       "session revocation check threw:",
@@ -251,8 +326,8 @@ export async function setSessionCookie(
     name: COOKIE_NAME,
     value: token,
     httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+    secure: process.env.NODE_ENV === "production" || process.env.CAFETRACK_DEV_HTTPS === "1",
     path: "/",
     maxAge: minutes * 60,
   });
@@ -265,7 +340,10 @@ export async function setSessionCookie(
     try {
       await dbClient
         .from("users")
-        .update({ session_token: token })
+        .update({
+          session_token: token,
+          session_last_active_at: new Date().toISOString(),
+        })
         .eq("id", userId);
     } catch (e) {
       console.error("Failed to set session_token:", e instanceof Error ? e.message : String(e));
@@ -279,8 +357,8 @@ export async function clearSessionCookie(userId?: string, dbClient?: DbFacade) {
     name: COOKIE_NAME,
     value: "",
     httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+    secure: process.env.NODE_ENV === "production" || process.env.CAFETRACK_DEV_HTTPS === "1",
     path: "/",
     maxAge: 0,
   });
@@ -291,7 +369,7 @@ export async function clearSessionCookie(userId?: string, dbClient?: DbFacade) {
     try {
       await dbClient
         .from("users")
-        .update({ session_token: null })
+        .update({ session_token: null, session_last_active_at: null })
         .eq("id", userId);
     } catch (e) {
       console.error("Failed to clear session_token:", e instanceof Error ? e.message : String(e));
@@ -300,7 +378,10 @@ export async function clearSessionCookie(userId?: string, dbClient?: DbFacade) {
 }
 
 export function newStaffToken(): string {
-  return "CT-STF-" + randomBytes(5).toString("hex").toUpperCase();
+  // 128 bits of entropy. The old "CT-STF-" + five bytes (40 bits) was
+  // enumerable offline: a badge token is a credential, and 2^40 is small
+  // enough for a determined scanner. 32 hex characters stay QR-friendly.
+  return "CT-STF-" + randomBytes(16).toString("hex").toUpperCase();
 }
 
 /**

@@ -164,9 +164,9 @@ const PRINT_WIDTH = 320;
 const LABEL_PADDING = 14;
 
 /**
- * Builds one label per entry, then opens a print-ready window. The print window
- * is a separate document, so every barcode has to be drawn into it before the
- * markup is written.
+ * Builds one label per entry in an attached, same-origin frame. Appending the
+ * frame before reading its document is important: some browsers return null
+ * for contentDocument while the frame is detached.
  */
 export async function printBarcodeLabelsAsync(labels: BarcodeLabel[]) {
   if (labels.length === 0) return;
@@ -215,16 +215,7 @@ export async function printBarcodeLabelsAsync(labels: BarcodeLabel[]) {
         )}</div>`
       : "");
 
-  /*
-   * Print via an embedded iframe rather than window.open().
-   *
-   * window.open("", "_blank", ...) is treated as an unsolicited pop-up by
-   * every modern browser, so the print window never appears and the person
-   * is left with nothing at all — no label, no error, just a button that
-   * seems to do nothing. An iframe is not a pop-up. It is part of this
-   * page, so it opens reliably everywhere, and it gives the same result: a
-   * document of labels that the browser can print.
-   */
+  // Use an attached same-origin iframe to avoid popup blockers.
   const iframe = document.createElement("iframe");
   iframe.style.position = "fixed";
   iframe.style.top = "0";
@@ -235,15 +226,17 @@ export async function printBarcodeLabelsAsync(labels: BarcodeLabel[]) {
   iframe.style.background = "#fff";
   iframe.style.zIndex = "99999";
   iframe.setAttribute("aria-label", "Barcode label print preview");
+  document.body.appendChild(iframe);
 
   const doc = iframe.contentDocument;
   if (!doc) {
-    alert("This browser cannot print barcode labels.");
-    return;
+    iframe.remove();
+    throw new Error("Could not open the barcode print preview. Try another browser.");
   }
 
-  doc.open();
-  doc.write(`
+  try {
+    doc.open();
+    doc.write(`
     <html>
       <head>
         <title>CafeTrack — Barcode Labels</title>
@@ -267,8 +260,8 @@ export async function printBarcodeLabelsAsync(labels: BarcodeLabel[]) {
       </head>
       <body>
         <div class="no-print" style="margin-bottom:16px">
-          <button class="close" onclick="window.frameElement.remove()">Close</button>
-          <button onclick="window.print()" style="padding:8px 16px;border-radius:999px;border:1px solid #D99B3F;background:#E8B563;color:#3D2B1F;font-weight:600;font-size:14px;cursor:pointer">
+          <button class="close">Close preview</button>
+          <button class="print" style="padding:8px 16px;border-radius:999px;border:1px solid #D99B3F;background:#E8B563;color:#3D2B1F;font-weight:600;font-size:14px;cursor:pointer">
             Print
           </button>
         </div>
@@ -277,17 +270,22 @@ export async function printBarcodeLabelsAsync(labels: BarcodeLabel[]) {
       </body>
     </html>
   `);
-  doc.close();
+    doc.close();
 
-  document.body.appendChild(iframe);
-
-  /*
-   * Clicking Close removes the iframe from the page. This runs inside the
-   * iframe's own window, so "this" is the Close button itself.
-   */
-  doc.querySelector("button.close")?.addEventListener("click", () => {
+    doc.querySelector("button.close")?.addEventListener("click", () => iframe.remove());
+    doc.querySelector("button.print")?.addEventListener("click", () => {
+      const printWindow = iframe.contentWindow;
+      if (!printWindow || typeof printWindow.print !== "function") {
+        iframe.remove();
+        throw new Error("This browser does not support printing barcode labels.");
+      }
+      printWindow.focus();
+      printWindow.print();
+    });
+  } catch (error) {
     iframe.remove();
-  });
+    throw error;
+  }
 }
 
 function escapeHtml(s: string) {

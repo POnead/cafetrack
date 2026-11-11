@@ -1,5 +1,5 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail, badId, readBody } from "@/lib/api";
+import { handler, ok, fail, badId, readBody, dbFail } from "@/lib/api";
 import { requireUser, requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 
@@ -14,7 +14,7 @@ export const GET = handler(async () => {
     .select("id, name")
     .order("name", { ascending: true });
 
-  if (error) return fail(error.message, 500);
+  if (error) return dbFail(error);
 
   return ok({ items: data ?? [] });
 });
@@ -44,7 +44,7 @@ export const POST = handler(async (req: Request) => {
     .select("id, name")
     .single();
 
-  if (error) return fail(error.message, 500);
+  if (error) return dbFail(error);
 
   await audit(admin, "CATEGORY_CREATE", "category", data.id, { name });
 

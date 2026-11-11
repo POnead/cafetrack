@@ -355,7 +355,7 @@ export const MAX_PITCH = 18;
 export const POSE_HYSTERESIS_DEG = 7;
 
 /** Why a reading is not one of the three poses. */
-export type PoseBlock = "between" | "tilted" | "pitched" | "too-far";
+export type PoseBlock = "between" | "signal" | "tilted" | "pitched" | "too-far";
 
 export type PoseState = {
   /** The angle the head is showing, or null when it is not a usable one. */

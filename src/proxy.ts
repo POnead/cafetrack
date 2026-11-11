@@ -5,9 +5,110 @@ import { dbMode } from "@/lib/api";
 
 const COOKIE_NAME = "cafetrack_session";
 
+/**
+ * Is Content Security Policy served the old, wide way?
+ *
+ * The default is nonce-based: script-src carries no 'unsafe-inline', and inline
+ * scripts run only when the proxy stamped them with this request's nonce. If a
+ * deployment has to run on a browser that breaks under that (an old tablet, a
+ * locked-down kiosk shell), setting CAFETRACK_CSP_LEGACY=1 restores the previous
+ * policy — with 'unsafe-inline' — rather than leaving the operator with no way
+ * to diagnose it. It is deliberately opt-out-by-env, not a code path anyone
+ * reaches by accident.
+ */
+const CSP_LEGACY = process.env.CAFETRACK_CSP_LEGACY === "1";
+
+const isDev = process.env.NODE_ENV !== "production";
+
+/**
+ * The policy documents get.
+ *
+ * Production is strict: `'nonce-<txn>' 'strict-dynamic'` means an inline script
+ * only runs when the proxy stamped it, and `'wasm-unsafe-eval'` covers the face
+ * engines' compiled WASM. Development keeps `'unsafe-inline' 'unsafe-eval'`
+ * (no 'strict-dynamic'), because the dev live-reload scripts are inline and
+ * un-nonoised, and locking a development server down to a policy one HMR
+ * reload disproves proves nothing about production.
+ *
+ * styles keep 'unsafe-inline' in both: Next's SSR emits inline style tags, and
+ * a style injection buys an attacker nothing this API's cookies do not already
+ * require a session for. Tightening styles would mean shipping Next's styling
+ * out of line in the process — a bigger day's work than this file is for.
+ */
+function contentSecurityPolicy(nonce: string): string {
+  if (CSP_LEGACY) {
+    return [
+      "default-src 'self'",
+      `script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'${isDev ? " 'unsafe-eval'" : ""}`,
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: blob:",
+      "media-src 'self' blob:",
+      "font-src 'self' data:",
+      "connect-src 'self'",
+      "worker-src 'self' blob:",
+      "object-src 'none'",
+      "base-uri 'self'",
+      "form-action 'self'",
+      "frame-ancestors 'none'",
+    ].join("; ");
+  }
+
+  return [
+    "default-src 'self'",
+    // prod: nonce + strict-dynamic; dev: wide enough for Turbopack's dev tools
+    isDev
+      ? `script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'`
+      : `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' 'wasm-unsafe-eval'`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "media-src 'self' blob:",
+    "font-src 'self' data:",
+    "connect-src 'self'",
+    "worker-src 'self' blob:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join("; ");
+}
+
+/**
+ * One-pass forwarding of the Security-Policy and nonce into the request.
+ *
+ * This is what makes the nonce work at all in the public paths: Next builds its
+ * inline bootstrap scripts at render time, and it learns the nonce from the
+ * Content-Security-Policy header on the *request*. /login returns early below,
+ * so the header has to be attached before any path decides how to respond —
+ * otherwise the login screen is the one page in the app left with un-nonoised
+ * inline scripts, and a nonce-only policy would keep it permanently blank.
+ *
+ * The request-header copy has quotes and spaces escaped (the % encoding below)
+ * — the browser requirement for a header value traveling as a merge target
+ * (older Safari rejected a CSP request header with bare quotes), and Next's
+ * own documented middleware example does the same.
+ */
+function withCsp(req: NextRequest): { headers: Headers; nonce: string } {
+  const nonce = btoa(crypto.randomUUID()).replace(/[^A-Za-z0-9+/=]/g, "");
+  const policy = contentSecurityPolicy(nonce);
+  const headers = new Headers(req.headers);
+  headers.set("x-cafetrack-nonce", nonce);
+  headers.set(
+    "content-security-policy",
+    policy.replace(/'/g, "%27").replace(/\s/g, "%20")
+  );
+  return { headers, nonce };
+}
+
+/** Attach the response-side copy of the policy. */
+function stampCsp(res: NextResponse, nonce: string): NextResponse {
+  res.headers.set("content-security-policy", contentSecurityPolicy(nonce));
+  return res;
+}
+
 const PUBLIC_PATHS = [
   "/login",
   "/api/auth/login",
+  "/api/auth/password-recovery",
   "/api/auth/staff",
   "/api/auth/logout",
   // Face sign-in. Public for the same reason the two above are: there is no
@@ -39,6 +140,9 @@ const PUBLIC_PATHS = [
   // nothing to check here that it is not already unable to check for the other
   // three.
   "/api/auth/staff/confirm",
+  // The face-bypass request only carries a password-verified, short-lived
+  // step-two ticket; it must work before the caller has a session cookie.
+  "/api/auth/staff/duty-bypass",
   // The health check (FR-20). Public on purpose: a check that needs a session
   // cookie expires at the same moment the thing it is checking breaks — a
   // restart clears every cookie — so it would report a healthy system as down.
@@ -71,9 +175,18 @@ const PUBLIC_PATHS = [
 // `proxy` rather than `middleware`. Same behaviour, same matcher.
 export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
+  const { headers, nonce } = withCsp(req);
+
+  if (
+    pathname === "/api/auth/me" &&
+    req.nextUrl.searchParams.get("session_check") === "1" &&
+    req.nextUrl.searchParams.get("login_check") === "1"
+  ) {
+    return stampCsp(NextResponse.next({ request: { headers } }), nonce);
+  }
 
   if (PUBLIC_PATHS.some((p) => pathname === p)) {
-    return NextResponse.next();
+    return stampCsp(NextResponse.next({ request: { headers } }), nonce);
   }
 
   const token = req.cookies.get(COOKIE_NAME)?.value;
@@ -97,7 +210,7 @@ export async function proxy(req: NextRequest) {
 
   try {
     await jwtVerify(token, secret);
-    return NextResponse.next();
+    return stampCsp(NextResponse.next({ request: { headers } }), nonce);
   } catch {
     return deny(req, pathname);
   }
@@ -139,6 +252,11 @@ export const config = {
   // browser console says nothing about a sign-in page. Same class of mistake,
   // so it is excluded here rather than discovered later.
   //
+  // `mediapipe/` contains the local Face Landmarker wasm runtime used during
+  // login. Redirecting these files to /login makes both GPU and CPU setup fail
+  // with an unhelpful resource-load event, even though the model under
+  // `models/` is already public.
+  //
   // `_next/hmr` (and its webpack-mode name) is the dev live-reload socket. It
   // carries no application data, but it is fetched before anyone signs in — and
   // a redirect to /login makes the websocket handshake fail. The page still
@@ -147,6 +265,6 @@ export const config = {
   // deliberately narrow elsewhere so an RSC payload for a protected page is
   // still gated; only the socket is excluded.
   matcher: [
-    "/((?!_next/static|_next/image|_next/hmr|_next/webpack-hmr|favicon.ico|icon.svg|brand/|models/|onnx/).*)",
+    "/((?!_next/static|_next/image|_next/hmr|_next/webpack-hmr|favicon.ico|icon.svg|brand/|models/|onnx/|mediapipe/).*)",
   ],
 };

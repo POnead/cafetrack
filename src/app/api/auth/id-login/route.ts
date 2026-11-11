@@ -1,6 +1,11 @@
 import { db } from "@/lib/supabase";
 import { handler, ok, fail, clientIp } from "@/lib/api";
-import { signSession, setSessionCookie, deactivatedMessage } from "@/lib/auth";
+import {
+  signSession,
+  setSessionCookie,
+  hasActiveSession,
+  deactivatedMessage,
+} from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { getFaceEngine, getSessionMinutes, getFaceMatchThreshold } from "@/lib/settings";
 import {
@@ -18,8 +23,8 @@ import {
   findAccountByScannedId,
   nameAgrees,
   type IdLookupRow,
+  type IdProbeRow,
 } from "@/lib/id-verification/id-lookup";
-import { localOcrProvider } from "@/lib/id-verification/local-ocr";
 import { extract } from "@/lib/id-verification/ocr/extract";
 import { buildLayout } from "@/lib/id-verification/ocr/rows";
 import { disposeWorker, runOcr, languageModelPresent } from "@/lib/id-verification/ocr/engine";
@@ -96,9 +101,7 @@ export const POST = handler(async (req: Request) => {
   /*
    * Two gates before anything expensive happens.
    *
-   * The model check is the same distinction `localOcrProvider.available()` makes,
-   * repeated here because the failure is much more visible on this route: without
-   * the language file the OCR silently produces nothing, the lookup then has only
+   * Without the language file the OCR silently produces nothing, the lookup then has only
    * a fingerprint to go on, and the attempt is refused as "not recognised" —
    * which reads as "your ID is not on file" rather than "this server is not set up".
    */
@@ -213,21 +216,29 @@ export const POST = handler(async (req: Request) => {
 
   /* ---- 2. narrow to one account ---------------------------------------- */
 
-  const { data: rows, error: rowsError } = await db()
+  /*
+   * Two queries, on purpose.
+   *
+   * The match decision needs four small columns per staff row — id, role, the
+   * stored fingerprint and the stored number — and nothing else. Reading
+   * `face_embedding` and the ID document images for the *whole* table here
+   * would pull every enrolled biometric into server memory on every attempt,
+   * which is slow for no reason and exactly the over-exposure rule 4 in the
+   * header promises to avoid. So the decision runs on the narrow probe rows,
+   * and only the account it found is read in full, by id.
+   */
+  const { data: probeRows, error: probeError } = await db()
     .from("users")
-    .select(
-      "id, username, full_name, is_active, role, face_enabled, face_embedding, " +
-      "id_card_hash, id_doc_number, verification_status, id_doc_front, " +
-      "deactivation_reason, deactivated_at, session_token"
-    );
+    .select("id, role, id_card_hash, id_doc_number")
+    .eq("role", "staff");
 
-  if (rowsError) {
-    console.error("id sign-in lookup failed:", rowsError.message);
+  if (probeError) {
+    console.error("id sign-in lookup failed:", probeError.message);
     return fail("Cannot reach the database. Try again in a moment.", 503);
   }
 
   const lookup = findAccountByScannedId({
-    rows: (rows ?? []) as IdLookupRow[],
+    rows: (probeRows ?? []) as IdProbeRow[],
     hash: cardHash,
     number: cardNumber,
   });
@@ -247,7 +258,41 @@ export const POST = handler(async (req: Request) => {
     return fail(UNRECOGNISED, 401);
   }
 
-  const user = lookup.candidates[0].row;
+  const candidateId = lookup.candidates[0].row.id;
+
+  const { data: userRow, error: userError } = await db()
+    .from("users")
+    .select(
+      "id, username, full_name, is_active, role, face_enabled, face_embedding, " +
+      "id_card_hash, id_doc_number, verification_status, id_doc_front, " +
+      // The gate needs the expiry to refuse a verified account whose ID has
+      // since lapsed. One small column on the one row being read.
+      "id_doc_expiry, deactivation_reason, deactivated_at, session_token, " +
+      "session_last_active_at"
+    )
+    .eq("id", candidateId)
+    .eq("role", "staff")
+    .maybeSingle();
+
+  if (userError) {
+    console.error("id sign-in complete read failed:", userError.message);
+    return fail("Cannot reach the database. Try again in a moment.", 503);
+  }
+
+  if (!userRow) {
+    /*
+     * The account the probe matched is gone — deleted between the two reads.
+     * Same generic refusal as a card that is not on file, counted against the
+     * same throttle key.
+     */
+    console.warn(
+      `id sign-in refused: matched account no longer present for a card ending ${cardHash.slice(-4)}`
+    );
+    await recordLoginAttempt(key, ID_LOGIN_METHOD, false);
+    return fail(UNRECOGNISED, 401);
+  }
+
+  const user = userRow as IdLookupRow;
 
   /* ---- 3. the face, against that one account --------------------------- */
 
@@ -331,7 +376,14 @@ export const POST = handler(async (req: Request) => {
     });
   }
 
-  const idGate = await getIdGate(user as never);
+  const idGate = await getIdGate({
+    id: user.id,
+    role: user.role ?? "staff",
+    is_active: user.is_active,
+    verification_status: user.verification_status,
+    id_doc_front: user.id_doc_front,
+    id_doc_expiry: user.id_doc_expiry,
+  });
   if (idGate.required && !idGate.cleared) {
     await recordLoginAttempt(key, ID_LOGIN_METHOD, false);
     return fail(idGate.message ?? "This account is not cleared to sign in yet.", 403, {
@@ -359,7 +411,7 @@ export const POST = handler(async (req: Request) => {
     role: "staff" as const,
   };
 
-  const minutes = await getSessionMinutes();
+  const minutes = await getSessionMinutes("staff");
   const token = await signSession(session, minutes);
   await setSessionCookie(token, minutes, user.id, db());
 
@@ -399,7 +451,10 @@ export const POST = handler(async (req: Request) => {
 
   return ok({
     user: session,
-    session_conflict: Boolean(user.session_token),
+    session_conflict: await hasActiveSession(
+      user.session_token,
+      user.session_last_active_at
+    ),
     /*
      * Advisory, and labelled as such on the client. A mismatch here is a sentence
      * for the person who just signed in to glance at, not a rejection.

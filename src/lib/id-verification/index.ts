@@ -1,33 +1,23 @@
 ﻿/**
  * Choosing and running the ID check.
  *
- * This is the only module the routes talk to. It picks which providers to run,
- * survives any of them failing, merges what they read off the document, and adds
- * the one check that is not provider-specific: comparing the name on the card
- * against the name on the account.
+ * This is the only module the routes talk to. It always runs OCR.space, adds
+ * HyperVerge when configured and local document-shape checks, merges what they
+ * read off the document, and compares the card name with the account name.
  *
  * ## The provider order
  *
- * The external provider runs first when it is configured, and the local checks
- * run alongside it — not instead of it. Three reasons:
+ * OCR.space is required. HyperVerge runs when configured, alongside local
+ * document-shape checks. Face++ portrait comparison is handled separately by the
+ * upload route; it does not fall back to a local face model.
  *
- *   - The local face comparison and the vendor's face comparison disagree often
- *     enough that one of them being available is worth having, and an admin
- *     seeing two independent readings can tell a genuine borderline from a
- *     threshold that happened to land badly.
- *   - They fail independently. The vendor can time out, rate-limit, or have no
- *     Philippine template and still leave a usable comparison behind.
- *   - It costs nothing to run both, and the local one has no dependency to be
- *     missing.
- *
- * `local` always runs. That is what makes the feature work on a café machine
- * with no HyperVerge account, no Docker and no network.
+ * `local` always runs for supplemental document checks; it does not read ID text.
  */
 
 import { hypervergeConfigured, hypervergeProvider } from "./hyperverge";
-import { localOcrProvider } from "./local-ocr";
-import { DEFAULT_ID_MATCH_THRESHOLD, makeLocalProvider } from "./local";
-import { getSetting } from "../settings";
+import { ocrSpaceConfigured, ocrSpaceProvider } from "./ocr-space";
+import { makeLocalProvider } from "./local";
+import { facePlusPlusMode } from "../facepp";
 import {
   IdProviderError,
   type IdExtractedFields,
@@ -38,137 +28,97 @@ import {
   type IdVerificationResult,
 } from "./types";
 import { nameSignal, type NameReadStatus } from "./name-signal";
+import { idTypeHasExpiry } from "./specification";
 
 export * from "./types";
 export { readImageSize } from "./image-size";
-export {
-  DEFAULT_ID_MATCH_THRESHOLD,
-  ID_MATCH_REJECT,
-  MAX_ID_MATCH_THRESHOLD,
-  MIN_ID_MATCH_THRESHOLD,
-} from "./local";
-export { localOcrProvider } from "./local-ocr";
 export type { NameReadStatus } from "./name-signal";
 
-/**
- * Whether the admin has switched the on-device reader off.
- *
- * Default on. The reader is free, runs on this machine, and sends nothing
- * anywhere — but its templates are hand-written rather than trained (see
- * ./ocr/templates.ts), so a café whose cards it reads badly needs a way to turn it
- * off without removing the whole feature.
- *
- * Read once per verification rather than per provider, so the two providers in a
- * run can never disagree about whether it is enabled.
- */
-async function localOcrEnabled(): Promise<boolean> {
-  try {
-    const raw = ((await getSetting("local_ocr_enabled")) ?? "").trim().toLowerCase();
-    return raw !== "0" && raw !== "false" && raw !== "no";
-  } catch {
-    // A settings table that cannot be read is not a reason to skip a free check
-    // that runs locally. Default on.
-    return true;
-  }
-}
-
 /** Which providers will run, given what is configured. */
-export function activeProviders(): { providers: IdVerificationProvider[]; ocrEnabled: boolean } {
-  const providers: IdVerificationProvider[] = [];
-
-  // External first, so that if it fails outright the local checks are what is
-  // left rather than the other way round.
-  if (hypervergeConfigured()) providers.push(hypervergeProvider);
-
-  // Included only when its language model is actually on disk. See
-  // `localOcrProvider.available` for why that is not the same question as whether
-  // the admin has switched it on.
-  const ocrEnabled = localOcrProvider.available();
-  if (ocrEnabled) providers.push(localOcrProvider);
-
-  return { providers, ocrEnabled };
+export function activeProviders(): IdVerificationProvider[] {
+  return [
+    ocrSpaceProvider,
+    ...(hypervergeConfigured() ? [hypervergeProvider] : []),
+  ];
 }
 
 /**
- * A one-line description of what will actually run, for the admin to see before
- * uploading.
- *
- * Async because it consults the setting, which is in the database. Reporting a
- * provider the admin has switched off would be worse than reporting nothing: the
- * upload form says this list is what is about to happen, and then something else
- * happens.
+ * A one-line description of what will run, for the admin to see before uploading.
  */
 export async function providerSummary(): Promise<{ id: string; label: string }[]> {
-  const ocrEnabled = await localOcrEnabled();
-  const { providers, ocrEnabled: ocrPresent } = activeProviders();
+  const providers = activeProviders();
+  const faceMode = facePlusPlusMode();
 
   return providers
-    .filter((p) => p.id !== "local_ocr" || (ocrEnabled && ocrPresent))
-    .map((p) => ({ id: p.id, label: p.label }))
-    .concat([{ id: "local", label: "Local checks (no external service)" }]);
+    .map((provider) => ({
+      id: provider.id,
+      label:
+        provider.id === "ocr_space" && !provider.available()
+          ? "OCR.space (API key not configured)"
+          : provider.label,
+    }))
+    .concat([
+      {
+        id: "facepp",
+        label:
+          faceMode === "enabled"
+            ? "Face++ portrait comparison"
+            : faceMode === "invalid"
+              ? "Face++ credentials need attention"
+              : "Face++ not configured",
+      },
+      { id: "local", label: "Local document checks" },
+    ]);
 }
 
 /**
  * Why the name on the card is or is not available.
  *
- * The distinction the review screen turns on. "Nothing in this app can read text"
- * and "the reader ran and found nothing on this card" are both `unknown` by tone,
- * but they call for opposite responses from the person reading them, and a single
- * boolean cannot carry the difference.
+ * The distinction the review screen turns on. "The reader ran and found nothing
+ * on this card" differs from "nothing can read text", and a single boolean cannot
+ * carry the difference.
  */
-function nameStatus(cardName: string | null | undefined, ocrEnabled: boolean): NameReadStatus {
+function nameStatus(cardName: string | null | undefined): NameReadStatus {
   if (cardName) return "ok";
-  if (hypervergeConfigured()) return "ran_but_read_nothing";
-
-  // The reader is wanted but its model is not downloaded — a first run with no
-  // internet, which on a café machine is an ordinary Tuesday rather than a fault.
-  if (ocrEnabled) return localOcrProvider.available() ? "ran_but_read_nothing" : "model_missing";
-
+  if (hypervergeConfigured() || ocrSpaceConfigured()) return "ran_but_read_nothing";
   return "no_reader_configured";
 }
 
-export type RunOptions = {
-  /** From settings.id_face_match_threshold. */
-  faceMatchThreshold?: number;
-  /** From settings.id_provider. Empty means "whatever is configured". */
-  preferredProvider?: string | null;
-};
-
 /**
- * Run every available provider and merge the answers.
+ * Run the required OCR.space provider and all configured supplemental checks.
  *
- * Never throws for a provider problem. A provider that fails contributes an
- * `unknown` signal saying so and the rest of the run carries on — a café owner
- * whose vendor is down should still get the portrait comparison and a review
- * screen, not an error.
+ * A failed OCR.space call contributes an `unknown` signal so the route can refuse
+ * the upload explicitly. Supplemental document-shape checks still run.
  */
 export async function runIdVerification(
-  input: IdVerificationInput,
-  options: RunOptions = {}
+  input: IdVerificationInput
 ): Promise<IdVerificationResult> {
-  const threshold = Number.isFinite(options.faceMatchThreshold)
-    ? (options.faceMatchThreshold as number)
-    : DEFAULT_ID_MATCH_THRESHOLD;
+  if (!ocrSpaceConfigured()) {
+    throw new IdProviderError(
+      "ocr_space",
+      "OCR.space is required for ID verification, but its API key is not configured."
+    );
+  }
 
-  // Read once, so the selection below and the name signal below cannot disagree.
-  const ocrEnabled = await localOcrEnabled();
-
-  // The local provider is always present, whether or not a vendor is configured.
-  // It is built here rather than inside chooseProviders so the threshold resolved
-  // above is the one it actually uses.
-  const chosen = chooseProviders(options.preferredProvider, threshold, ocrEnabled);
+  const chosen = [...activeProviders(), makeLocalProvider()];
 
   const signals: IdSignal[] = [];
   const fields: IdExtractedFields = {};
   const providersRun: string[] = [];
+  let detectedDocType: IdVerificationResult["detectedDocType"] = null;
   let primary = "local";
 
   for (const provider of chosen) {
     try {
       const result = await provider.verify(input);
 
-      signals.push(...result.signals);
-      mergeFields(fields, result.fields);
+      signals.push(
+        ...result.signals.filter(
+          (signal) => idTypeHasExpiry(input.docType) || !signal.id.endsWith("date_of_expiry")
+        )
+      );
+      mergeFields(fields, result.fields, idTypeHasExpiry(input.docType));
+      if (result.detectedDocType) detectedDocType = result.detectedDocType;
 
       providersRun.push(provider.id);
       // The first provider that actually read something is the one whose answer
@@ -207,35 +157,18 @@ export async function runIdVerification(
   const verdict = nameSignal(
     cardName,
     expectedName,
-    nameStatus(cardName, ocrEnabled)
+    nameStatus(cardName)
   );
 
-  /*
-   * One name, one outcome.
-   *
-   * The OCR provider also emits a per-field signal for the name, reading
-   * "Name on the card: <value> — read from beside its printed label". That is a
-   * statement about *how the text was read*; `nameSignal` is the statement about
-   * whether it matches this account. Keeping both produced two rows about one
-   * value with opposite verdicts and near-identical labels — a pass-coloured
-   * "Name on the card: A" directly above a failing "Name on the ID" — and an
-   * admin scanning for problems has no way to know the green one is about
-   * confidence rather than correctness.
-   *
-   * So when there is a name to compare against, `nameSignal` is the verdict and
-   * the per-field one is dropped. It still stands alone when there is no account
-   * name to compare, which is the only situation where "how it was read" is the
-   * whole of what there is to say.
-   *
-   * The read strategy is not lost: it travels in the verdict's evidence, and the
-   * signals are ordered by tone below, so the failing row cannot be scrolled past
-   * behind a passing one.
-   */
-  const comparable = Boolean(cardName && cardName.trim() && expectedName && expectedName.trim());
-  if (comparable) {
-    // Strip the provider's per-field name signal; the verdict replaces it.
-    for (let i = signals.length - 1; i >= 0; i--) {
-      if (signals[i].id === "ocr_full_name") signals.splice(i, 1);
+  // The review form shows extracted values, so per-provider field-status rows
+  // would repeat the same information for each OCR engine. Keep one name verdict.
+  for (let i = signals.length - 1; i >= 0; i--) {
+    if (
+      /^ocr(?:_space)?_(?:full_name|id_number|date_of_birth|date_of_expiry)$/.test(
+        signals[i].id
+      )
+    ) {
+      signals.splice(i, 1);
     }
   }
 
@@ -250,6 +183,7 @@ export async function runIdVerification(
       (a, b) => toneRank(b.tone) - toneRank(a.tone) || 0
     ),
     fields,
+    detectedDocType,
   };
 }
 
@@ -267,43 +201,16 @@ function toneRank(tone: IdSignalTone): number {
   }
 }
 
-function chooseProviders(
-  preferred: string | null | undefined,
-  threshold: number,
-  ocrEnabled: boolean
-): IdVerificationProvider[] {
-  const local = makeLocalProvider(threshold);
-  const { providers, ocrEnabled: ocrPresent } = activeProviders();
-
-  // Two gates, and both have to pass: the admin wants the reader on, and its
-  // language model has to be on disk for it to do anything.
-  const external = providers.filter(
-    (p) => p.id !== "local_ocr" || (ocrEnabled && ocrPresent)
-  );
-
-  const wanted = (preferred ?? "").trim().toLowerCase();
-
-  if (!wanted || wanted === "auto") {
-    // `local` always runs; external providers run too, and in front of it.
-    return [...external, local];
-  }
-
-  if (wanted === "local") return [local];
-
-  const named = external.filter((p) => p.id === wanted);
-  if (named.length > 0) return [...named, local];
-
-  // A setting naming a provider that is not configured must not take the feature
-  // down. Falling back to the automatic choice keeps the review screen working,
-  // which matters more than honouring the preference exactly.
-  return [...external, local];
-}
-
 /** First non-empty value wins; a later provider never overwrites an earlier one. */
-function mergeFields(target: IdExtractedFields, incoming: IdExtractedFields): void {
+function mergeFields(
+  target: IdExtractedFields,
+  incoming: IdExtractedFields,
+  expiryApplicable: boolean
+): void {
   const sink = target as Record<string, unknown>;
 
   for (const [key, value] of Object.entries(incoming)) {
+    if (key === "date_of_expiry" && !expiryApplicable) continue;
     if (value === null || value === undefined || value === "") continue;
 
     const existing = sink[key];

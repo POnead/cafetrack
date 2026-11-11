@@ -12,6 +12,17 @@
  */
 import type { IdSignal } from "./types";
 
+/** Reformat the common card layout "SURNAME, GIVEN MIDDLE" for review. */
+export function formatIdNameForDisplay(name: string | null | undefined): string {
+  const trimmed = name?.trim() ?? "";
+  const comma = trimmed.indexOf(",");
+  if (comma <= 0) return trimmed;
+
+  const surname = trimmed.slice(0, comma).trim();
+  const given = trimmed.slice(comma + 1).trim();
+  return surname && given ? `${given} ${surname}` : trimmed;
+}
+
 /**
  * Why a name is or is not available.
  *
@@ -55,17 +66,10 @@ const NO_NAME_MESSAGES: Record<Exclude<NameReadStatus, "ok">, string> = {
 };
 
 /**
- * Compare the surname on the card against the surname on the account.
- *
- * Surnames only, and the reason is that full-name comparison does not survive
- * contact with Philippine naming. A card reading "DELA CRUZ, JUAN SANTOS"
- * against an account reading "Juan Dela Cruz" is the *same person*, and a rule
- * that flagged it would fire on nearly every correct upload — which is worse than
- * no rule at all, because it trains an admin to ignore the signal.
- *
- * So: case, punctuation and the particles that are part of a Filipino surname
- * rather than separate words are normalised away, and a middle name appearing on
- * one side and not the other is not counted either way.
+ * Compare both surname and the primary given name. A surname match is not enough:
+ * a common surname can belong to many people. Card and account formats vary, so
+ * punctuation, case, Filipino surname particles, and an OCR-style one-character
+ * difference are handled, while middle names omitted on either side are tolerated.
  *
  * It also has a property no other part of the feature has — it can only ever run
  * if something was configured that reads text — which is why it is its own module
@@ -121,72 +125,111 @@ export function nameSignal(
     "BINTANAM",
   ]);
 
-  const lastToken = (s: string) => {
-    const parts = normalise(s)
-      .split(" ")
-      .filter((p) => p.length > 0 && !PARTICLES.has(p));
-    return parts.length ? parts[parts.length - 1] : null;
+  const tokens = (s: string) =>
+    normalise(s).split(" ").filter((part) => part.length > 0);
+
+  const namesMatch = (left: string, right: string) => {
+    if (left === right) return true;
+    if (Math.min(left.length, right.length) < 4) return false;
+    const tolerance = 1;
+    let previous = Array.from({ length: right.length + 1 }, (_, i) => i);
+    for (let i = 1; i <= left.length; i++) {
+      const current = [i];
+      for (let j = 1; j <= right.length; j++) {
+        current[j] = Math.min(
+          current[j - 1] + 1,
+          previous[j] + 1,
+          previous[j - 1] + (left[i - 1] === right[j - 1] ? 0 : 1)
+        );
+      }
+      previous = current;
+    }
+    return previous[right.length] <= tolerance;
   };
 
-  /**
-   * The surname, wherever the document happens to put it.
-   *
-   * **Philippine cards print `SURNAME, GIVEN NAMES`.** So on a card reading
-   * "DELA CRUZ, JUAN SANTOS" the surname is the part *before* the comma, and the
-   * last token — "SANTOS" — is a given name. Taking the last token therefore
-   * compared one person's given name against another person's surname, which
-   * flags the correct upload as a different person.
-   *
-   * That is precisely the failure this function's own header warns about: a rule
-   * that fires on nearly every correct card is worse than no rule, because an
-   * admin learns to ignore it. It was unreachable while no OCR was configured,
-   * which is why it sat unnoticed behind a message saying names cannot be read.
-   *
-   * So a comma means the surname is what precedes it. With no comma — a passport,
-   * or a name typed into a free-text field — fall back to the last token, which is
-   * right for the "Juan Dela Cruz" form an account name holds.
-   */
-  const surname = (s: string) => {
-    const trimmed = String(s ?? "").trim();
-    if (!trimmed) return null;
+  const splitAccountName = (name: string) => {
+    const comma = name.indexOf(",");
+    if (comma > 0) {
+      const surname = tokens(name.slice(0, comma));
+      const given = tokens(name.slice(comma + 1));
+      return { surname: surname.join(" "), given };
+    }
 
-    const comma = trimmed.indexOf(",");
-    const head = comma > 0 ? trimmed.slice(0, comma) : "";
+    const all = tokens(name);
+    if (all.length < 2) return { surname: "", given: [] };
 
-    if (head.trim()) return lastToken(head);
+    // Multi-word surnames with particles (Dela Cruz, De los Santos) belong to the
+    // surname, while ordinary single surnames use the final token.
+    let surnameStart = all.length - 1;
+    if (surnameStart > 0 && PARTICLES.has(all[surnameStart - 1])) {
+      surnameStart -= 1;
+      while (surnameStart > 0 && PARTICLES.has(all[surnameStart - 1])) surnameStart -= 1;
+    }
 
-    return lastToken(trimmed);
+    return {
+      surname: all.slice(surnameStart).join(" "),
+      given: all.slice(0, surnameStart),
+    };
   };
 
-  const fromCard = surname(cardName);
-  const fromAccount = surname(expectedName);
+  const trimmedCard = cardName.trim();
+  const comma = trimmedCard.indexOf(",");
+  const cardNameParts =
+    comma > 0
+      ? {
+          surname: tokens(trimmedCard.slice(0, comma)).join(" "),
+          given: tokens(trimmedCard.slice(comma + 1)),
+        }
+      : splitAccountName(trimmedCard);
+  const cardSurname = cardNameParts.surname;
+  const cardGiven = cardNameParts.given;
+  const account = splitAccountName(expectedName);
 
-  if (!fromCard || !fromAccount) {
+  if (!cardSurname || !cardGiven.length || !account.surname || !account.given.length) {
     return {
       id: "name_match",
       label,
       tone: "unknown",
-      detail: "One of the two names had no usable surname to compare.",
+      detail: "The card or account did not contain enough surname and given-name parts to compare.",
     };
   }
 
-  if (fromCard === fromAccount) {
+  const surnameMatches = namesMatch(cardSurname, account.surname);
+  const givenMatches = account.given.map((expected) =>
+    cardGiven.some((actual) => namesMatch(actual, expected))
+  );
+  const primaryGivenMatches = givenMatches[0] ?? false;
+
+  if (!surnameMatches) {
     return {
       id: "name_match",
       label,
-      tone: "pass",
+      tone: "fail",
       detail:
-        `The card reads "${cardName.trim()}" and this account is ${expectedName.trim()}. ` +
-        "Same surname.",
+        `The card reads "${trimmedCard}" but this account is ${expectedName.trim()}. ` +
+        "The surname and full-name details do not identify the account holder consistently.",
+    };
+  }
+
+  if (!primaryGivenMatches) {
+    const missing = account.given[0] ?? "";
+    return {
+      id: "name_match",
+      label,
+      tone: "fail",
+      detail:
+        `The card reads "${trimmedCard}" but this account is ${expectedName.trim()}. ` +
+        `The card does not contain the account holder's given name${missing ? ` "${missing}"` : ""}; ` +
+        "the same surname alone is not enough to match.",
     };
   }
 
   return {
     id: "name_match",
     label,
-    tone: "fail",
+    tone: "pass",
     detail:
-      `The card reads "${cardName.trim()}" but this account is ${expectedName.trim()}. ` +
-      "Different surnames — check whether the wrong person's ID was attached.",
+      `The card reads "${trimmedCard}" and this account is ${expectedName.trim()}. ` +
+      "The surname and given-name details match.",
   };
 }

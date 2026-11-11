@@ -95,7 +95,13 @@ function reject(reason: ImageRejectReason, message: string): ImageResult {
  * that wording. It never throws for bad input; only an unreadable part does, and
  * that is reported as `corrupt` too.
  */
-export async function readFaceImage(file: unknown): Promise<ImageResult> {
+export async function readFaceImage(
+  file: unknown,
+  { maxBytes = MAX_IMAGE_BYTES, purpose = "face photo" }: {
+    maxBytes?: number;
+    purpose?: string;
+  } = {}
+): Promise<ImageResult> {
   if (!file || typeof file !== "object") return reject("missing", "A photo is required");
 
   const candidate = file as File;
@@ -105,12 +111,11 @@ export async function readFaceImage(file: unknown): Promise<ImageResult> {
   // photo was chosen, which is not the same as a photo of zero bytes.
   if (size === 0) return reject("missing", "A photo is required");
 
-  if (size > MAX_IMAGE_BYTES) {
+  if (size > maxBytes) {
     return reject(
       "too-large",
-      `That photo is ${Math.round(size / 1024)}KB. It must be under ` +
-        `${Math.round(MAX_IMAGE_BYTES / 1024)}KB — take it again with one ` +
-        "face filling the frame."
+      `That ${purpose} is ${Math.round(size / 1024)}KB. It must be under ` +
+        `${Math.round(maxBytes / 1024)}KB — choose a smaller image.`
     );
   }
 
@@ -135,8 +140,8 @@ export async function readFaceImage(file: unknown): Promise<ImageResult> {
   // A part can arrive claiming a length it does not have; the declared size is
   // only a hint, so the real length is re-checked.
   if (bytes.length === 0) return reject("missing", "A photo is required");
-  if (bytes.length > MAX_IMAGE_BYTES) {
-    return reject("too-large", "That photo is too large — take it again");
+  if (bytes.length > maxBytes) {
+    return reject("too-large", `That ${purpose} is too large — choose a smaller image.`);
   }
 
   const sniffed = sniffType(bytes);

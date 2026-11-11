@@ -43,12 +43,26 @@ console.log("\ntables:", tables.rows.map((r) => r.table_name).join(", "));
 const cols = await pg.query(
   `select column_name, data_type, column_default from information_schema.columns
     where table_name = 'users'
-      and (column_name like 'face%' or column_name like 'last_face%')
+      and (
+        column_name like 'face%'
+        or column_name like 'last_face%'
+        or column_name like 'profile_photo%'
+      )
     order by column_name`
 );
-console.log("\nusers.face* / last_face* columns:");
+console.log("\nusers.face* / last_face* / profile_photo* columns:");
 for (const r of cols.rows) {
   console.log(`   ${r.column_name.padEnd(24)} ${r.data_type.padEnd(26)} default=${r.column_default}`);
+}
+const profilePhotoColumns = cols.rows
+  .filter((column) => column.column_name.startsWith("profile_photo_"))
+  .map((column) => column.column_name);
+if (
+  profilePhotoColumns.length !== 2 ||
+  !profilePhotoColumns.includes("profile_photo_data") ||
+  !profilePhotoColumns.includes("profile_photo_updated_at")
+) {
+  throw new Error("The generated local schema is missing staff profile photo columns.");
 }
 
 const seeds = await pg.query(

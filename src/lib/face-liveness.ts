@@ -52,13 +52,18 @@ export async function verifyFacePresentation(
   // Legacy client vectors cannot be tied to the image verified here.
   if (engine !== "sface") return { ok: false, reason: "unavailable" };
 
-  if (
-    !existsSync(PYTHON) ||
-    !existsSync(PYTHON_SCRIPT) ||
-    !existsSync(ANTI_SPOOF_MODEL) ||
-    !existsSync(YUNET_MODEL) ||
-    (engine === "sface" && !existsSync(SFACE_MODEL))
-  ) {
+  const requiredFiles = [
+    ["Python runtime", PYTHON],
+    ["liveness script", PYTHON_SCRIPT],
+    ["anti-spoof model", ANTI_SPOOF_MODEL],
+    ["face detector model", YUNET_MODEL],
+    ...(engine === "sface" ? [["SFace model", SFACE_MODEL] as const] : []),
+  ] as const;
+  const missingFiles = requiredFiles.filter(([, path]) => !existsSync(path));
+  if (missingFiles.length > 0) {
+    console.error(
+      `Face liveness runtime is unavailable; missing ${missingFiles.map(([name]) => name).join(", ")}.`
+    );
     return { ok: false, reason: "unavailable" };
   }
 
@@ -67,6 +72,7 @@ export async function verifyFacePresentation(
     response = await runInference(frames, engine);
   } catch (error) {
     if (error instanceof FaceLivenessRuntimeError) {
+      console.error(`Face liveness runtime failed: ${error.message}`);
       return { ok: false, reason: "unavailable" };
     }
     throw error;
@@ -79,7 +85,7 @@ export async function verifyFacePresentation(
   const verified: FaceFrameInput[] = [];
   for (const [index, result] of response.frames.entries()) {
     const frame = frames[index];
-    if (!result.live || poseFromSignal(result.pose_signal) !== frame.pose) {
+    if (!result.live || poseFromSignal(result.pose_signal, engine) !== frame.pose) {
       return { ok: false, reason: "rejected" };
     }
 

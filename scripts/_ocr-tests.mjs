@@ -23,6 +23,7 @@ import { buildRows, buildLayout, isFillerWord, contentWords, wordsBeside } from 
 import { extract, isTrustworthy } from "../src/lib/id-verification/ocr/extract.ts";
 import { parseMrz, mrzDateToIso, checkDigit } from "../src/lib/id-verification/ocr/mrz.ts";
 import { TEMPLATES, templateFor } from "../src/lib/id-verification/ocr/templates.ts";
+import { detectCardType } from "../src/lib/id-verification/ocr/card-type.ts";
 
 let pass = 0;
 let fail = 0;
@@ -236,9 +237,21 @@ section("labelled extraction");
   check("the name is read from its labels", fields.full_name.value === "DELA CRUZ, JUAN SANTOS", fields.full_name.value);
   check("as a labelled read, not a guess", fields.full_name.strategy === "label", fields.full_name.strategy);
   check("the ID number is read", fields.id_number.value === "1234-5678-9012-3456", fields.id_number.value);
-  check("the birth date is read", fields.date_of_birth.value === "1990-01-15", fields.date_of_birth.value);
-  check("the expiry date is read", fields.date_of_expiry.value === "2032-06-26", fields.date_of_expiry.value);
-  check("all four are trustworthy", Object.values(fields).every(isTrustworthy));
+  check("the birth date is read without picking up expiry", fields.date_of_birth.value === "1990-01-15", fields.date_of_birth.value);
+  check("PhilSys expiry is not extracted", fields.date_of_expiry.value === null, fields.date_of_expiry.value);
+  check(
+    "all applicable fields are trustworthy",
+    [fields.full_name, fields.id_number, fields.date_of_birth].every(isTrustworthy)
+  );
+}
+
+{
+  const layout = layoutOf([
+    { y: 0, text: "LAND TRANSPORTATION OFFICE" },
+    { y: 80, text: "DATE OF EXPIRY 2032-06-26" },
+  ]);
+  const { fields } = extract(layout, "lto_license");
+  check("an LTO expiry date is extracted", fields.date_of_expiry.value === "2032-06-26");
 }
 
 {
@@ -363,6 +376,25 @@ section("heuristic reads are not trusted");
   const { fields } = extract(layout, "philsys");
 
   check("a printed label is never mistaken for a name", fields.full_name.value === "DELA CRUZ JUAN", fields.full_name.value);
+}
+
+section("card type detection");
+
+{
+  const detected = detectCardType(
+    "REPUBLIC OF THE PHILIPPINES PAMBANSANG PAGKAKAKILANLAN PHILIPPINE IDENTIFICATION SYSTEM PSN 1234"
+  );
+  check("PhilSys card furniture is detected", detected.type === "philsys", detected.type);
+  check("multiple PhilSys markers are high confidence", detected.confidence === "high", detected.confidence);
+}
+
+{
+  const detected = detectCardType("REPUBLIC OF THE PHILIPPINES LAND TRANSPORTATION OFFICE DRIVER'S LICENSE");
+  check("LTO card furniture is detected", detected.type === "lto_license", detected.type);
+}
+
+{
+  check("unrecognised text does not invent a card type", detectCardType("HELLO WORLD").type === null);
 }
 
 console.log(`\n----------------------------------------------`);

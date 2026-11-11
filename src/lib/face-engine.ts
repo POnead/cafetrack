@@ -21,6 +21,7 @@ import { useEffect, useState } from "react";
 import {
   DEFAULT_FACE_ENGINE,
   parseEngine,
+  poseConfirmedBySignal,
   poseFromSignal,
   type FaceEngine,
   type FacePose,
@@ -65,8 +66,11 @@ export type PoseBearing = {
  * returns null rather than falling through: those frames should be refused, and
  * the old proxy would happily call a tilted head "straight on".
  */
-export function poseOfRead(read: PoseBearing): FacePose | null {
-  return poseStateOfRead(read).pose;
+export function poseOfRead(
+  read: PoseBearing,
+  engine: FaceEngine = DEFAULT_FACE_ENGINE
+): FacePose | null {
+  return poseStateOfRead(read, engine).pose;
 }
 
 /**
@@ -82,7 +86,10 @@ export function poseOfRead(read: PoseBearing): FacePose | null {
  * So the block is carried, not dropped. Anything that needs to tell the person
  * what to change takes this, and only the pose-only callers use `poseOfRead`.
  */
-export function poseStateOfRead(read: PoseBearing): PoseState {
+export function poseStateOfRead(
+  read: PoseBearing,
+  engine: FaceEngine = DEFAULT_FACE_ENGINE
+): PoseState {
   if (read.headPose) return poseStateFromAngles(read.headPose);
 
   /*
@@ -90,7 +97,7 @@ export function poseStateOfRead(read: PoseBearing): PoseState {
    * proxy for the pose, but do not pretend to have angles: NaN is honest, and
    * every consumer checks for it before drawing a needle.
    */
-  const pose = poseFromSignal(read.poseSignal);
+  const pose = poseFromSignal(read.poseSignal, engine);
   return {
     pose,
     block: pose ? null : "between",
@@ -98,6 +105,22 @@ export function poseStateOfRead(read: PoseBearing): PoseState {
     pitch: Number.NaN,
     roll: Number.NaN,
   };
+}
+
+/**
+ * The capture gate must agree with the signal the server validates on upload.
+ *
+ * Head-pose angles give better guidance, but by themselves they used to accept
+ * side views whose measured signal was still inside the "turn further" band.
+ * Keep the angle for the guide, while withholding the pose until both agree.
+ */
+export function capturePoseStateOfRead(
+  read: PoseBearing,
+  engine: FaceEngine = DEFAULT_FACE_ENGINE
+): PoseState {
+  const state = poseStateOfRead(read, engine);
+  if (!state.pose || poseConfirmedBySignal(state.pose, read.poseSignal, engine)) return state;
+  return { ...state, pose: null, block: "signal" };
 }
 
 let cachedConfig: FaceEngine | null = null;
@@ -174,4 +197,3 @@ export async function detectFaceFor(
   if (engine === "sface") return detectSfaceOnly(source);
   return detectFaceOnly(source);
 }
-

@@ -13,7 +13,7 @@
 import { db } from "./supabase";
 import { HttpError } from "./auth";
 import { DUTY_REQUIRED_MESSAGE, verificationRequired, nextVerificationAt } from "./face";
-import { getFaceDutyHours, getFaceVerificationEnabled } from "./settings";
+import { getFaceLoginSettings } from "./settings";
 
 export type FaceStatus = {
   /** Does this person have to pass a check before using the app right now? */
@@ -28,7 +28,34 @@ export type FaceStatus = {
   verifiedAt: string | null;
   /** When they are next due, or null if they are not currently due. */
   nextDueAt: string | null;
+  /** Approved face-check bypass, active only through the end of today. */
+  bypassedUntil: string | null;
 };
+
+async function activeDutyBypass(userId: string): Promise<{
+  requestId: string;
+  until: string;
+} | null> {
+  const { data, error } = await db()
+    .from("duty_bypass_requests")
+    .select("id, approved_until")
+    .eq("requested_by", userId)
+    .eq("status", "approved")
+    .gt("approved_until", new Date().toISOString())
+    .order("approved_until", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.error("approved duty bypass lookup failed:", error.message);
+    return null;
+  }
+  if (!data?.approved_until) return null;
+  return {
+    requestId: String(data.id),
+    until: new Date(data.approved_until).toISOString(),
+  };
+}
 
 /**
  * The status of a user, read fresh from the database.
@@ -47,8 +74,7 @@ export async function getFaceStatus(
   userId: string,
   role: string
 ): Promise<FaceStatus> {
-  const enabled = await getFaceVerificationEnabled();
-  const dutyHours = await getFaceDutyHours();
+  const { enabled, dutyHours } = await getFaceLoginSettings();
 
   const { data } = await db()
     .from("users")
@@ -64,15 +90,17 @@ export async function getFaceStatus(
       dutyHours,
       verifiedAt: null,
       nextDueAt: null,
+      bypassedUntil: null,
     };
   }
 
+  const bypass = await activeDutyBypass(userId);
   const verifiedAt = data.last_face_verified_at
     ? new Date(data.last_face_verified_at).toISOString()
     : null;
 
   return {
-    required: verificationRequired({
+    required: !bypass && verificationRequired({
       enabled,
       role,
       faceEnabled: data.face_enabled === true,
@@ -84,7 +112,10 @@ export async function getFaceStatus(
     dutyHours,
     verifiedAt,
     nextDueAt:
-      nextVerificationAt(data.last_face_verified_at, dutyHours)?.toISOString() ?? null,
+      bypass?.until ??
+      nextVerificationAt(data.last_face_verified_at, dutyHours)?.toISOString() ??
+      null,
+    bypassedUntil: bypass?.until ?? null,
   };
 }
 
@@ -95,9 +126,87 @@ export async function getFaceStatus(
  * reading the row back. The window opens from here, which is why this is the only
  * place that writes the column outside an enrolment.
  */
+/**
+ * Is this person already inside a duty window?
+ *
+ * The password route does not inspect face status. After it issues a normal
+ * session, /api/auth/me uses this duty-window calculation to route staff to the
+ * separate verification screen when needed. The same calculation also serves
+ * duty-check compatibility paths and administrative overrides.
+ *
+ * `open` is false whenever the feature is off or the account has no enrolled
+ * face: those accounts are not inside a window, they are simply not subject to
+ * this check, and a caller about to mint a session must not treat the two as the
+ * same thing. The settings are read here rather than passed in so a caller
+ * cannot accidentally compare against an older cached value.
+ */
+export async function getDutyWindow(args: {
+  userId?: string;
+  role: string;
+  faceEnabled: boolean | null;
+  lastVerifiedAt: string | Date | null;
+}, policy?: { enabled: boolean; dutyHours: number }): Promise<{
+  open: boolean;
+  enabled: boolean;
+  dutyHours: number;
+  /** When the open window closes, or null when it is not open. */
+  until: string | null;
+  bypassed: boolean;
+  bypassRequestId: string | null;
+}> {
+  const { enabled, dutyHours } = policy ?? (await getFaceLoginSettings());
+
+  const bypass = args.userId ? await activeDutyBypass(args.userId) : null;
+  if (bypass) {
+    return {
+      open: true,
+      enabled,
+      dutyHours,
+      until: bypass.until,
+      bypassed: true,
+      bypassRequestId: bypass.requestId,
+    };
+  }
+
+  const open = Boolean(
+    enabled &&
+      args.faceEnabled === true &&
+      !verificationRequired({
+        enabled,
+        role: args.role,
+        faceEnabled: args.faceEnabled,
+        lastVerifiedAt: args.lastVerifiedAt,
+        hours: dutyHours,
+      })
+  );
+
+  const last = args.lastVerifiedAt ? new Date(args.lastVerifiedAt) : null;
+  const until =
+    open && last && Number.isFinite(last.getTime())
+      ? new Date(last.getTime() + dutyHours * 3_600_000).toISOString()
+      : null;
+
+  return { open, enabled, dutyHours, until, bypassed: false, bypassRequestId: null };
+}
+
 export async function recordFaceVerification(userId: string): Promise<string> {
   const at = new Date().toISOString();
-  await db().from("users").update({ last_face_verified_at: at }).eq("id", userId);
+  const { data, error } = await db()
+    .from("users")
+    .update({ last_face_verified_at: at })
+    .eq("id", userId)
+    .select("id")
+    .maybeSingle();
+
+  if (error) {
+    console.error("Could not save staff face verification:", error.message);
+    throw new HttpError(503, "Could not save your face check. Please try again.");
+  }
+  if (!data) {
+    console.error(`Could not save staff face verification: user ${userId} was not found.`);
+    throw new HttpError(404, "Your account could not be found. Please sign in again.");
+  }
+
   return at;
 }
 

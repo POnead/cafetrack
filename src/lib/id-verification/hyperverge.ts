@@ -33,8 +33,8 @@
  * looks like a bug, the scheme is configurable and the defaults below are the
  * older header pair. **Set these from the sandbox credentials, not from this
  * file** — see .env.example. The provider reports itself unavailable until
- * credentials are present, so an unset key degrades to the local checks instead
- * of erroring.
+ * credentials are present; OCR.space remains required whether or not
+ * HyperVerge is configured.
  */
 
 import {
@@ -51,7 +51,7 @@ import {
  * Short on purpose. This runs on a request an admin is waiting on, in a café
  * with one till, and a check that would have arrived in forty seconds is worth
  * less than one that arrives in eight and can be retried. A timeout is reported
- * as an `unknown` signal and the local checks still run.
+ * as an `unknown` signal and the required OCR.space and local checks still run.
  */
 const REQUEST_TIMEOUT_MS = 12_000;
 
@@ -64,9 +64,8 @@ function env(name: string): string {
 /**
  * Read credentials from the environment.
  *
- * Returns null when either half is missing, which is what makes the provider
- * unavailable rather than throwing — a café that has not signed up for anything
- * should get the local checks, not an error page.
+ * Returns null when either half is missing, which makes this supplemental
+ * provider unavailable rather than throwing.
  */
 function credentials(): { baseUrl: string; appId: string; appKey: string; style: AuthStyle } | null {
   const appId = env("HYPERVERGE_APP_ID");

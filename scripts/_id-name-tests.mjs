@@ -23,7 +23,10 @@
  * resolved outside the bundler. Keeping the one rule that is not a provider's job
  * in a leaf module is also just where it belongs.
  */
-import { nameSignal } from "../src/lib/id-verification/name-signal.ts";
+import {
+  formatIdNameForDisplay,
+  nameSignal,
+} from "../src/lib/id-verification/name-signal.ts";
 let pass = 0;
 let fail = 0;
 
@@ -174,15 +177,58 @@ section("a name that was read is still compared");
 const same = nameSignal("DELA CRUZ, JUAN SANTOS", "Juan Dela Cruz", "ok");
 check("the same person passes", same.tone === "pass", same.detail);
 
+const naturalOrder = nameSignal("MARK ANDREI MOSCA OBEDENCIO", "Mark Obedencio", "ok");
+check("a given-name-first card name passes", naturalOrder.tone === "pass", naturalOrder.detail);
+
 const different = nameSignal("REYES, MARIA", "Juan Dela Cruz", "ok");
 check("a different person fails", different.tone === "fail", different.detail);
+
+const differentNaturalOrder = nameSignal("Maria Reyes", "Juan Dela Cruz", "ok");
+check(
+  "a different given-name-first card name fails",
+  differentNaturalOrder.tone === "fail",
+  differentNaturalOrder.detail
+);
 
 const lower = nameSignal("dela cruz, juan", "Juan Santos Dela Cruz", "ok");
 check("case does not decide it", lower.tone === "pass", lower.detail);
 
+const naturalCompoundSurname = nameSignal("Juan Santos Dela Cruz", "Juan Dela Cruz", "ok");
+check(
+  "a given-name-first card name handles compound surnames",
+  naturalCompoundSurname.tone === "pass",
+  naturalCompoundSurname.detail
+);
+
+const prince = nameSignal("RODRIGUEZ, PRINCE DEANO AGUILA", "Prince Deano Rodriguez", "ok");
+check("the complete given name matches the account", prince.tone === "pass", prince.detail);
+
+const otherRodriguez = nameSignal("RODRIGUEZ, MARIA DELA CRUZ", "Prince Deano Rodriguez", "ok");
+check("a different first name is not accepted just because the surname matches", otherRodriguez.tone === "fail", otherRodriguez.detail);
+check("the same-surname warning explains why it failed", /same surname alone/i.test(otherRodriguez.detail), otherRodriguez.detail);
+
+const surnameOnly = nameSignal("RODRIGUEZ", "Prince Deano Rodriguez", "ok");
+check("a surname-only OCR result is not a full-name pass", surnameOnly.tone === "unknown", surnameOnly.detail);
+
 check(
   "a card name is quoted in the detail an admin has to read",
   /REYES/i.test(different.detail)
+);
+
+section("displaying card names in given-name-first order");
+
+check(
+  "surname-first OCR is reordered for review",
+  formatIdNameForDisplay("OBEDENCIO, MARK ANDREI MOSCA") === "MARK ANDREI MOSCA OBEDENCIO",
+  formatIdNameForDisplay("OBEDENCIO, MARK ANDREI MOSCA")
+);
+check(
+  "a name already in natural order is unchanged",
+  formatIdNameForDisplay("Mark Andrei Mosca Obedencio") === "Mark Andrei Mosca Obedencio"
+);
+check(
+  "a name without enough parts is not rearranged",
+  formatIdNameForDisplay("OBEDENCIO,") === "OBEDENCIO,"
 );
 
 /* -------------------------------------------------- the two messages -- */

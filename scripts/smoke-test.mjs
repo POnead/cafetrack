@@ -24,6 +24,9 @@ let pass = 0;
 let fail = 0;
 
 async function call(method, path, body) {
+  if (method === "DELETE" && path.startsWith("/api/items/") && body === undefined) {
+    body = { password: ADMIN.password };
+  }
   const res = await fetch(BASE + path, {
     method,
     headers: {
@@ -70,6 +73,35 @@ async function main() {
   check("POST /api/auth/login -> 200", res.status === 200, `got ${res.status}`);
   check("session is an admin", res.data?.user?.role === "admin", res.data?.user?.fullName || "");
   check("cookie was issued", cookie.startsWith("cafetrack_session="));
+
+  section("admin login failures are shared across usernames");
+  const adminFailures = [];
+  for (let i = 0; i < 3; i++) {
+    adminFailures.push(
+      await call("POST", "/api/auth/login", {
+        username: `unknown-admin-${Date.now().toString(36)}-${i}`,
+        password: "wrong-on-purpose",
+      })
+    );
+  }
+  check(
+    "three unrecognized admin usernames still return generic invalid credentials",
+    adminFailures.every((result) => result.status === 401),
+    adminFailures.map((result) => result.status).join(",")
+  );
+  check(
+    "admin failure count is shared across usernames for forgot-password visibility",
+    adminFailures.every(
+      (result, index) => result.data?.failed_attempts === index + 1
+    ),
+    adminFailures.map((result) => result.data?.failed_attempts ?? "none").join(",")
+  );
+  res = await call("POST", "/api/auth/login", ADMIN);
+  check(
+    "a successful admin login resets the shared failure streak",
+    res.status === 200,
+    `got ${res.status}`
+  );
 
   res = await call("GET", "/api/auth/me");
   check("GET /api/auth/me -> 200", res.status === 200 && res.data?.user?.username === "admin");
@@ -149,7 +181,7 @@ async function main() {
     type: "restock",
     password: ADMIN.password,
     note: "smoke test restock",
-    items: [{ sku: newItem?.sku, qty: 5 }],
+    items: [{ sku: newItem?.sku, qty: 5, note: "smoke test item note\nsecond item note" }],
   });
   check(
     "POST /api/transactions restock -> 201",
@@ -186,7 +218,43 @@ async function main() {
   res = await call("GET", "/api/transactions?limit=5");
   const txns = res.data?.transactions ?? [];
   check("GET /api/transactions", res.status === 200 && txns.length > 0, `${txns.length} rows`);
+  check(
+    "transaction note schema status is reported",
+    res.status === 200 && res.data?.transactionNotesAvailable === true
+  );
   check("history embeds transaction_items array", Array.isArray(txns[0]?.transaction_items));
+  check(
+    "item note persists into transaction history",
+    txns.some((txn) =>
+      txn.transaction_items?.some(
+        (item) =>
+          item.sku === newItem?.sku &&
+          item.note === "smoke test item note\nsecond item note"
+      )
+    )
+  );
+  const localDayStart = new Date();
+  localDayStart.setHours(0, 0, 0, 0);
+  const nextLocalDay = new Date(localDayStart);
+  nextLocalDay.setDate(nextLocalDay.getDate() + 1);
+  const dayQuery = new URLSearchParams({
+    from_at: localDayStart.toISOString(),
+    before: nextLocalDay.toISOString(),
+    limit: "20",
+  });
+  res = await call("GET", `/api/transactions?${dayQuery}`);
+  check(
+    "GET /api/transactions filters by local calendar day",
+    res.status === 200 &&
+      res.data?.transactions?.some((txn) =>
+        txn.transaction_items?.some((item) => item.sku === newItem?.sku)
+      )
+  );
+  res = await call(
+    "GET",
+    "/api/transactions?from_at=not-a-date&before=2026-01-01T00%3A00%3A00.000Z"
+  );
+  check("invalid history date range -> 400", res.status === 400, `got ${res.status}`);
 
   section("alerts");
   res = await call("POST", "/api/alerts");
@@ -197,6 +265,37 @@ async function main() {
   check("GET /api/alerts?status=open", res.status === 200, `${alerts.length} open`);
   check("seeded data raises alerts", alerts.length > 0);
   check("alert embeds its item", alerts[0]?.item?.name !== undefined, alerts[0]?.item?.name || "");
+
+  res = await call("GET", "/api/alerts?unread_count=1");
+  check(
+    "GET /api/alerts?unread_count=1 returns a count",
+    res.status === 200 &&
+      Number.isInteger(res.data?.unreadCount) &&
+      typeof res.data?.persisted === "boolean"
+  );
+  res = await call("PATCH", "/api/alerts");
+  check(
+    "PATCH /api/alerts marks alerts as seen",
+    res.status === 200 &&
+      typeof res.data?.seenAt === "string" &&
+      typeof res.data?.persisted === "boolean"
+  );
+  res = await call("GET", "/api/alerts?unread_count=1");
+  check(
+    "marking alerts seen clears the unread count",
+    res.status === 200 && res.data?.unreadCount === 0,
+    `got ${res.data?.unreadCount}`
+  );
+  res = await call("GET", "/api/items?status=pending&limit=1");
+  check(
+    "pending item query returns total count",
+    res.status === 200 && Number.isInteger(res.data?.total)
+  );
+  res = await call("GET", "/api/change-requests?pending_count=1");
+  check(
+    "pending change-request query returns count",
+    res.status === 200 && Number.isInteger(res.data?.pendingCount)
+  );
 
   if (alerts.length) {
     const alertId = alerts[0].id;
@@ -219,7 +318,7 @@ async function main() {
     res = await call("GET", "/api/alerts/00000000-0000-0000-0000-000000000000");
     check("GET /api/alerts/:id unknown -> 404", res.status === 404, `got ${res.status}`);
 
-    res = await call("PATCH", `/api/alerts/${alertId}`, { resolved: true });
+    res = await call("PATCH", `/api/alerts/${alertId}`, { resolved: true, reason: "smoke test resolved" });
     check("PATCH /api/alerts/:id resolve", res.status === 200 && res.data?.alert?.resolved === true);
   }
 
@@ -458,18 +557,61 @@ async function main() {
   if (throttleUser?.qr_token) {
     const token = throttleUser.qr_token;
     const adminCookieThrottle = cookie;
-    const wrong = async () =>
+    const wrongByUsername = async () =>
+      (await call("POST", "/api/auth/staff", {
+        username: throttleUser.username,
+        password: "wrong-on-purpose",
+      })).status;
+    const wrongByToken = async () =>
       (await call("POST", "/api/auth/staff", { token, password: "wrong-on-purpose" })).status;
 
+    const unknownRun = [];
+    for (let i = 0; i < 20; i++) {
+      unknownRun.push(
+        (
+          await call("POST", "/api/auth/staff", {
+            username: `unknown-${Date.now().toString(36)}-${i}`,
+            password: "wrong-on-purpose",
+          })
+        ).status
+      );
+    }
+    check(
+      "different unknown staff identifiers do not build one account's failure streak",
+      unknownRun.every((s) => s === 401),
+      `${unknownRun.filter((s) => s === 401).length}/20 unrecognized`
+    );
+
+    const unknownCredential = `unknown-${Date.now().toString(36)}`;
+    const sameUnknownRun = [];
+    for (let i = 0; i < 20; i++) {
+      sameUnknownRun.push(
+        (
+          await call("POST", "/api/auth/staff", {
+            username: unknownCredential,
+            password: "wrong-on-purpose",
+          })
+        ).status
+      );
+    }
+    check(
+      "repeating an unrecognized staff identifier never creates a failure streak",
+      sameUnknownRun.every((s) => s === 401),
+      `${sameUnknownRun.filter((s) => s === 401).length}/20 unrecognized`
+    );
+
     const firstRun = [];
-    for (let i = 0; i < 4; i++) firstRun.push(await wrong());
+    for (let i = 0; i < 4; i++) firstRun.push(await wrongByUsername());
     check(
       "four wrong passwords are still answered normally",
       firstRun.every((s) => s === 401),
       firstRun.join(",")
     );
 
-    const good = await call("POST", "/api/auth/staff", { token, password: STAFF_PASSWORD });
+    const good = await call("POST", "/api/auth/staff", {
+      token,
+      password: STAFF_PASSWORD,
+    });
     check(
       "the right password still works, and clears the counter",
       good.status === 200,
@@ -477,7 +619,7 @@ async function main() {
     );
 
     const secondRun = [];
-    for (let i = 0; i < 4; i++) secondRun.push(await wrong());
+    for (let i = 0; i < 4; i++) secondRun.push(await wrongByToken());
     check(
       "a success reset the counter, so four more are fine",
       secondRun.every((s) => s === 401),
@@ -485,20 +627,22 @@ async function main() {
     );
 
     // Five consecutive failures are answered normally; the sixth is refused.
-    const fifth = await call("POST", "/api/auth/staff", {
-      token,
-      password: "wrong-on-purpose",
-    });
-    check("the fifth failure is still answered", fifth.status === 401, `got ${fifth.status}`);
+    const fifth = await wrongByToken();
+    check("the fifth failure is still answered", fifth === 401, `got ${fifth}`);
 
     const blocked = await call("POST", "/api/auth/staff", {
-      token,
+      username: throttleUser.username,
       password: "wrong-on-purpose",
     });
     check("the sixth attempt is throttled", blocked.status === 429, `got ${blocked.status}`);
 
     const retryAfter = blocked.headers?.get?.("retry-after");
     check("429 carries a Retry-After header", Number(retryAfter) > 0, retryAfter || "none");
+    check(
+      "the first lockout starts at one minute rather than the old fifteen-minute window",
+      Number(retryAfter) > 0 && Number(retryAfter) <= 60,
+      `${retryAfter || "none"} seconds`
+    );
 
     // The sign-in above replaced the shared cookie with a staff session.
     cookie = adminCookieThrottle;
@@ -524,6 +668,40 @@ async function main() {
   cookie = "";
   res = await call("GET", "/api/items");
   check("session is gone -> 401", res.status === 401, `got ${res.status}`);
+
+  section("admin login lockout is shared across usernames");
+  const failedAdminLogins = [];
+  for (let i = 0; i < 5; i++) {
+    failedAdminLogins.push(
+      (
+        await call("POST", "/api/auth/login", {
+          username: `unregistered-admin-${Date.now().toString(36)}-${i}`,
+          password: "wrong-on-purpose",
+        })
+      ).status
+    );
+  }
+  check(
+    "five unregistered admin usernames each receive the generic response",
+    failedAdminLogins.every((status) => status === 401),
+    failedAdminLogins.join(",")
+  );
+  const blockedAdmin = await call("POST", "/api/auth/login", {
+    username: `another-unregistered-admin-${Date.now().toString(36)}`,
+    password: "wrong-on-purpose",
+  });
+  check(
+    "the sixth admin login is throttled even with a different username",
+    blockedAdmin.status === 429 &&
+      Number(blockedAdmin.headers?.get?.("retry-after")) > 0,
+    `${blockedAdmin.status} ${blockedAdmin.headers?.get?.("retry-after") || ""}`
+  );
+  check(
+    "the shared admin login lockout starts at one minute",
+    Number(blockedAdmin.headers?.get?.("retry-after")) > 0 &&
+      Number(blockedAdmin.headers?.get?.("retry-after")) <= 60,
+    `${blockedAdmin.headers?.get?.("retry-after") || "none"} seconds`
+  );
 
   console.log(`\n${"-".repeat(46)}`);
   console.log(`${pass} passed, ${fail} failed`);

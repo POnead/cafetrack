@@ -1,6 +1,6 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail, badId, clientIp, readBody } from "@/lib/api";
-import { requireAdmin } from "@/lib/auth";
+import { handler, ok, fail, badId, clientIp, readBody, dbFail } from "@/lib/api";
+import { clearSessionCache, requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import {
   DEFAULT_FACE_ENGINE,
@@ -26,6 +26,12 @@ import {
 } from "@/lib/face-samples";
 import { readFaceImage } from "@/lib/face-image";
 import { getFaceDutyHours } from "@/lib/settings";
+import {
+  createFacePlusPlusEnrollment,
+  deleteFacePlusPlusEnrollment,
+  facePlusPlusFaceSetTokens,
+  facePlusPlusMode,
+} from "@/lib/facepp";
 
 export const runtime = "nodejs";
 
@@ -35,7 +41,7 @@ export const runtime = "nodejs";
  *
  *   POST    multipart — the photo and the embedding, both produced in the browser
  *   DELETE            — remove an enrolment
- *   PATCH             — manager override: waive this person's current duty check
+ *   PATCH             — manager override, or reset the current duty check
  *   GET               — the reference photo, for the admin who enrolled it
  *
  * Three verbs in one file because they are three verbs on one resource and share
@@ -132,7 +138,8 @@ export const POST = handler(
     const { data: before } = await db()
       .from("users")
       .select(
-        "id, username, full_name, role, is_active, face_enabled, face_enrolled_at, face_embedding"
+        "id, username, full_name, role, is_active, face_enabled, face_enrolled_at, face_embedding, " +
+          "facepp_faceset_token, facepp_face_token, facepp_retired_facesets"
       )
       .eq("id", id)
       .maybeSingle();
@@ -195,9 +202,10 @@ export const POST = handler(
       const image = await readFaceImage(rawImage);
       if (!image.ok) return fail(`${capitalise(POSE_LABEL[pose])}: ${image.message}`);
 
+      const model = parseEngine(fieldFor(form, "model", pose)) ?? DEFAULT_FACE_ENGINE;
       const yawSignal = numberField(fieldFor(form, "signal", pose));
       if (yawSignal !== null) {
-        const seen = poseFromSignal(yawSignal);
+        const seen = poseFromSignal(yawSignal, model);
         if (!poseSatisfies(pose, seen)) {
           return fail(
             seen === null
@@ -221,7 +229,7 @@ export const POST = handler(
          * incomparable with everything else on the account. A client that uses
          * the other engine says so with `model_<pose>`.
          */
-        model: parseEngine(fieldFor(form, "model", pose)) ?? DEFAULT_FACE_ENGINE,
+        model,
         image: image.dataUrl,
         yawSignal,
         quality: numberField(fieldFor(form, "quality", pose)),
@@ -241,11 +249,52 @@ export const POST = handler(
       return fail("A straight-on photo is required");
     }
 
+    const facePlusPlus = facePlusPlusMode();
+    let facePlusPlusWarning: string | null = null;
+    if (facePlusPlus === "invalid") {
+      console.error("Face++ credentials are incomplete; saving the local face reference instead.");
+      facePlusPlusWarning =
+        "Face++ is not configured, but the reference photo was saved. Sign-in can use local SFace verification if this server has it configured.";
+    }
+
+    let facePlusPlusEnrollment: { facesetToken: string; faceToken: string } | null = null;
+    if (facePlusPlus === "enabled") {
+      const enrolled = await createFacePlusPlusEnrollment(id, frontImage);
+      if ("status" in enrolled) {
+        if (enrolled.status === "unavailable") {
+          console.error(`Face++ enrollment failed (${enrolled.code}).`);
+          facePlusPlusWarning =
+            "Face++ is temporarily unavailable, but the reference photo was saved. Sign-in can use local SFace verification while the provider is unavailable.";
+        } else {
+          return fail("Face++ could not find exactly one face in the straight-on photo. Retake it.");
+        }
+      } else {
+        facePlusPlusEnrollment = enrolled;
+      }
+    }
+
+    const previousFaceSet =
+      typeof before.facepp_faceset_token === "string" ? before.facepp_faceset_token : null;
+    const retiredFaceSets = facePlusPlusFaceSetTokens(
+      null,
+      before.facepp_retired_facesets
+    );
+    if (
+      previousFaceSet &&
+      previousFaceSet !== facePlusPlusEnrollment?.facesetToken &&
+      !retiredFaceSets.includes(previousFaceSet)
+    ) {
+      retiredFaceSets.push(previousFaceSet);
+    }
+
     const { data, error } = await db()
       .from("users")
       .update({
         face_image: frontImage,
         face_embedding: formatEmbedding(frontEmbedding),
+        facepp_faceset_token: facePlusPlusEnrollment?.facesetToken ?? null,
+        facepp_face_token: facePlusPlusEnrollment?.faceToken ?? null,
+        facepp_retired_facesets: retiredFaceSets,
         face_enabled: true,
         face_enrolled_at: new Date().toISOString(),
         face_enrolled_by: admin.id,
@@ -257,9 +306,44 @@ export const POST = handler(
       .select(USER_COLUMNS)
       .maybeSingle();
 
-    if (error) return fail(error.message, 500);
-    if (!data) return fail("User not found", 404);
+    if (error || !data) {
+      if (facePlusPlusEnrollment) {
+        const cleanup = await deleteFacePlusPlusEnrollment(facePlusPlusEnrollment.facesetToken);
+        if (cleanup.status === "unavailable") {
+          console.error(`Face++ could not remove an unsaved FaceSet (${cleanup.code}).`);
+        }
+      }
+      if (error) return dbFail(error);
+      return fail("User not found", 404);
+    }
 
+    if (previousFaceSet && previousFaceSet !== facePlusPlusEnrollment?.facesetToken) {
+      const deleted = await deleteFacePlusPlusEnrollment(previousFaceSet);
+      if (deleted.status === "unavailable") {
+        console.error(`Face++ could not remove the replaced FaceSet (${deleted.code}).`);
+        facePlusPlusWarning = [
+          facePlusPlusWarning,
+          "The new face was saved, but Face++ could not remove the previous reference. Ask an administrator to review it.",
+        ]
+          .filter(Boolean)
+          .join(" ");
+      } else {
+        const remainingRetired = retiredFaceSets.filter((token) => token !== previousFaceSet);
+        const { error: retiredUpdateError } = await db()
+          .from("users")
+          .update({ facepp_retired_facesets: remainingRetired })
+          .eq("id", id);
+        if (retiredUpdateError) {
+          console.error("Face++ retired FaceSet cleanup state could not be updated:", retiredUpdateError.message);
+          facePlusPlusWarning = [
+            facePlusPlusWarning,
+            "The new face was saved, but its previous Face++ reference may need an administrator to review it.",
+          ]
+            .filter(Boolean)
+            .join(" ");
+        }
+      }
+    }
     /*
      * The per-angle rows, after the users row rather than before it.
      *
@@ -284,7 +368,6 @@ export const POST = handler(
       ? "The straight-on photo was saved, but the turned-head angles could not be stored. " +
         "You can add them later with Replace photo."
       : null;
-
     /*
      * Warn when a replacement looks like a different person.
      *
@@ -323,6 +406,14 @@ export const POST = handler(
       possiblyDifferentPerson = previousDistance > replacementMismatchDistance(newModel);
     }
 
+    const warnings = [
+      possiblyDifferentPerson
+        ? "This photo looks like a different person than the one already enrolled."
+        : null,
+      angleWarning,
+      facePlusPlusWarning,
+    ].filter((warning): warning is string => Boolean(warning));
+
     const angles = captured.map((c) => c.pose);
 
     await audit(
@@ -354,10 +445,7 @@ export const POST = handler(
     return ok({
       user: data,
       angles,
-      // Null on a first enrolment, where there is nothing to compare against.
-      warning: possiblyDifferentPerson
-        ? "This photo looks like a different person than the one already enrolled."
-        : angleWarning,
+      warning: warnings.length > 0 ? warnings.join(" ") : null,
     });
   }
 );
@@ -374,7 +462,10 @@ export const DELETE = handler(
 
     const { data: before } = await db()
       .from("users")
-      .select("id, username, full_name, role, face_enabled, face_embedding")
+      .select(
+        "id, username, full_name, role, face_enabled, face_embedding, facepp_faceset_token, " +
+          "facepp_retired_facesets"
+      )
       .eq("id", id)
       .maybeSingle();
 
@@ -397,6 +488,20 @@ export const DELETE = handler(
     const removed = await loadFaceSamples(id, before.face_embedding);
     const removedAngles = removed.map((s) => s.pose);
 
+    const faceSets = facePlusPlusFaceSetTokens(
+      before.facepp_faceset_token,
+      before.facepp_retired_facesets
+    );
+    const deletedFaceSets = await Promise.all(faceSets.map(deleteFacePlusPlusEnrollment));
+    const undeletedFaceSet = deletedFaceSets.find((result) => result.status === "unavailable");
+    if (undeletedFaceSet?.status === "unavailable") {
+      console.error(`Face++ could not remove a revoked FaceSet (${undeletedFaceSet.code}).`);
+      return fail(
+        "Face++ could not remove this account's stored reference. The face was not removed; try again later.",
+        503
+      );
+    }
+
     // The per-angle rows first. `face_enabled = false` is what makes a face
     // unusable, so if the two writes disagree the account must end up disabled
     // with rows still behind it, never the other way round — biometric data must
@@ -412,6 +517,9 @@ export const DELETE = handler(
       .update({
         face_image: null,
         face_embedding: null,
+        facepp_faceset_token: null,
+        facepp_face_token: null,
+        facepp_retired_facesets: [],
         face_enabled: false,
         face_enrolled_at: null,
         face_enrolled_by: null,
@@ -421,7 +529,7 @@ export const DELETE = handler(
       .select(USER_COLUMNS)
       .maybeSingle();
 
-    if (error) return fail(error.message, 500);
+    if (error) return dbFail(error);
     if (!data) return fail("User not found", 404);
 
     await audit(
@@ -476,14 +584,6 @@ export const PATCH = handler(
     // for it. The two shapes on one route is the cost of putting all four verbs
     // in one place.
     const body = await readBody(req);
-    const reason = String(body.reason ?? "").trim();
-
-    if (reason.length < 3) {
-      return fail("Give a reason for the override — it goes in the audit log");
-    }
-    if (reason.length > 300) {
-      return fail("Reason must be 300 characters or fewer");
-    }
 
     const { data: before } = await db()
       .from("users")
@@ -496,6 +596,66 @@ export const PATCH = handler(
     if (before.role !== "staff") {
       return fail("Only staff accounts are subject to the duty check", 400);
     }
+
+    if (body.action === "reset") {
+      if (!before.face_enabled) {
+        return fail("This account has no enrolled face check to reset", 400);
+      }
+
+      const resetAt = new Date().toISOString();
+      const { data: bypasses, error: bypassError } = await db()
+        .from("duty_bypass_requests")
+        .update({ approved_until: resetAt })
+        .eq("requested_by", id)
+        .eq("status", "approved")
+        .gt("approved_until", resetAt)
+        .select("id");
+
+      if (bypassError) {
+        console.error("active duty bypass reset failed:", bypassError.message);
+        return fail("Could not reset the face check. Try again.", 503);
+      }
+
+      const { data, error } = await db()
+        .from("users")
+        .update({
+          last_face_verified_at: null,
+          session_token: null,
+          session_last_active_at: null,
+        })
+        .eq("id", id)
+        .select(USER_COLUMNS)
+        .maybeSingle();
+
+      if (error) return dbFail(error);
+      if (!data) return fail("User not found", 404);
+      clearSessionCache();
+
+      await audit(
+        admin,
+        "FACE_VERIFY_RESET",
+        "user",
+        data.id,
+        {
+          username: data.username,
+          full_name: data.full_name,
+          previous_verified_at: before.last_face_verified_at,
+          active_bypasses_revoked: bypasses?.length ?? 0,
+        },
+        { ip: clientIp(req) }
+      );
+
+      return ok({ user: data, reset: true });
+    }
+
+    const reason = String(body.reason ?? "").trim();
+    if (reason.length < 3) {
+      return fail("Give a reason for the override — it goes in the audit log");
+    }
+    if (reason.length > 300) {
+      return fail("Reason must be 300 characters or fewer");
+    }
+
     if (!before.is_active) {
       return fail("That account is deactivated", 400);
     }
@@ -510,7 +670,7 @@ export const PATCH = handler(
       .select(USER_COLUMNS)
       .maybeSingle();
 
-    if (error) return fail(error.message, 500);
+    if (error) return dbFail(error);
     if (!data) return fail("User not found", 404);
 
     await audit(
@@ -555,7 +715,7 @@ export const PATCH = handler(
  */
 export const GET = handler(
   async (req: Request, { params }: { params: Promise<{ id: string }> }) => {
-    await requireAdmin();
+    const admin = await requireAdmin();
     const { id } = await params;
 
     const malformed = badId(id, "user");
@@ -579,7 +739,7 @@ export const GET = handler(
       .eq("id", id)
       .maybeSingle();
 
-    if (error) return fail(error.message, 500);
+    if (error) return dbFail(error);
     if (!user) return fail("User not found", 404);
 
     /*
@@ -616,13 +776,17 @@ export const GET = handler(
 
     const [, type, base64] = match;
 
+    // Face-image reads are not recorded in the audit trail here; audits remain
+    // reserved for actual mutations or administrative actions that change the
+    // person or the enrolment. Mere display of the reference photo is not a
+    // state change, and logging it created false positives in the staff summary.
     // Private and short-lived. This is biometric data about a named person: it
     // must not sit in a shared cache, and a stale thumbnail after a re-enrolment
     // would be the wrong face beside the right name.
     return new Response(Buffer.from(base64, "base64"), {
       headers: {
         "Content-Type": type,
-        "Cache-Control": "private, max-age=300",
+        "Cache-Control": "private, no-store, max-age=0",
         "X-Content-Type-Options": "nosniff",
       },
     });

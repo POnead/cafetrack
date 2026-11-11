@@ -117,8 +117,8 @@ async function main() {
     { name: "Cocoa Powder", cat: "Powder", loc: "Dry Storage", form: "powder", unit: "kg", qty: 6, low: 3, exp: inDays(150) },
     { name: "Black Tea Leaves", cat: "Tea", loc: "Dry Storage", form: "solid", unit: "kg", qty: 0, low: 2, exp: inDays(60) },
     { name: "Croissant Dough", cat: "Bakery", loc: "Freezer", form: "solid", unit: "pack", qty: 15, low: 5, exp: inDays(-1) },
-    { name: "16oz Paper Cups", cat: "Packaging", loc: "Dry Storage", form: "solid", unit: "pcs", qty: 500, low: 100, exp: null },
-    { name: "Cup Lids", cat: "Packaging", loc: "Dry Storage", form: "solid", unit: "pcs", qty: 80, low: 100, exp: null },
+    { name: "16oz Paper Cups", cat: "Packaging", loc: "Dry Storage", form: "solid", unit: "pcs", qty: 500, low: 100, exp: null, expirable: false },
+    { name: "Cup Lids", cat: "Packaging", loc: "Dry Storage", form: "solid", unit: "pcs", qty: 80, low: 100, exp: null, expirable: false },
   ];
 
   const itemRows = items.map((i) => ({
@@ -131,6 +131,7 @@ async function main() {
     quantity: i.qty,
     low_stock_threshold: i.low,
     expiration_date: i.exp,
+    expirable: i.expirable ?? true,
   }));
 
   const { error: itemErr } = await db.from("items").insert(itemRows);

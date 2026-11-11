@@ -25,6 +25,10 @@ import {
   HASH_HEX_LENGTH,
 } from "../src/lib/id-verification/card-hash.ts";
 import { checkIdNumber } from "../src/lib/id-verification/id-number.ts";
+import {
+  idNumberSignal,
+  idTypeHasExpiry,
+} from "../src/lib/id-verification/specification.ts";
 
 let pass = 0;
 let fail = 0;
@@ -175,6 +179,20 @@ section("fingerprint distance");
 section("ID number shapes");
 
 {
+  check("PhilSys has no expiry field", !idTypeHasExpiry("philsys"));
+  check("LTO licences support expiry dates", idTypeHasExpiry("lto_license"));
+  check("passports support expiry dates", idTypeHasExpiry("passport"));
+  check("UMID does not invent an expiry check", !idTypeHasExpiry("umid"));
+  check(
+    "a valid OCR number gets one positive type-specific check",
+    idNumberSignal("1234-5678-9012-3456", "philsys")?.tone === "pass"
+  );
+  check(
+    "a misread OCR number is flagged for correction",
+    idNumberSignal("12345", "philsys")?.tone === "warn"
+  );
+  check("a missing number does not create a check row", idNumberSignal("", "philsys") === null);
+
   /* PhilSys: sixteen digits in four groups. */
   check("a full PhilSys number is accepted", checkIdNumber("1234-5678-9012-3456", "philsys").ok);
   check("the separators are stripped", checkIdNumber("1234-5678-9012-3456", "philsys").normalised === "1234567890123456");

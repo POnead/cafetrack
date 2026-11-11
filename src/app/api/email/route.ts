@@ -1,5 +1,5 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail, badId, readBody } from "@/lib/api";
+import { handler, ok, fail, badId, readBody, clientIp, dbFail } from "@/lib/api";
 import { requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { emailStatus, dispatchQueued, verifySmtpAccount } from "@/lib/email";
@@ -45,6 +45,9 @@ export const GET = handler(async (req: Request) => {
 
   const { searchParams } = new URL(req.url);
   const wantsQueue = searchParams.get("queue") === "1";
+  const queueKind = searchParams.get("kind") ?? "all";
+  const queueOffset = Math.max(0, Number.parseInt(searchParams.get("offset") ?? "0", 10) || 0);
+  const queueLimit = 50;
 
   const [status, recipients] = await Promise.all([
     emailStatus(),
@@ -54,7 +57,7 @@ export const GET = handler(async (req: Request) => {
       .order("created_at", { ascending: true }),
   ]);
 
-  if (recipients.error) return fail(recipients.error.message, 500);
+  if (recipients.error) return dbFail(recipients.error, { context: "email recipients" });
 
   const smtp = await describeSmtpConfig();
 
@@ -73,7 +76,7 @@ export const GET = handler(async (req: Request) => {
   // The queue is only fetched when asked for: the log grows without bound, and
   // the settings page opens far more often than anyone reads it.
   if (wantsQueue) {
-    const queue = await db()
+    let queueQuery = db()
       .from("email_notifications")
       .select(
         // `body` is selected deliberately. The delivery log is how an admin
@@ -85,9 +88,28 @@ export const GET = handler(async (req: Request) => {
          email_recipients(email_address, display_name)`
       )
       .order("queued_at", { ascending: false })
-      .limit(50);
-    if (queue.error) return fail(queue.error.message, 500);
-    payload.queue = queue.data ?? [];
+      .range(queueOffset, queueOffset + queueLimit);
+
+    if (queueKind === "alerts") {
+      queueQuery = queueQuery.in("kind", [
+        "low_stock",
+        "out_of_stock",
+        "near_expiry",
+        "expired",
+        "failed_login",
+      ]);
+    } else if (queueKind === "reports") {
+      queueQuery = queueQuery.in("kind", ["report", "reports"]);
+    } else if (queueKind === "daily_summary") {
+      queueQuery = queueQuery.eq("kind", "daily_summary");
+    } else if (queueKind !== "all") {
+      return fail("Unknown email log filter", 400);
+    }
+
+    const queue = await queueQuery;
+    if (queue.error) return dbFail(queue.error, { context: "email queue" });
+    payload.queue = (queue.data ?? []).slice(0, queueLimit);
+    payload.queue_has_more = (queue.data ?? []).length > queueLimit;
   }
 
   return ok(payload);
@@ -128,7 +150,7 @@ export const POST = handler(async (req: Request) => {
       .eq("id", id)
       .select()
       .maybeSingle();
-    if (error) return fail(error.message, 500);
+    if (error) return dbFail(error);
     if (!data) return fail("Recipient not found", 404);
 
     await audit(admin, "EMAIL_RECIPIENT_UPDATE", "email_recipient", id, {
@@ -152,7 +174,7 @@ export const POST = handler(async (req: Request) => {
     if (/duplicate key|unique/i.test(error.message)) {
       return fail(`${address} is already a recipient`, 409);
     }
-    return fail(error.message, 500);
+    return dbFail(error, { context: "email recipient create" });
   }
 
   await audit(admin, "EMAIL_RECIPIENT_CREATE", "email_recipient", data.id, {
@@ -179,7 +201,7 @@ export const DELETE = handler(async (req: Request) => {
   if (!before) return fail("Recipient not found", 404);
 
   const { error } = await db().from("email_recipients").delete().eq("id", id);
-  if (error) return fail(error.message, 500);
+  if (error) return dbFail(error);
 
   await audit(admin, "EMAIL_RECIPIENT_DELETE", "email_recipient", id, {
     email_address: before.email_address,
@@ -202,6 +224,35 @@ export const PATCH = handler(async (req: Request) => {
   const admin = await requireAdmin();
   const body = await readBody(req);
   const action = String(body.action || "");
+  const ip = clientIp(req);
+
+  /**
+   * Sending email reaches outside the café: a customer or owner receives it.
+   * That is exactly the kind of action an audit trail exists for, so the
+   * button presses that dispatch mail are recorded with what actually went
+   * out. Only counts and addresses are kept — never message bodies or SMTP
+   * credentials.
+   */
+  const auditDispatch = async (
+    auditAction: string,
+    result: { attempted: number; sent: number; failed: number; skipped: number },
+    extra: Record<string, unknown> = {}
+  ) => {
+    await audit(
+      admin,
+      auditAction,
+      "settings",
+      null,
+      {
+        ...extra,
+        attempted: result.attempted,
+        sent: result.sent,
+        failed: result.failed,
+        skipped: result.skipped,
+      },
+      { ip }
+    );
+  };
 
   /* ---- the sending account ---- */
 
@@ -285,6 +336,7 @@ export const PATCH = handler(async (req: Request) => {
     if (!status.configured) return fail("No sending account is set up.", 409);
 
     const result = await dispatchQueued(50);
+    await auditDispatch("EMAIL_SEND_NOW", result);
     return ok(result);
   }
 
@@ -294,15 +346,18 @@ export const PATCH = handler(async (req: Request) => {
       .update({ status: "queued", attempts: 0, last_error: null })
       .eq("status", "failed")
       .select("id");
-    if (error) return fail(error.message, 500);
+    if (error) return dbFail(error);
 
     const result = await dispatchQueued(50);
+    await auditDispatch("EMAIL_RETRY_FAILED", result, {
+      requeued: (data ?? []).length,
+    });
     return ok({ requeued: (data ?? []).length, ...result });
   }
 
   if (action === "summary_now") {
     const { data, error } = await db().rpc("enqueue_daily_summary");
-    if (error) return fail(error.message, 500);
+    if (error) return dbFail(error);
 
     const queued = Number(
       // `enqueue_daily_summary` returns an integer, so the value arrives
@@ -329,6 +384,7 @@ export const PATCH = handler(async (req: Request) => {
     }
 
     const result = await dispatchQueued(10);
+    await auditDispatch("EMAIL_SUMMARY_SEND", result, { queued });
     return ok({ queued, ...result });
   }
 
@@ -353,6 +409,22 @@ export const PATCH = handler(async (req: Request) => {
     }));
 
     if (!result.ok) {
+      // The failed attempt still says something useful: which address was
+      // tried and whether the provider was temporarily unreachable. Recorded
+      // non-critically so a logging problem cannot replace the diagnosis the
+      // admin needs with a generic 500.
+      await audit(
+        admin,
+        "EMAIL_TEST_SEND",
+        "settings",
+        null,
+        {
+          recipient: result.to,
+          transient: result.transient,
+          reason: result.title,
+        },
+        { ip, outcome: "failed", critical: false }
+      );
       return fail(result.title, 502, {
         fix: result.fix,
         transient: result.transient,
@@ -361,6 +433,14 @@ export const PATCH = handler(async (req: Request) => {
       });
     }
 
+    await audit(
+      admin,
+      "EMAIL_TEST_SEND",
+      "settings",
+      null,
+      { recipient: result.to, ms: result.ms },
+      { ip }
+    );
     return ok({ sent: 1, to: result.to, ms: result.ms });
   }
 

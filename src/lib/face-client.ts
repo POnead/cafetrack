@@ -138,6 +138,31 @@ export function captureHint(): string {
 }
 
 /**
+ * Pick a compute backend once per page.
+ *
+ * `setBackend` returns false for a backend that is not registered instead of
+ * throwing, so the old try/catch fell through silently and the failure surfaced
+ * later at `tf.ready()` with nothing on screen to explain it. `webgl` and `cpu`
+ * are both in the core package; CPU is much slower but always present, which is
+ * the property that matters on a phone with WebGL switched off.
+ */
+async function ensureTfBackend(tf: any): Promise<"webgl" | "cpu"> {
+  for (const backend of ["webgl", "cpu"] as const) {
+    try {
+      if (await tf.setBackend(backend)) {
+        await tf.ready();
+        return backend;
+      }
+    } catch {
+      // Try the next one rather than failing here.
+    }
+  }
+  throw new Error(
+    "This browser has no usable compute backend for the face model (neither WebGL nor CPU)."
+  );
+}
+
+/**
  * Load the three models, once per page.
  *
  * Concurrent callers share one promise, so a capture and a check starting at the
@@ -149,39 +174,7 @@ export function loadFaceModels(onProgress?: LoadProgress): Promise<FaceModels> {
 
   loading = (async () => {
     const tf = await import("@tensorflow/tfjs");
-
-    /*
-     * Backend selection, by what is actually registered rather than by guessing.
-     *
-     * This used to try `webgl` in a try/catch and fall back to `wasm`. Neither
-     * half was right: `setBackend` returns false for a backend that is not
-     * registered instead of throwing, so the catch never fired and the failure
-     * surfaced later at `tf.ready()` with no indication of why. And `wasm` is not
-     * a backend `@tensorflow/tfjs` ships — it lives in
-     * `@tensorflow/tfjs-backend-wasm`, which is not installed here — so on any
-     * device without WebGL the fallback named a backend that could never exist.
-     *
-     * `webgl` and `cpu` are both in the core package. CPU is much slower, but it
-     * is always there, which is the property that matters: a person on a phone
-     * with WebGL switched off should get a slow face check rather than an error.
-     */
-    let chosen: string | null = null;
-    for (const backend of ["webgl", "cpu"]) {
-      try {
-        if (await tf.setBackend(backend)) {
-          chosen = backend;
-          break;
-        }
-      } catch {
-        // Try the next one rather than failing here.
-      }
-    }
-    if (!chosen) {
-      throw new Error(
-        "This browser has no usable compute backend for the face model (neither WebGL nor CPU)."
-      );
-    }
-    await tf.ready();
+    const chosen = await ensureTfBackend(tf);
 
     const faceapi = await import("@vladmandic/face-api");
 
@@ -250,6 +243,8 @@ export function loadFaceModels(onProgress?: LoadProgress): Promise<FaceModels> {
 export function resetFaceModels(): void {
   loaded = null;
   loading = null;
+  eyeModels = null;
+  eyeModelsLoading = null;
 }
 
 /** Detection options, tuned for a hand-held camera at arm's length. */
@@ -429,13 +424,21 @@ export async function detectFace(source: any): Promise<DetectOutcome> {
       ? faceapi.detectSingleFace(input, options)
       : models.tinyFaceDetector.detectSingleFace(input, options);
 
+  /*
+   * The constructor takes an options object, not positional arguments.
+   *
+   * Passing `(inputSize, threshold)` does not throw: the class destructures its
+   * first argument, a number has neither property, and the defaults (416px,
+   * 0.5) are used instead. That silently turned the 320 and 512 passes into two
+   * identical 416 passes, so the escalation never actually escalated and the
+   * lower 0.3 cutoff was never applied.
+   */
   const tinyOptions = (inputSize: number) =>
     typeof faceapi.TinyFaceDetectorOptions === "function"
-      ? new faceapi.TinyFaceDetectorOptions(
+      ? new faceapi.TinyFaceDetectorOptions({
           inputSize,
-          DETECT_OPTIONS.scoreThreshold,
-          DETECT_OPTIONS.maxResults
-        )
+          scoreThreshold: DETECT_OPTIONS.scoreThreshold,
+        })
       : undefined;
 
   const ssdOptions =
@@ -592,6 +595,155 @@ export async function detectFaceOnly(source: any): Promise<FaceOnlyRead> {
     box: detection.box,
     score: detection.score,
   };
+}
+
+/**
+ * Measure eye openness and head turn for the automatic blink challenge.
+ *
+ * This uses the already-loaded 68-point landmark model and does not compute or
+ * return a face descriptor. The caller requires the eyes to close and reopen
+ * while the face remains frontal.
+ */
+export async function readEyeState(
+  source: HTMLVideoElement
+): Promise<{ aspectRatio: number; poseSignal: number | null } | null> {
+  const found = await detectFace(source);
+  if (!found.ok) return null;
+
+  const located = await landmarksFor(found.models, source, found.detection);
+  const points =
+    (located?.landmarks as any)?.positions ??
+    (located?.landmarks as any)?._positions;
+  if (!points || points.length < 48) return null;
+
+  const ratio = (start: number) => {
+    const eye = points.slice(start, start + 6) as { x: number; y: number }[];
+    if (eye.length !== 6 || eye.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y))) {
+      return null;
+    }
+
+    const width = Math.hypot(eye[0].x - eye[3].x, eye[0].y - eye[3].y);
+    if (width <= 0) return null;
+    const vertical =
+      Math.hypot(eye[1].x - eye[5].x, eye[1].y - eye[5].y) +
+      Math.hypot(eye[2].x - eye[4].x, eye[2].y - eye[4].y);
+    return vertical / (2 * width);
+  };
+
+  const right = ratio(36);
+  const left = ratio(42);
+  if (right === null || left === null) return null;
+
+  const pointsForPose = points as { x: number; y: number }[];
+  return {
+    aspectRatio: (right + left) / 2,
+    poseSignal: headTurnSignal(pointsForPose),
+  };
+}
+
+type EyeModels = { faceapi: any };
+
+let eyeModels: EyeModels | null = null;
+let eyeModelsLoading: Promise<EyeModels> | null = null;
+
+/**
+ * The blink challenge needs the landmarks, and nothing else.
+ *
+ * `loadFaceModels` pulls the recogniser (6.4MB) and the SSD detector (5.6MB) as
+ * well. That is the right trade for a screen that has to embed a face, but the
+ * login check does not embed anything — Face++ does that server-side — and it
+ * only needs to know whether the eyes are open. Loading the full set here would
+ * add twelve megabytes to the sign-in screen to answer a yes/no question that
+ * two small models (0.55MB together) already answer.
+ */
+async function loadEyeModels(): Promise<EyeModels> {
+  if (eyeModels) return eyeModels;
+  if (eyeModelsLoading) return eyeModelsLoading;
+
+  eyeModelsLoading = (async () => {
+    const tf = await import("@tensorflow/tfjs");
+    await ensureTfBackend(tf);
+    const faceapi = await import("@vladmandic/face-api");
+    await Promise.all([
+      faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+      faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+    ]);
+    eyeModels = { faceapi };
+    return eyeModels;
+  })();
+
+  // A failed load must not be cached, or one offline attempt disables the blink
+  // check for the rest of the session with no way to retry.
+  eyeModelsLoading.catch(() => {
+    eyeModelsLoading = null;
+  });
+
+  return eyeModelsLoading;
+}
+
+/**
+ * Eye aspect ratio: how open the eyes are, 0 (shut) to roughly 0.35 (wide).
+ *
+ * The same iBUG-68 arithmetic `readEyeState` uses, kept as a small function so
+ * the automatic blink and the older reader cannot drift into measuring
+ * different things. Returns null when the landmarks are missing or degenerate,
+ * because a made-up number here would capture the wrong frame.
+ */
+function eyeAspectFromPoints(points: readonly { x: number; y: number }[]): number | null {
+  if (points.length < 48) return null;
+
+  const ratio = (start: number) => {
+    const eye = points.slice(start, start + 6);
+    if (eye.length !== 6 || eye.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y))) {
+      return null;
+    }
+    const width = Math.hypot(eye[0].x - eye[3].x, eye[0].y - eye[3].y);
+    if (width <= 0) return null;
+    const vertical =
+      Math.hypot(eye[1].x - eye[5].x, eye[1].y - eye[5].y) +
+      Math.hypot(eye[2].x - eye[4].x, eye[2].y - eye[4].y);
+    return vertical / (2 * width);
+  };
+
+  const right = ratio(36);
+  const left = ratio(42);
+  if (right === null || left === null) return null;
+  return (right + left) / 2;
+}
+
+/**
+ * How open the eyes are in one frame, for the automatic blink challenge.
+ *
+ * Static frames are accepted as well as the live video so the measurement can
+ * be exercised without a camera.
+ */
+export async function readEyeAspect(
+  source: HTMLVideoElement | HTMLImageElement | HTMLCanvasElement
+): Promise<number | null> {
+  const { faceapi } = await loadEyeModels();
+
+  const readAt = async (inputSize: number): Promise<any> => {
+    const options =
+      typeof faceapi.TinyFaceDetectorOptions === "function"
+        ? new faceapi.TinyFaceDetectorOptions({ inputSize, scoreThreshold: 0.3 })
+        : undefined;
+    return faceapi.detectSingleFace(source, options).withFaceLandmarks();
+  };
+
+  let result: any;
+  try {
+    // Same escalation the full reader uses: the small input is fast and catches
+    // an ordinary webcam face, and the larger one catches a face that sits small
+    // in the frame without turning a blink prompt into a timeout.
+    result = await readAt(320);
+    if (!result) result = await readAt(512);
+  } catch {
+    return null;
+  }
+
+  const positions = result?.landmarks?.positions ?? result?.landmarks?._positions;
+  if (!Array.isArray(positions)) return null;
+  return eyeAspectFromPoints(positions as { x: number; y: number }[]);
 }
 
 /**

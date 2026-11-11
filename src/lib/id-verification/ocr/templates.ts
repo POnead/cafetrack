@@ -220,6 +220,8 @@ export const TEMPLATES: Record<IdDocType, CardTemplate> = {
       { field: "id_number", label: /\bCARD\s*(NO|NUMBER)\b/i, side: "right" },
       { field: "date_of_birth", label: /\bDATE\s+OF\s+BIRTH\b/i, side: "right" },
       { field: "date_of_birth", label: /\bPETSA\s+NG\b/i, side: "right" },
+      // Kept as card-label vocabulary so a nearby expiry is not misread as DOB.
+      // PhilSys itself has no expiry field; extraction is disabled by the type spec.
       { field: "date_of_expiry", label: /\bDATE\s+OF\s+EXPIRY\b/i, side: "right" },
     ],
     noise: withNoise(/\bPHLSYS\b/i, /\bNATIONAL\s+ID\b/i, /\bTIRAHAN\b/i),

@@ -1,5 +1,5 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail, readBody, clientIp } from "@/lib/api";
+import { handler, ok, fail, readBody, clientIp, dbFail } from "@/lib/api";
 import { requireUser } from "@/lib/auth";
 import { canManageItems } from "@/lib/permissions";
 import { audit } from "@/lib/audit";
@@ -13,6 +13,7 @@ import {
   requireQuantity,
   parseThreshold,
   parseExpiryDate,
+  parseBoolean,
   parsePhysicalForm,
   parseUnitsPerBox,
   parseUnitPrice,
@@ -74,48 +75,54 @@ export const GET = handler(async (req: Request) => {
   const direction = order === "desc" ? false : true;
   const sort = SORTS[searchParams.get("sort") ?? "name"] ?? SORTS.name;
 
-  let query = db()
-    .from("items")
-    .select(
-      `id, sku, name, physical_form, unit, units_per_box, quantity,
-       low_stock_threshold, expiration_date, version, item_status,
-       submitted_by, submitted_at, reviewed_by, reviewed_at, review_note,
-       created_at, updated_at, supplier_id,
-       category:categories(id, name),
-       location:locations(id, name, min_shelf_life_days),
-       supplier:suppliers(id, name)`,
-      { count: "exact" }
-    )
-    .order(sort, { ascending: direction })
-    // A stable second key. Without it Postgres may return equal rows in any
-    // order between two requests, so paging could show one twice and skip
-    // another — the classic duplicate-row paging bug.
-    .order("sku", { ascending: true })
-    .range(offset, offset + limit - 1);
+  const buildQuery = (includeAdjustmentReason: boolean) => {
+    let query = db()
+      .from("items")
+      .select(
+        `id, sku, name, physical_form, unit, units_per_box, unit_price, quantity,
+         low_stock_threshold, expiration_date, expirable, version, item_status,
+         submitted_by, submitted_at, reviewed_by, reviewed_at, review_note,
+         created_at, updated_at, supplier_id,
+         category:categories(id, name),
+         location:locations(id, name, min_shelf_life_days),
+         supplier:suppliers(id, name),
+         batches:inventory_batches(id, batch_code, received_quantity, remaining_quantity, expiration_date, received_at, source_type${
+           includeAdjustmentReason ? ", adjustment_reason" : ""
+         })`,
+        { count: "exact" }
+      )
+      .order(sort, { ascending: direction })
+      // A stable second key. Without it Postgres may return equal rows in any
+      // order between two requests, so paging could show one twice and skip
+      // another — the classic duplicate-row paging bug.
+      .order("sku", { ascending: true })
+      .range(offset, offset + limit - 1);
 
-  if (status === "active" || status === "pending" || status === "rejected") {
-    query = query.eq("item_status", status);
-  }
-  // A staff member's own submissions, across every state — this is how they
-  // see whether a pending item was approved or rejected.
-  if (submittedByMe) {
-    query = query.eq("submitted_by", user.id);
-  }
+    if (status === "active" || status === "pending" || status === "rejected") {
+      query = query.eq("item_status", status);
+    }
+    if (submittedByMe) query = query.eq("submitted_by", user.id);
 
-  if (q) {
-    // PostgREST treats commas, parentheses and double quotes as filter
-    // syntax, so the pattern is quoted and its metacharacters escaped.
-    // Without this a query like q=milk, 1l mis-parses: the local adapter
-    // answered HTTP 500 and Supabase would build a silently wrong filter.
-    const pattern = '"%' + q.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '%"';
-    query = query.or("name.ilike." + pattern + ",sku.ilike." + pattern);
-  }
-  if (categoryId) {
-    query = query.eq("category_id", categoryId);
-  }
+    if (q) {
+      // PostgREST treats commas, parentheses and double quotes as filter
+      // syntax, so the pattern is quoted and its metacharacters escaped.
+      const pattern = '"%' + q.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '%"';
+      query = query.or("name.ilike." + pattern + ",sku.ilike." + pattern);
+    }
+    if (categoryId) query = query.eq("category_id", categoryId);
+    return query;
+  };
 
-  const { data, error, count } = await query;
-  if (error) return fail(error.message, 500);
+  let { data, error, count } = await buildQuery(true);
+  if (
+    error &&
+    String(error.message).includes("adjustment_reason")
+  ) {
+    // Older databases may not have applied the additive batch-reason migration
+    // yet. Keep the item list usable while omitting that optional detail.
+    ({ data, error, count } = await buildQuery(false));
+  }
+  if (error) return dbFail(error);
 
   let items = data ?? [];
   if (lowOnly) {
@@ -168,13 +175,15 @@ export const POST = handler(async (req: Request) => {
   let quantity: number;
   let lowStock: number;
   let expiry: string | null;
+  let expirable: boolean;
   let physicalForm: string;
   let unitsPerBox: number | null;
   let unitPrice: number | null;
   try {
     quantity = requireQuantity(body.quantity, "Quantity");
     lowStock = parseThreshold(body.low_stock_threshold ?? 5, "Low-stock threshold");
-    expiry = parseExpiryDate(body.expiration_date);
+    expirable = body.expirable === undefined ? true : parseBoolean(body.expirable, "Expirable");
+    expiry = expirable ? parseExpiryDate(body.expiration_date) : null;
     physicalForm = parsePhysicalForm(body.physical_form);
     unitsPerBox = parseUnitsPerBox(body.units_per_box);
     unitPrice = parseUnitPrice(body.unit_price);
@@ -265,6 +274,7 @@ export const POST = handler(async (req: Request) => {
       quantity,
       low_stock_threshold: lowStock,
       expiration_date: expiry,
+      expirable,
       item_status: itemStatus,
       // Only a submission needs provenance. An item added by someone who can
       // add it directly is not waiting on anyone, so recording it as submitted
@@ -275,7 +285,7 @@ export const POST = handler(async (req: Request) => {
     .select()
     .single();
 
-  if (error) return fail(error.message, 500);
+  if (error) return dbFail(error);
 
   await audit(user, "ITEM_CREATE", "item", data.id, {
     sku: data.sku,

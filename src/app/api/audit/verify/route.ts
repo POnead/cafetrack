@@ -1,5 +1,5 @@
 import { db } from "@/lib/supabase";
-import { handler, ok, fail } from "@/lib/api";
+import { handler, ok, dbFail } from "@/lib/api";
 import { requireAdmin } from "@/lib/auth";
 
 export const runtime = "nodejs";
@@ -12,7 +12,7 @@ export const GET = handler(async () => {
   await requireAdmin();
 
   const { data, error } = await db().rpc("verify_audit_chain");
-  if (error) return fail(error.message, 500);
+  if (error) return dbFail(error);
 
   const broken = (data ?? []) as { broken_seq: number; reason: string }[];
 

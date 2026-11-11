@@ -61,7 +61,7 @@ import {
   toJpegDataUrl,
 } from "@/lib/face-client";
 import {
-  poseStateOfRead,
+  capturePoseStateOfRead,
   readFaceFor,
   useFaceEngine,
   type EngineRead,
@@ -148,6 +148,7 @@ export default function FaceCapture({ onCapture, currentPhotos, disabled }: Prop
   const [shots, setShots] = useState<Partial<Record<FacePose, FaceShot>>>({});
   const [activePose, setActivePose] = useState<FacePose>(PRIMARY_POSE);
   const [blocked, setBlocked] = useState<CameraProblem | null>(null);
+  const [confirmRetake, setConfirmRetake] = useState(false);
 
   /*
    * The angles this camera session is collecting.
@@ -174,6 +175,7 @@ export default function FaceCapture({ onCapture, currentPhotos, disabled }: Prop
   /** The angles still missing, in capture order. */
   const missing = FACE_POSES.filter((pose) => !shots[pose]);
   const capturedPoses = FACE_POSES.filter((pose) => shots[pose]);
+  const hasExistingFace = FACE_POSES.some((pose) => Boolean(currentPhotos?.[pose]));
 
   /* Anything that holds the camera open while the panel is closed would keep a
    * green privacy light on after someone thought they had stopped. */
@@ -246,7 +248,13 @@ export default function FaceCapture({ onCapture, currentPhotos, disabled }: Prop
     sequence: cameraPoses,
     videoRef,
     active: phase === "camera",
+    onActivity: () => window.dispatchEvent(new Event("cafetrack:user-activity")),
     poses: session ?? FACE_POSES,
+    // Sample more often and capture after a brief stillness check, so a held
+    // pose is accepted promptly without filing a transient frame.
+    intervalMs: 180,
+    stableReads: 2,
+    scanMinMs: 250,
     /*
      * The photo is grabbed at the same instant as the embedding, so the JPEG and
      * the 128 floats always describe the same frame.
@@ -341,8 +349,17 @@ export default function FaceCapture({ onCapture, currentPhotos, disabled }: Prop
   );
 
   const startCamera = useCallback(() => {
+    setConfirmRetake(false);
     void openFor(missing);
   }, [missing, openFor]);
+
+  const beginRetake = useCallback(() => {
+    if (hasExistingFace) {
+      setConfirmRetake(true);
+      return;
+    }
+    startCamera();
+  }, [hasExistingFace, startCamera]);
 
   const cancelCamera = useCallback(() => {
     stopCamera();
@@ -378,7 +395,7 @@ export default function FaceCapture({ onCapture, currentPhotos, disabled }: Prop
       read: Extract<EngineRead, { ok: true }>,
       photo: string
     ): { accepted: boolean } => {
-      const state = poseStateOfRead(read);
+      const state = capturePoseStateOfRead(read, enrolmentEngine);
       const held = FACE_POSES.filter((pose) => shotsRef.current[pose]);
       const filing = fileFrame({ expected, seen: state.pose, held });
 
@@ -605,12 +622,14 @@ export default function FaceCapture({ onCapture, currentPhotos, disabled }: Prop
               so its status and feedback stay anchored to the live preview.
             */}
             <div className="relative mx-auto aspect-[4/5] max-h-[min(65vh,36rem)] w-full max-w-sm overflow-hidden rounded-xl">
+              {/* The preview is mirrored (.face-preview-mirror); the filled-angle
+                  thumbnails below are the saved, unmirrored photos. */}
               <video
                 ref={attachStream}
                 playsInline
                 muted
                 autoPlay
-                className="block h-full w-full object-cover"
+                className="block h-full w-full object-cover face-preview-mirror"
               />
               {/* The loading screen for the angle being read. */}
               {scan.phase === "scanning" && (
@@ -619,8 +638,8 @@ export default function FaceCapture({ onCapture, currentPhotos, disabled }: Prop
                   total={scan.total}
                 />
               )}
-              {/* The live guide, until the loop hands over to the manual button. */}
-              {scan.phase === "prompt" && (
+              {/* Keep the pose guidance visible while the manual fallback is available. */}
+              {(scan.phase === "prompt" || scan.phase === "failed") && (
                 <FaceCaptureGuide
                   poses={scan.poses}
                   activePose={scan.activePose}
@@ -633,6 +652,18 @@ export default function FaceCapture({ onCapture, currentPhotos, disabled }: Prop
               )}
             </div>
           </div>
+          {(scan.phase === "prompt" || scan.phase === "failed") && (
+            <FaceCaptureGuide
+              display="instructions"
+              poses={scan.poses}
+              activePose={scan.activePose}
+              done={scan.frames.map((f) => f.pose)}
+              state={scan.liveState}
+              holdProgress={scan.holdProgress}
+              flashPose={scan.flashPose}
+              message={scan.message}
+            />
+          )}
 
           {scan.showManual && (
             <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-relaxed text-cocoa-700">
@@ -763,6 +794,31 @@ export default function FaceCapture({ onCapture, currentPhotos, disabled }: Prop
 
       {(phase === "idle" || phase === "no-camera" || phase === "denied") && (
         <div className="space-y-4">
+          {confirmRetake && hasExistingFace && (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-cocoa-700">
+              <p className="font-semibold text-cocoa-800">Replace the current face verification?</p>
+              <p className="mt-1 leading-relaxed">
+                This will replace the saved reference photos for this staff member. Continue to capture a new set or upload a replacement photo.
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className="btn-primary min-h-10"
+                  onClick={startCamera}
+                >
+                  Continue
+                </button>
+                <button
+                  type="button"
+                  className="btn-ghost min-h-10"
+                  onClick={() => setConfirmRetake(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="grid gap-2.5 sm:grid-cols-2">
             {missing.length > 0 &&
               (cameraAvailable() ? (
@@ -770,15 +826,17 @@ export default function FaceCapture({ onCapture, currentPhotos, disabled }: Prop
                   type="button"
                   className="btn-primary min-h-12"
                   disabled={disabled}
-                  onClick={startCamera}
+                  onClick={hasExistingFace ? beginRetake : startCamera}
                 >
-                  {capturedPoses.length === 0
-                    ? "Take the photos"
-                    : `Take the ${POSE_COPY[missing[0]].short} photo`}
+                  {hasExistingFace
+                    ? "Retake"
+                    : capturedPoses.length === 0
+                      ? "Take the photos"
+                      : `Take the ${POSE_COPY[missing[0]].short} photo`}
                 </button>
               ) : (
                 <label className="btn-primary inline-flex min-h-12 cursor-pointer items-center justify-center">
-                  Take the photos
+                  {hasExistingFace ? "Retake" : "Take the photos"}
                   <input
                     type="file"
                     accept="image/jpeg,image/png,image/webp"

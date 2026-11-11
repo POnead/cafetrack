@@ -132,10 +132,9 @@ export function describeCameraProblem(problem: CameraProblem): {
       return {
         message: "This address cannot use the camera.",
         help:
-          "Browsers only allow a camera over https, or on localhost. This page is " +
-          "on a plain http address, so the camera is refused before any script runs. " +
-          "Use “Upload a photo” below, or open the app on the computer itself at " +
-          "localhost to use the camera.",
+          "Browsers require HTTPS for camera access from another device. Open the " +
+          "HTTPS address printed by “npm run dev:https”, or use the app on this " +
+          "computer at localhost.",
         // An address does not become secure on its own. Retrying is a dead end.
         retryable: false,
       };
@@ -144,9 +143,8 @@ export function describeCameraProblem(problem: CameraProblem): {
       return {
         message: "This browser does not offer a camera to the page.",
         help:
-          "Try a current version of Chrome, Edge, Safari or Firefox. If you are on a " +
-          "phone, “Upload a photo” opens the phone's own camera app instead and works " +
-          "without one.",
+          "Try a current version of Chrome, Edge, Safari or Firefox, then check that " +
+          "the page is open over HTTPS or on localhost.",
         retryable: false,
       };
 
@@ -155,9 +153,8 @@ export function describeCameraProblem(problem: CameraProblem): {
         message: "The camera is blocked for this site.",
         help:
           "Allow the camera in your browser's site settings for this address, then " +
-          "use “Check again”. Browsers do not re-ask once you have said no, so this " +
-          "cannot be fixed from inside the page — and until it is, “Upload a photo” " +
-          "below does exactly the same job.",
+          "use “Check again”. Browsers do not re-ask once you have said no, so change " +
+          "the site permission before retrying.",
         // The setting is outside the page, so a retry is how you find out whether
         // the user has changed it yet. Worth offering.
         retryable: true,
@@ -168,7 +165,7 @@ export function describeCameraProblem(problem: CameraProblem): {
         message: "No camera was found on this device.",
         help:
           "Check that a camera is connected and not disabled in the operating " +
-          "system, then “Check again”. Or use “Upload a photo” below.",
+          "system, then “Check again”.",
         retryable: true,
       };
 
@@ -176,8 +173,8 @@ export function describeCameraProblem(problem: CameraProblem): {
       return {
         message: "The camera is being used by another program.",
         help:
-          "Close anything else that is holding the camera — a video call, another " +
-          "browser tab, a meeting app — then “Check again”.",
+          "Close the Windows Camera app completely (not just minimize it), along " +
+          "with any video call or other browser tab using the camera. Then “Check again”.",
         retryable: true,
       };
 
@@ -194,7 +191,7 @@ export function describeCameraProblem(problem: CameraProblem): {
     default:
       return {
         message: "The camera could not be opened here.",
-        help: "Try again, or use “Upload a photo” below instead.",
+        help: "Check the camera permission and try again.",
         retryable: true,
       };
   }

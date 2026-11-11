@@ -20,6 +20,7 @@ import { assertTestTarget } from "./_guard.mjs";
 import { stubControl, resolveStubControlUrl, STUB_USER } from "./_smtp-stub.mjs";
 
 const BASE = process.env.BASE_URL || "http://localhost:3101";
+const ADMIN_PASSWORD = process.env.SEED_ADMIN_PASSWORD || "admin123";
 
 /*
  * Where the control API is has to be discovered, not assumed.
@@ -50,7 +51,37 @@ function section(t) {
   console.log(`\n== ${t} ==`);
 }
 
+function decodedMime(message) {
+  return String(message?.raw ?? "")
+    .replace(/=\r?\n/g, "")
+    .replace(/=([0-9a-f]{2})/gi, (_match, hex) =>
+      String.fromCharCode(parseInt(hex, 16))
+    );
+}
+
+function hasBrandedHtmlAndPlainText(message) {
+  const raw = decodedMime(message);
+  return (
+    /text\/plain/i.test(raw) &&
+    /text\/html/i.test(raw) &&
+    /cid:merrylane-logo/i.test(raw) &&
+    /Content-ID:\s*<merrylane-logo>/i.test(raw) &&
+    /Content-Disposition:\s*inline/i.test(raw) &&
+    /merrylane-wordmark\.png/i.test(raw)
+  );
+}
+
 async function call(method, path, body, cookie) {
+  if (
+    method === "DELETE" &&
+    path.startsWith("/api/items/") &&
+    (body == null || (typeof body === "object" && Object.keys(body).length === 0))
+  ) {
+    body = { password: ADMIN_PASSWORD };
+  }
+  if (method === "DELETE" && path.startsWith("/api/refs/") && body == null) {
+    body = { reason: "Email test cleanup", confirm_password: ADMIN_PASSWORD };
+  }
   const r = await fetch(BASE + path, {
     method,
     headers: {
@@ -117,6 +148,9 @@ async function queue(cookie) {
 }
 
 const created = { items: [], recipients: [], suppliers: [] };
+let recoveryEmailBefore = null;
+let adminRecoveryEmailBefore = null;
+let adminRecoveryUserId = null;
 
 /**
  * A clean slate, before anything else.
@@ -162,9 +196,9 @@ try {
 
   const login = await call("POST", "/api/auth/login", {
     username: "admin",
-    password: "admin123",
+    password: ADMIN_PASSWORD,
   });
-  const A = (login.headers.getSetCookie?.() ?? []).map((c) => c.split(";")[0]).join("; ");
+  let A = (login.headers.getSetCookie?.() ?? []).map((c) => c.split(";")[0]).join("; ");
   check("admin login", login.status === 200);
 
   const inherited = await wipeEmailState(A);
@@ -344,6 +378,11 @@ try {
       /no-reply@cafetrack\.test/i.test(testMail[0]?.envelope?.from ?? ""),
     `${testMail[0]?.subject ?? ""} from ${testMail[0]?.envelope?.from ?? ""}`
   );
+  check(
+    "the SMTP verification email has branded HTML, an inline Merrylane logo, and plaintext",
+    hasBrandedHtmlAndPlainText(testMail[0]),
+    "HTML and text alternatives share one branded message"
+  );
 
   // A direct check is not a queued delivery: it deliberately does not touch the
   // delivery log.
@@ -420,6 +459,11 @@ try {
       .map((m) => (m.body ?? "").split("\n").slice(-4).join(" / "))
       .slice(0, 2)
       .join(" | ")
+  );
+  check(
+    "the stock alert has branded HTML, an inline Merrylane logo, and plaintext",
+    delivered.some((message) => hasBrandedHtmlAndPlainText(message)),
+    `${delivered.length} alert message(s) received`
   );
   check(
     "the supplier's phone number is in the email, not only in the app",
@@ -564,6 +608,11 @@ try {
       /checked out/i.test(summaries[0]?.body ?? ""),
     (summaries[0]?.body ?? "").split("\n").slice(0, 2).join(" / ")
   );
+  check(
+    "the daily summary has branded HTML, an inline Merrylane logo, and plaintext",
+    summaries.some((message) => hasBrandedHtmlAndPlainText(message)),
+    `${summaries.length} summary message(s) received`
+  );
 
   r = await call("PATCH", "/api/email", { action: "summary_now" }, A);
   check(
@@ -608,6 +657,11 @@ try {
     "it says what to do about it",
     /change the password/i.test(warns[0]?.body ?? ""),
     (warns[0]?.body ?? "").split("\n").pop() ?? ""
+  );
+  check(
+    "the failed-login warning has branded HTML, an inline Merrylane logo, and plaintext",
+    warns.some((message) => hasBrandedHtmlAndPlainText(message)),
+    `${warns.length} warning message(s) received`
   );
 
   /* ================================================================== */
@@ -754,6 +808,11 @@ try {
       /Content-Transfer-Encoding:\s*base64[\s\S]{0,300}JVBERi0x/i.test(reportMime),
     "PDF content and a dated attachment filename are present"
   );
+  check(
+    "the automated report has branded HTML, an inline Merrylane logo, and plaintext",
+    hasBrandedHtmlAndPlainText(reports[0]),
+    "HTML body and inline brand asset are alongside the PDF attachment"
+  );
   const queuedReport = (await queue(A)).find((entry) => entry.kind === "report");
   check(
     "the emailed PDF records the active report filters",
@@ -813,6 +872,417 @@ try {
     `${r.data?.recipients?.length ?? 0} recipients`
   );
 
+  section("the delivery log filters and pages queue rows");
+  const alertKinds = new Set([
+    "low_stock",
+    "out_of_stock",
+    "near_expiry",
+    "expired",
+    "failed_login",
+  ]);
+  for (const [filter, matches] of [
+    ["alerts", (kind) => alertKinds.has(kind)],
+    ["reports", (kind) => kind === "report" || kind === "reports"],
+    ["daily_summary", (kind) => kind === "daily_summary"],
+  ]) {
+    const filtered = await call("GET", `/api/email?queue=1&kind=${filter}`, null, A);
+    check(
+      `${filter} shows only its matching messages`,
+      filtered.status === 200 &&
+        Array.isArray(filtered.data?.queue) &&
+        filtered.data.queue.every((row) => matches(row.kind)),
+      `${filtered.status} ${filtered.data?.queue?.map((row) => row.kind).join(", ") ?? filtered.data?.error ?? ""}`
+    );
+  }
+  const reportsLog = await call("GET", "/api/email?queue=1&kind=reports", null, A);
+  check(
+    "the reports filter includes the report sent in this suite",
+    reportsLog.data?.queue?.some((row) => row.kind === "report"),
+    `${reportsLog.data?.queue?.length ?? 0} rows`
+  );
+  const invalidLogFilter = await call("GET", "/api/email?queue=1&kind=unknown", null, A);
+  check("an unknown delivery-log filter is rejected", invalidLogFilter.status === 400, `${invalidLogFilter.status}`);
+  const secondLogPage = await call("GET", "/api/email?queue=1&offset=50", null, A);
+  check(
+    "the delivery log supports 50-row pagination",
+    secondLogPage.status === 200 &&
+      Array.isArray(secondLogPage.data?.queue) &&
+      secondLogPage.data.queue.length <= 50 &&
+      typeof secondLogPage.data?.queue_has_more === "boolean",
+    `${secondLogPage.status} rows=${secondLogPage.data?.queue?.length ?? "-"}`
+  );
+
+  section("owner-email admin password recovery");
+  const unauthenticatedPasswordChange = await call(
+    "POST",
+    "/api/auth/change-password",
+    {
+      current_password: ADMIN_PASSWORD,
+      password: "CafeTrack!Temp2",
+      confirm_password: "CafeTrack!Temp2",
+    }
+  );
+  check(
+    "changing an admin password requires an authenticated admin",
+    unauthenticatedPasswordChange.status === 401 || unauthenticatedPasswordChange.status === 403,
+    `${unauthenticatedPasswordChange.status}`
+  );
+
+  const wrongCurrentPassword = await call(
+    "POST",
+    "/api/auth/change-password",
+    {
+      current_password: "not-the-current-password",
+      password: "CafeTrack!Temp2",
+      confirm_password: "CafeTrack!Temp2",
+    },
+    A
+  );
+  check("changing a password checks the current password", wrongCurrentPassword.status === 401);
+
+  const invalidRecoveryEmail = await call(
+    "PATCH",
+    "/api/settings",
+    { password_recovery_email: "not-an-email" },
+    A
+  );
+  check("an invalid owner recovery email is rejected", invalidRecoveryEmail.status === 400);
+
+  if (ADMIN_PASSWORD.length < 8) {
+    check(
+      "password change and reset tests skipped because the seeded password is shorter than the new 8-character minimum",
+      true
+    );
+  } else {
+    const changedPassword = await call(
+      "POST",
+      "/api/auth/change-password",
+      {
+        current_password: ADMIN_PASSWORD,
+        password: "CafeTrack!Temp2",
+        confirm_password: "CafeTrack!Temp2",
+      },
+      A
+    );
+    check("an admin can change their own password", changedPassword.status === 200);
+    const oldAdminSession = A;
+    A = (changedPassword.headers.getSetCookie?.() ?? [])
+      .map((cookie) => cookie.split(";")[0])
+      .join("; ");
+    const staleAdminSession = await call("GET", "/api/auth/me", null, oldAdminSession);
+    check(
+      "changing a password invalidates the previously issued session",
+      staleAdminSession.status === 401
+    );
+
+    const restoredPassword = await call(
+      "POST",
+      "/api/auth/change-password",
+      {
+        current_password: "CafeTrack!Temp2",
+        password: ADMIN_PASSWORD,
+        confirm_password: ADMIN_PASSWORD,
+      },
+      A
+    );
+    check("the test restores the seeded admin password", restoredPassword.status === 200);
+    A = (restoredPassword.headers.getSetCookie?.() ?? [])
+      .map((cookie) => cookie.split(";")[0])
+      .join("; ");
+
+    const currentSettings = await call("GET", "/api/settings", null, A);
+    recoveryEmailBefore = currentSettings.data?.settings?.password_recovery_email ?? "";
+    const listedUsers = await call("GET", "/api/users", null, A);
+    const recoveryAdmin = listedUsers.data?.users?.find((user) => user.username === "admin");
+    adminRecoveryUserId = recoveryAdmin?.id ?? null;
+    adminRecoveryEmailBefore = recoveryAdmin?.recovery_email ?? "";
+    check("admin accounts expose their individual recovery email to admins", Boolean(adminRecoveryUserId));
+
+    const configuredAdminRecoveryEmail = adminRecoveryUserId
+      ? await call(
+          "PATCH",
+          `/api/users/${adminRecoveryUserId}`,
+          { recovery_email: OWNER },
+          A
+        )
+      : { status: 0 };
+    check(
+      "an admin can save an individual recovery email",
+      configuredAdminRecoveryEmail.status === 200,
+      `${configuredAdminRecoveryEmail.status}`
+    );
+
+    const configuredRecoveryEmail = await call(
+      "PATCH",
+      "/api/settings",
+      { password_recovery_email: SECOND },
+      A
+    );
+    check("the legacy recovery fallback can still be configured", configuredRecoveryEmail.status === 200);
+
+    const beforeRecoveryMail = await stub.messages();
+    const requested = await call(
+      "POST",
+      "/api/auth/password-recovery",
+      { action: "request", username: "admin" }
+    );
+    check(
+      "the public recovery request returns a generic response",
+      requested.status === 200 &&
+        /eligible/.test(requested.data?.message ?? "") &&
+        Boolean(requested.data?.challenge_id) &&
+        Number.isFinite(Date.parse(requested.data?.expires_at)) &&
+        Number.isFinite(Date.parse(requested.data?.resend_available_at)) &&
+        Number.isSafeInteger(requested.data?.resend_after_seconds) &&
+        requested.data.resend_after_seconds >= 0 &&
+        requested.data.resend_after_seconds <= 60,
+      `${requested.status}`
+    );
+
+    const recoveryMailArrived = await waitFor(async () => {
+      const messages = await stub.messages();
+      return messages.count > beforeRecoveryMail.count;
+    });
+    const recoveryMessages = await stub.messages();
+    const recoveryMail = recoveryMessages.messages
+      .slice(beforeRecoveryMail.count)
+      .find((message) => /admin password reset code/i.test(message.subject));
+    const recoveryCode = recoveryMail?.body.match(/code is (\d{6})/i)?.[1];
+    check(
+      "a recovery code is sent to this admin's own inbox instead of the legacy fallback",
+      recoveryMailArrived &&
+        recoveryMail?.to.includes(OWNER) &&
+        !recoveryMail?.to.includes(SECOND) &&
+        Boolean(recoveryCode),
+      recoveryMail?.to ?? "not delivered"
+    );
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await call(
+        "POST",
+        "/api/auth/password-recovery",
+        { action: "request", username: "ADMIN" }
+      );
+    }
+    const reusedRequest = await call(
+      "POST",
+      "/api/auth/password-recovery",
+      { action: "request", username: "admin" }
+    );
+    const messagesAfterReuse = await stub.messages();
+    check(
+      "a request during cooldown reuses the active challenge without sending another email",
+      reusedRequest.status === 200 &&
+        reusedRequest.data?.challenge_id === requested.data?.challenge_id &&
+        reusedRequest.data?.expires_at === requested.data?.expires_at &&
+      reusedRequest.data?.resend_available_at === requested.data?.resend_available_at &&
+      Number.isSafeInteger(reusedRequest.data?.resend_after_seconds) &&
+      reusedRequest.data.resend_after_seconds <= requested.data.resend_after_seconds &&
+      messagesAfterReuse.count === recoveryMessages.count,
+      `${reusedRequest.status} same challenge=${reusedRequest.data?.challenge_id === requested.data?.challenge_id} same expiry=${reusedRequest.data?.expires_at === requested.data?.expires_at} same cooldown=${reusedRequest.data?.resend_available_at === requested.data?.resend_available_at} mail count=${messagesAfterReuse.count}`
+    );
+    const recoveryDecodedRaw = decodedMime(recoveryMail);
+    check(
+      "the recovery email includes styled HTML and the embedded Merrylane logo",
+      hasBrandedHtmlAndPlainText(recoveryMail) &&
+        /width="220" height="87"/i.test(recoveryDecodedRaw) &&
+        /merrylane-wordmark\.png/i.test(recoveryDecodedRaw),
+      recoveryDecodedRaw.includes("text/html")
+        ? "styled HTML with the inline Merrylane logo"
+        : "HTML part missing"
+    );
+    check(
+      "the visible HTML email includes this recovery code in a styled code block",
+      Boolean(recoveryCode) &&
+        /YOUR VERIFICATION CODE/i.test(recoveryDecodedRaw) &&
+        recoveryDecodedRaw.includes(recoveryCode),
+      recoveryCode ? "code is present in the HTML message" : "code missing"
+    );
+    check(
+      "the email keeps a plain-text fallback with a clear safety reminder",
+      /text\/plain/i.test(recoveryDecodedRaw) &&
+        /DIDN'T REQUEST THIS/i.test(recoveryDecodedRaw) &&
+        /Never share this code with anyone/i.test(recoveryDecodedRaw),
+      `plain=${/text\/plain/i.test(recoveryDecodedRaw)} reminder=${/DIDN'T REQUEST THIS/i.test(recoveryDecodedRaw)} share=${/Never share this code with anyone/i.test(recoveryDecodedRaw)}`
+    );
+    check(
+      "the HTML email explains what to do if the reset was not requested",
+      /Didn't request this\?/i.test(recoveryDecodedRaw) &&
+        /Your password will not change/i.test(recoveryDecodedRaw),
+      "security reminder is present"
+    );
+
+    const wrongCode = await call("POST", "/api/auth/password-recovery", {
+      action: "verify",
+      challenge_id: requested.data?.challenge_id,
+      code: recoveryCode === "000000" ? "999999" : "000000",
+    });
+    check("an incorrect recovery code is rejected", wrongCode.status === 400, `${wrongCode.status}`);
+
+    const verifiedCode = await call("POST", "/api/auth/password-recovery", {
+      action: "verify",
+      challenge_id: requested.data?.challenge_id,
+      code: recoveryCode,
+    });
+    check(
+      "the original emailed code remains valid after the repeated request",
+      verifiedCode.status === 200 && Boolean(verifiedCode.data?.reset_token),
+      `${verifiedCode.status}`
+    );
+
+    const mismatchedPassword = await call("POST", "/api/auth/password-recovery", {
+      action: "reset",
+      challenge_id: requested.data?.challenge_id,
+      reset_token: verifiedCode.data?.reset_token,
+      password: "CafeTrack!Test2",
+      confirm_password: "not-the-same",
+    });
+    check("password confirmation is required before consuming the reset token", mismatchedPassword.status === 400);
+
+    const samePasswordReset = await call("POST", "/api/auth/password-recovery", {
+      action: "reset",
+      challenge_id: requested.data?.challenge_id,
+      reset_token: verifiedCode.data?.reset_token,
+      password: ADMIN_PASSWORD,
+      confirm_password: ADMIN_PASSWORD,
+    });
+    check(
+      "admin password recovery rejects the current password with a clear error",
+      samePasswordReset.status === 400 &&
+        /different from your current password/i.test(samePasswordReset.data?.error ?? ""),
+      `${samePasswordReset.status} ${samePasswordReset.data?.error ?? ""}`
+    );
+
+    const throttledLoginFailures = [];
+    for (let attempt = 0; attempt < 5; attempt++) {
+      throttledLoginFailures.push(
+        await call("POST", "/api/auth/login", {
+          username: `recovery-throttle-${attempt}`,
+          password: "wrong-on-purpose",
+        })
+      );
+    }
+    const blockedBeforeRecovery = await call("POST", "/api/auth/login", {
+      username: "admin",
+      password: ADMIN_PASSWORD,
+    });
+    check(
+      "the shared admin login throttle is active before password recovery",
+      throttledLoginFailures.every((result) => result.status === 401) &&
+        blockedBeforeRecovery.status === 429,
+      `${throttledLoginFailures.map((result) => result.status).join(",")} then ${blockedBeforeRecovery.status}`
+    );
+
+    const reset = await call("POST", "/api/auth/password-recovery", {
+      action: "reset",
+      challenge_id: requested.data?.challenge_id,
+      reset_token: verifiedCode.data?.reset_token,
+      password: "CafeTrack!Reset3",
+      confirm_password: "CafeTrack!Reset3",
+    });
+    check(
+      "the verified owner code resets the admin password and confirms the shared lockout was cleared",
+      reset.status === 200 && reset.data?.login_throttle_cleared === true,
+      `${reset.status} ${reset.data?.message ?? reset.data?.error ?? ""}`
+    );
+
+    const recoveryLogin = await call("POST", "/api/auth/login", {
+      username: "admin",
+      password: "CafeTrack!Reset3",
+    });
+    A = (recoveryLogin.headers.getSetCookie?.() ?? [])
+      .map((cookie) => cookie.split(";")[0])
+      .join("; ");
+    check(
+      "password recovery clears the active shared login throttle and allows immediate sign-in",
+      recoveryLogin.status === 200,
+      `${recoveryLogin.status} ${recoveryLogin.data?.error ?? ""}`
+    );
+
+    const restoredRecoveredPassword = await call(
+      "POST",
+      "/api/auth/change-password",
+      {
+        current_password: "CafeTrack!Reset3",
+        password: ADMIN_PASSWORD,
+        confirm_password: ADMIN_PASSWORD,
+      },
+      A
+    );
+    check("the test restores the seeded admin password after recovery", restoredRecoveredPassword.status === 200);
+    A = (restoredRecoveredPassword.headers.getSetCookie?.() ?? [])
+      .map((cookie) => cookie.split(";")[0])
+      .join("; ");
+
+    const reusedToken = await call("POST", "/api/auth/password-recovery", {
+      action: "reset",
+      challenge_id: requested.data?.challenge_id,
+      reset_token: verifiedCode.data?.reset_token,
+      password: "CafeTrack!Reset3",
+      confirm_password: "CafeTrack!Reset3",
+    });
+    check("a recovery token cannot be used twice", reusedToken.status === 400, `${reusedToken.status}`);
+
+    await stub.failNext(1);
+    const failedRecoveryRequest = await call(
+      "POST",
+      "/api/auth/password-recovery",
+      { action: "request", username: "admin" }
+    );
+    check(
+      "a recovery email delivery failure is reported instead of claiming the code was sent",
+      failedRecoveryRequest.status === 503 &&
+        /couldn't send the recovery code/i.test(failedRecoveryRequest.data?.error ?? ""),
+      `${failedRecoveryRequest.status} ${failedRecoveryRequest.data?.error ?? ""}`
+    );
+
+    const clearedAdminRecoveryEmail = await call(
+      "PATCH",
+      `/api/users/${adminRecoveryUserId}`,
+      { recovery_email: "" },
+      A
+    );
+    check("an admin email can be cleared to use the legacy fallback", clearedAdminRecoveryEmail.status === 200);
+
+    const beforeFallbackMail = await stub.messages();
+    const fallbackRequest = await call(
+      "POST",
+      "/api/auth/password-recovery",
+      { action: "request", username: "admin" }
+    );
+    const fallbackMailArrived = await waitFor(async () => {
+      const messages = await stub.messages();
+      return messages.count > beforeFallbackMail.count;
+    });
+    const fallbackMessages = await stub.messages();
+    const fallbackMail = fallbackMessages.messages
+      .slice(beforeFallbackMail.count)
+      .find((message) => /admin password reset code/i.test(message.subject));
+    check(
+      "legacy owner email is used when this admin has no individual recovery email",
+      fallbackRequest.status === 200 &&
+        fallbackMailArrived &&
+        fallbackMail?.to.includes(SECOND) &&
+        !fallbackMail?.to.includes(OWNER),
+      fallbackMail?.to ?? "not delivered"
+    );
+
+    const restoredAdminRecoveryEmail = await call(
+      "PATCH",
+      `/api/users/${adminRecoveryUserId}`,
+      { recovery_email: adminRecoveryEmailBefore },
+      A
+    );
+    check("the test restores the admin's individual recovery email after fallback", restoredAdminRecoveryEmail.status === 200);
+
+    const restoredRecoveryEmail = await call(
+      "PATCH",
+      "/api/settings",
+      { password_recovery_email: recoveryEmailBefore },
+      A
+    );
+    check("the test restores the previous legacy recovery email", restoredRecoveryEmail.status === 200);
+  }
+
   /* ================================================================== */
   section("the queue is admin-only, like everything else in Settings");
   /* ================================================================== */
@@ -832,11 +1302,21 @@ try {
 
   const login = await call("POST", "/api/auth/login", {
     username: "admin",
-    password: "admin123",
+    password: ADMIN_PASSWORD,
   });
   const A = (login.headers.getSetCookie?.() ?? []).map((c) => c.split(";")[0]).join("; ");
 
   if (A) {
+    if (recoveryEmailBefore !== null) {
+      await call("PATCH", "/api/settings", {
+        password_recovery_email: recoveryEmailBefore,
+      }, A);
+    }
+    if (adminRecoveryUserId && adminRecoveryEmailBefore !== null) {
+      await call("PATCH", `/api/users/${adminRecoveryUserId}`, {
+        recovery_email: adminRecoveryEmailBefore,
+      }, A);
+    }
     // Email off first, so nothing is queued while the rest is cleaned up.
     await call("PATCH", "/api/settings", { email_enabled: "0" }, A);
     // Every recipient, not just the ones this run created: emailing a report to

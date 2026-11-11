@@ -1,23 +1,25 @@
 import { NextResponse } from "next/server";
 import { createHash } from "node:crypto";
 import { db } from "./supabase";
+import { activeFailureStamps } from "./failure-streak";
 
 /**
  * Brute-force throttling for the sign-in routes, built on the login_attempts
  * table they have always written and never read.
  *
  * The counters are *consecutive* failures: the walk stops at the most recent
- * success, so signing in successfully clears your own counter. A running total
- * would let a café's shared till lock a real person out permanently, and would
- * also make the test suite lock itself out on re-runs.
+ * success, so signing in successfully clears your own escalation. A running
+ * total would let a café's shared till lock a real person out permanently, and
+ * would also make the test suite lock itself out on re-runs.
  *
  * Two limits, because either one alone is beatable:
  *   - per credential, so one account cannot be hammered;
  *   - per method, so cycling through many codes is throttled as well.
  *
- * Call this before verifying any password, and do not record blocked attempts:
- * logging them would push the window forward and each lockout would last
- * forever.
+ * After five failures, the lockout starts at one minute and grows by one minute
+ * for each further failed attempt after a lock expires, up to fifteen minutes.
+ * A successful authentication resets it. Blocked requests are not recorded, so
+ * they cannot extend the current countdown.
  */
 
 /** Consecutive failures for one credential before it is locked out. */
@@ -26,17 +28,27 @@ export const MAX_CONSECUTIVE_FAILURES = 5;
 /** Consecutive failures across a whole method, whichever credential they used. */
 export const MAX_FAILURES_PER_METHOD = 20;
 
-/** How far back a failure still counts. */
-export const WINDOW_MINUTES = 15;
+/** Longest lockout, reached after repeated failures without a successful login. */
+export const MAX_LOCKOUT_MINUTES = 15;
 
 /** Recent rows to read — comfortably more than either limit. */
 const SCAN_ROWS = 40;
 
-const WINDOW_MS = WINDOW_MINUTES * 60_000;
+/** Shared bucket used only by admin password sign-in attempts. */
+export const ADMIN_LOGIN_THROTTLE_KEY = "admin:login";
+export const ADMIN_LOGIN_THROTTLE_METHOD = "admin_login";
 
-export type Throttle = { blocked: boolean; retryAfterSeconds: number };
+export type Throttle = {
+  blocked: boolean;
+  retryAfterSeconds: number;
+  consecutiveFailures: number;
+};
 
-const ALLOWED: Throttle = { blocked: false, retryAfterSeconds: 0 };
+const ALLOWED: Throttle = {
+  blocked: false,
+  retryAfterSeconds: 0,
+  consecutiveFailures: 0,
+};
 
 /** Stable, non-secret key for a presented staff barcode. */
 export function tokenKey(token: string): string {
@@ -51,57 +63,92 @@ export function userKey(username: string): string {
 
 export async function checkLoginThrottle(
   key: string,
-  method: string
+  method: string,
+  options: { includeMethodLimit?: boolean } = {}
 ): Promise<Throttle> {
-  if (process.env.CAFETRACK_TEST_FACE_LIVENESS === "1") return ALLOWED;
-
-  const { data, error } = await db()
-    .from("login_attempts")
-    .select("username, success, created_at")
-    .eq("method", method)
-    .order("created_at", { ascending: false })
-    .limit(SCAN_ROWS);
+  const [keyResult, methodResult] = await Promise.all([
+    db()
+      .from("login_attempts")
+      .select("id, username, success, created_at")
+      .eq("username", key)
+      .eq("method", method)
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(SCAN_ROWS),
+    db()
+      .from("login_attempts")
+      .select("id, username, success, created_at")
+      .eq("method", method)
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(SCAN_ROWS),
+  ]);
 
   // Never lock anyone out because the check itself failed.
-  if (error || !Array.isArray(data)) return ALLOWED;
+  if (
+    keyResult.error ||
+    methodResult.error ||
+    !Array.isArray(keyResult.data) ||
+    !Array.isArray(methodResult.data)
+  ) {
+    return ALLOWED;
+  }
 
   const now = Date.now();
-  const rows = (
-    data as { username: string | null; success: boolean; created_at: string }[]
+  const keyRows = (keyResult.data as { success: boolean; created_at: string }[])
+    .map((r) => ({
+      success: r.success,
+      at: new Date(r.created_at).getTime(),
+    }))
+    .filter((r) => Number.isFinite(r.at));
+  const methodRows = (
+    methodResult.data as { username: string | null; success: boolean; created_at: string }[]
   )
     .map((r) => ({
       username: r.username,
       success: r.success,
       at: new Date(r.created_at).getTime(),
     }))
-    .filter((r) => Number.isFinite(r.at) && now - r.at < WINDOW_MS);
+    .filter((r) => Number.isFinite(r.at));
 
-  // Newest first. For this key, count back to its own last success.
-  const keyStamps: number[] = [];
-  for (const row of rows) {
-    if (row.username !== key) continue;
-    if (row.success) break;
-    keyStamps.push(row.at);
-  }
-
-  // For the method, count back to any success at all.
-  const methodStamps: number[] = [];
-  for (const row of rows) {
-    if (row.success) break;
-    methodStamps.push(row.at);
-  }
+  // Rows are newest first. A success or a full idle day ends the streak.
+  const keyStamps = activeFailureStamps(keyRows, now);
+  const methodStamps = activeFailureStamps(methodRows, now);
 
   const useKey = keyStamps.length >= MAX_CONSECUTIVE_FAILURES;
-  const useMethod = !useKey && methodStamps.length >= MAX_FAILURES_PER_METHOD;
-  if (!useKey && !useMethod) return ALLOWED;
+  const useMethod =
+    options.includeMethodLimit !== false &&
+    !useKey &&
+    methodStamps.length >= MAX_FAILURES_PER_METHOD;
+  const consecutiveFailures = useKey
+    ? keyStamps.length
+    : useMethod
+      ? methodStamps.length
+      : options.includeMethodLimit === false
+        ? keyStamps.length
+        : Math.max(keyStamps.length, methodStamps.length);
+  if (!useKey && !useMethod) {
+    return { ...ALLOWED, consecutiveFailures };
+  }
 
   const stamps = useKey ? keyStamps : methodStamps;
-  const oldestCounted = stamps[stamps.length - 1] ?? now;
+  const threshold = useKey ? MAX_CONSECUTIVE_FAILURES : MAX_FAILURES_PER_METHOD;
+  const lockoutMinutes = Math.min(
+    MAX_LOCKOUT_MINUTES,
+    stamps.length - threshold + 1
+  );
+  const latestFailure = stamps[0];
+  const retryAfterSeconds = Math.ceil(
+    (latestFailure + lockoutMinutes * 60_000 - now) / 1000
+  );
 
-  // The lockout lifts once the oldest counted failure leaves the window.
+  // The countdown starts with the latest failed attempt and is never extended
+  // by blocked requests. Once elapsed, a new failure increases the next delay.
+  if (retryAfterSeconds <= 0) return ALLOWED;
   return {
     blocked: true,
-    retryAfterSeconds: Math.max(60, Math.ceil((oldestCounted + WINDOW_MS - now) / 1000)),
+    retryAfterSeconds,
+    consecutiveFailures,
   };
 }
 
@@ -219,13 +266,46 @@ export async function recordLoginAttempt(
   key: string,
   method: string,
   success: boolean
-): Promise<void> {
-  if (process.env.CAFETRACK_TEST_FACE_LIVENESS === "1") return;
+): Promise<boolean> {
   try {
-    await db().from("login_attempts").insert({ username: key, method, success });
-  } catch {
-    // Never let the counter's own failure answer the request. A missing counter
-    // row is a weaker guarantee; a 500 here would be a broken sign-in.
+    const { error } = await db()
+      .from("login_attempts")
+      .insert({ username: key, method, success });
+    if (error) {
+      console.error("login attempt could not be recorded:", error.message);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    // A counter failure should not turn a rejected sign-in into a server error,
+    // but callers that must clear a lockout need to know the write did not stick.
+    console.error(
+      "login attempt could not be recorded:",
+      error instanceof Error ? error.message : String(error)
+    );
+    return false;
+  }
+}
+
+/** Remove a failed throttle history when a success marker cannot be written. */
+export async function clearLoginThrottle(key: string, method: string): Promise<boolean> {
+  try {
+    const { error } = await db()
+      .from("login_attempts")
+      .delete()
+      .eq("username", key)
+      .eq("method", method);
+    if (error) {
+      console.error("login throttle could not be cleared:", error.message);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.error(
+      "login throttle could not be cleared:",
+      error instanceof Error ? error.message : String(error)
+    );
+    return false;
   }
 }
 

@@ -1,7 +1,9 @@
 import { redirect } from "next/navigation";
-import { getSession } from "@/lib/auth";
-import { getSessionMinutes } from "@/lib/settings";
+import { getSession, getSessionToken, readSessionToken } from "@/lib/auth";
+import { getFaceLoginSettings, getRoleIdleMinutes } from "@/lib/settings";
 import { AppShell } from "@/components/AppShell";
+import { getFaceStatus } from "@/lib/face-gate";
+import { db } from "@/lib/supabase";
 
 /**
  * The signed-in frame, resolved on the server.
@@ -28,15 +30,45 @@ import { AppShell } from "@/components/AppShell";
  */
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const session = await getSession();
-  if (!session) redirect("/login");
+  if (!session) {
+    const token = await getSessionToken();
+    const tokenUser = token ? await readSessionToken(token) : null;
+    if (token && tokenUser?.role === "staff") {
+      const { data: row, error } = await db()
+        .from("users")
+        .select("session_token, role, face_enabled, last_face_verified_at")
+        .eq("id", tokenUser.id)
+        .maybeSingle();
 
-  // The idle window is admin-configurable, so the browser is told what it is
-  // rather than hardcoding 15 minutes on both sides. settings.ts caches this
-  // in-process for a minute, so it is not a query per navigation.
-  const sessionMinutes = await getSessionMinutes();
+      if (error) {
+        console.error("face-reset redirect check failed:", error.message);
+        throw new Error("Could not check the staff face-check status.");
+      }
+
+      if (row?.session_token === null && row.role === "staff" && row.face_enabled === true) {
+        const facePolicy = await getFaceLoginSettings();
+        if (facePolicy.enabled && !row.last_face_verified_at) {
+          redirect("/login?face_check_reset=1");
+        }
+      }
+    }
+    redirect("/login");
+  }
+
+  if (session.role === "staff") {
+    const face = await getFaceStatus(session.id, session.role);
+    if (face.required) {
+      if (face.verifiedAt === null) {
+        redirect("/login?face_check_reset=1");
+      }
+      redirect("/verify");
+    }
+  }
+
+  const idleMinutes = await getRoleIdleMinutes(session.role);
 
   return (
-    <AppShell user={session} idleLimitMs={sessionMinutes * 60 * 1000}>
+    <AppShell user={session} idleLimitMs={idleMinutes * 60 * 1000}>
       {children}
     </AppShell>
   );

@@ -4,6 +4,11 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { readSmtpConfig, describeSmtpConfig, type SmtpConfig } from "./smtp-config";
 import { describeSmtpFailure, type SmtpDiagnosis } from "./smtp-errors";
+import {
+  renderPasswordRecoveryHtml,
+  renderQueuedEmailHtml,
+  renderSmtpVerificationHtml,
+} from "./email-templates";
 
 /**
  * Email notifications (FR-11).
@@ -21,6 +26,16 @@ import { describeSmtpFailure, type SmtpDiagnosis } from "./smtp-errors";
  */
 
 const MAX_BODY = 20_000;
+
+function brandedLogoAttachment() {
+  return {
+    filename: "merrylane-wordmark.png",
+    path: join(process.cwd(), "public", "brand", "merrylane-wordmark-dark.png"),
+    cid: "merrylane-logo",
+    contentDisposition: "inline" as const,
+    contentType: "image/png",
+  };
+}
 
 /** What a queued message turned out to be. */
 export type SendOutcome = "sent" | "failed" | "skipped";
@@ -353,20 +368,24 @@ export async function dispatchQueued(limit = 25): Promise<DispatchResult> {
     }
 
     try {
+      const subject = String(row.subject ?? "CafeTrack notification")
+        .replace(/[\r\n]+/g, " ")
+        .slice(0, 255);
+      const body = String(row.body ?? "").slice(0, MAX_BODY);
       await transport(config).sendMail({
         from: config.from,
         to,
-        subject: row.subject,
-        text: String(row.body ?? "").slice(0, MAX_BODY),
-        ...(attachments.length > 0
-          ? {
-              attachments: attachments.map((attachment) => ({
-                filename: attachment.filename,
-                contentType: attachment.contentType,
-                content: Buffer.from(attachment.contentBase64, "base64"),
-              })),
-            }
-          : {}),
+        subject,
+        text: body,
+        html: renderQueuedEmailHtml(String(row.kind ?? ""), subject, body),
+        attachments: [
+          brandedLogoAttachment(),
+          ...attachments.map((attachment) => ({
+            filename: attachment.filename,
+            contentType: attachment.contentType,
+            content: Buffer.from(attachment.contentBase64, "base64"),
+          })),
+        ],
       });
 
       await db()
@@ -576,12 +595,41 @@ export async function verifySmtpAccount(to: string): Promise<VerifyResult> {
         "If you are reading it, email notifications are working.",
         "Nothing else was sent — no alerts, no summary.",
       ].join("\n"),
+      html: renderSmtpVerificationHtml(),
+      attachments: [brandedLogoAttachment()],
     });
 
     return { ok: true, ms: Date.now() - started, to: address };
   } catch (e) {
     return { ok: false, to: address, ...describeSmtpFailure(e) };
   }
+}
+
+/** Send an admin recovery code using the configured SMTP account. */
+export async function sendPasswordRecoveryCode(to: string, code: string): Promise<void> {
+  const config = await readSmtpConfig();
+  if (!config) throw new Error("Email sending account is not configured");
+
+  await transport(config).sendMail({
+    from: config.from,
+    to,
+    subject: "CafeTrack admin password reset code",
+    text: [
+      "MERRYLANE CAFE - CAFETRACK",
+      "",
+      "ADMIN PASSWORD RESET",
+      "",
+      `Your CafeTrack admin password reset code is ${code}.`,
+      "",
+      "Enter this code in CafeTrack to verify your password reset.",
+      "This code expires in 10 minutes and can only be used once.",
+      "",
+      "DIDN'T REQUEST THIS?",
+      "You can ignore this email. Your password will not change unless this code is verified and the reset is completed. Never share this code with anyone.",
+    ].join("\n"),
+    html: renderPasswordRecoveryHtml(code),
+    attachments: [brandedLogoAttachment()],
+  });
 }
 
 /**

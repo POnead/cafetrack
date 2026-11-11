@@ -3,9 +3,13 @@
 @tailwind utilities;
 
 :root {
-  --bg: #fdf3e3;
-  --peach: #f5d5a8;
-  --cocoa: #5e3a1f;
+  --bg: #f6f1e8;
+  --peach: #eadbc8;
+  --cocoa: #38261c;
+  --paper: #fffcf7;
+  --paper-soft: #faf6ef;
+  --line: #e7ddcf;
+  --shadow-card: 0 2px 6px rgba(47, 32, 22, 0.05), 0 10px 24px rgba(47, 32, 22, 0.06);
 }
 
 html,
@@ -15,9 +19,82 @@ body {
 
 body {
   background: var(--bg);
-  color: #3d2b1f;
+  color: #2c211a;
   font-family: var(--font-nunito), system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
+}
+
+@keyframes feature-copy-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(1rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.feature-copy-slide-in {
+  animation: feature-copy-slide-in 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes face-result-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.72);
+  }
+  70% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes face-result-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.face-result-pop {
+  animation: face-result-pop 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.face-result-draw {
+  stroke-dasharray: 28;
+  stroke-dashoffset: 28;
+  animation: face-result-draw 320ms ease-out 160ms forwards;
+}
+
+@keyframes face-guide-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 8px 2px rgb(134 170 128 / 55%), inset 0 0 8px rgb(134 170 128 / 16%);
+  }
+  50% {
+    box-shadow: 0 0 15px 4px rgb(134 170 128 / 90%), inset 0 0 12px rgb(134 170 128 / 28%);
+  }
+}
+
+.face-guide-in-band {
+  animation: face-guide-glow 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .face-result-pop,
+  .face-result-draw,
+  .face-guide-in-band {
+    animation: none;
+  }
+  .face-result-draw {
+    stroke-dashoffset: 0;
+  }
+  .face-guide-in-band {
+    box-shadow: 0 0 10px 3px rgb(134 170 128 / 75%), inset 0 0 9px rgb(134 170 128 / 22%);
+  }
 }
 
 @layer components {
@@ -27,24 +104,23 @@ body {
 
   .script-logo {
     font-family: var(--font-pacifico), cursive;
-    color: #fdf3e3;
+    color: #f6f1e8;
     text-shadow: 0 2px 0 rgba(93, 58, 31, 0.22);
     line-height: 1.15;
   }
 
   .script-logo-dark {
     font-family: var(--font-pacifico), cursive;
-    color: #e8b563;
+    color: #c8a274;
     line-height: 1.15;
   }
 
   .deco-title {
-    font-family: var(--font-baloo), system-ui, sans-serif;
+    font-family: var(--font-nunito), system-ui, sans-serif;
     font-weight: 800;
-    color: #f0c582;
-    -webkit-text-stroke: 1.5px #ffffff;
-    text-shadow: 2px 3px 0 rgba(93, 58, 31, 0.2);
-    letter-spacing: 0.01em;
+    color: #2c211a;
+    line-height: 1.15;
+    letter-spacing: -0.025em;
   }
 
   /* ---------------------------------------------------------------
@@ -52,7 +128,7 @@ body {
      --------------------------------------------------------------- */
 
   .card {
-    @apply rounded-2xl border border-cream-200 bg-white shadow-warm;
+    @apply rounded-2xl border border-cream-200 bg-cream-50 shadow-warm;
   }
 
   /* ---------------------------------------------------------------
@@ -149,8 +225,12 @@ input[type="password"]::-webkit-outer-spin-button {
   appearance: none;
 }
 
-button:not(:disabled):active {
+button:not(:disabled):active:not(.password-visibility-toggle) {
   transform: scale(0.97);
+}
+
+.password-visibility-toggle:active svg {
+  transform: scale(0.88);
 }
 
 button:not(:disabled),
@@ -169,6 +249,171 @@ textarea:focus-visible {
   outline-offset: 2px;
 }
 
+.app-main {
+  background:
+    radial-gradient(circle at 8% 0%, rgba(200, 162, 116, 0.12), transparent 34rem),
+    linear-gradient(145deg, #f6f1e8 0%, #f3ede3 100%);
+}
+
+.notice-pop-right {
+  animation: notice-pop-right 220ms cubic-bezier(0.23, 1, 0.32, 1) both;
+}
+
+.notice-fade-out {
+  animation: notice-fade-out 220ms ease-in both;
+}
+
+@keyframes notice-pop-right {
+  from {
+    opacity: 0;
+    transform: translateX(18px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+@keyframes notice-fade-out {
+  to {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+}
+
+@keyframes shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-7px);
+  }
+  40% {
+    transform: translateX(7px);
+  }
+  60% {
+    transform: translateX(-5px);
+  }
+  80% {
+    transform: translateX(5px);
+  }
+}
+
+.app-content [class~="bg-white"] {
+  background-color: var(--paper);
+}
+
+.app-content .card {
+  background-color: var(--paper);
+  border-color: var(--line);
+  box-shadow: var(--shadow-card);
+}
+
+.app-content [class~="border-cream-200"] {
+  border-color: var(--line);
+}
+
+.app-content [class~="shadow-warm"] {
+  box-shadow: var(--shadow-card);
+}
+
+.app-content [class~="bg-white"][class*="rounded-2xl"] {
+  box-shadow: var(--shadow-card);
+}
+
+.report-reveal.is-visible .report-trend-line {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: report-trend-draw 1.15s cubic-bezier(0.22, 1, 0.36, 1) 80ms forwards;
+}
+
+.report-reveal.is-visible .report-trend-area {
+  opacity: 0;
+  animation: report-area-reveal 0.8s ease-out 300ms forwards;
+}
+
+.report-reveal.is-visible .report-trend-dot {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: report-dot-enter 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.report-reveal.is-visible .report-donut-slice {
+  animation: report-donut-enter 0.65s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.report-reveal.is-visible .report-card-enter {
+  animation: report-card-enter 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.report-reveal.is-visible .report-bar-grow {
+  transform: scaleX(0);
+  transform-origin: left center;
+  animation: report-bar-grow 0.65s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.report-reveal.is-visible .report-bar-rise {
+  transform: scaleY(0);
+  transform-origin: center bottom;
+  animation: report-bar-rise 0.65s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes report-trend-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes report-dot-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.25);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes report-area-reveal {
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes report-donut-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes report-card-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes report-bar-grow {
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes report-bar-rise {
+  to {
+    transform: scaleY(1);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -176,9 +421,59 @@ textarea:focus-visible {
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
   }
+
+  .notice-pop-right {
+    animation: none;
+  }
+
+  .notice-fade-out {
+    animation: none;
+    opacity: 0;
+  }
+
+  .report-reveal.is-visible .report-trend-line,
+  .report-reveal.is-visible .report-trend-area,
+  .report-reveal.is-visible .report-trend-dot,
+  .report-reveal.is-visible .report-donut-slice,
+  .report-reveal.is-visible .report-card-enter,
+  .report-reveal.is-visible .report-bar-grow,
+  .report-reveal.is-visible .report-bar-rise {
+    animation: none;
+  }
+
+  .report-reveal.is-visible .report-trend-line {
+    stroke-dashoffset: 0;
+  }
+
+  .report-reveal.is-visible .report-trend-area,
+  .report-reveal.is-visible .report-card-enter {
+    opacity: 1;
+  }
+
+  .report-reveal.is-visible .report-trend-dot {
+    opacity: 1;
+    transform: none;
+  }
+
+  .report-reveal.is-visible .report-donut-slice {
+    opacity: 1;
+  }
+
+  .report-reveal.is-visible .report-bar-grow,
+  .report-reveal.is-visible .report-bar-rise {
+    transform: none;
+  }
 }
 
 /* Custom scrollbar so the warm theme carries into scroll areas */
+.sidebar-nav {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.sidebar-nav::-webkit-scrollbar {
+  display: none;
+}
+
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -195,4 +490,25 @@ textarea:focus-visible {
 ::-webkit-scrollbar-thumb:hover {
   background: #d99b3f;
   background-clip: content-box;
+}
+
+/*
+ * Mirror-image preview for the front-facing camera.
+ *
+ * Browsers deliver the raw front-camera feed — unmirrored, i.e. how another
+ * person sees you. In that view, turning your head to your own left swings the
+ * on-screen face the opposite way from what the word "left" suggests, which
+ * reads as a contradiction to whoever is being scanned. The pose copy in
+ * lib/face.ts ("turn your head to your left", "their own" every time) was
+ * written for a mirror-style preview; this class is what makes the preview
+ * one.
+ *
+ * The flip is display-only. Frames captured for matching draw straight from
+ * the video element, so stored samples stay in the raw feed's orientation —
+ * enrolment and verification remain consistent, and a saved face photo shows
+ * the person as they look, not as their mirror shows them. The ID-card camera
+ * deliberately does not use this class: mirrored card text is unreadable.
+ */
+.face-preview-mirror {
+  transform: scaleX(-1);
 }

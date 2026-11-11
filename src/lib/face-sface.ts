@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * The SFace face engine: YuNet detection and SFace recognition, on onnxruntime-web.
  *
