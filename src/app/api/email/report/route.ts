@@ -47,7 +47,7 @@ export const POST = handler(async (req: Request) => {
     `Filters: ${report.filterDescription}`,
     ...report.warnings.map((warning) => `Warning: ${warning}`),
     "",
-    "The complete inventory and movement report is attached as a PDF.",
+    "The stock report is attached as a PDF. Please review any completeness warnings included in the report.",
   ].join("\n");
 
   try {

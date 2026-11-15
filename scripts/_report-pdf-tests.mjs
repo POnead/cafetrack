@@ -54,7 +54,11 @@ const report = {
   ],
   waste: [{ sku: "SKU-0003", name: "Pantry item 3", qty: "8 kg", count: 2 }],
   movementLines,
-  warnings: ["Historical transaction notes are unavailable."],
+  warnings: [
+    "Historical transaction notes are unavailable.",
+    "The report includes the first 10,000 catalogue items (ordered by name). Additional items exist and were not included.",
+    "The report includes the first 5,000 newest matching transactions. Additional transactions exist and were not included.",
+  ],
 };
 
 const originalReport = JSON.stringify(report);
@@ -97,6 +101,8 @@ for (const expected of [
   "FILTER RANGE",
   "Nov 6, 2026",
   "Historical transaction notes are unavailable.",
+  "The report includes the first 10,000 catalogue items (ordered by name). Additional items exist and were not included.",
+  "The report includes the first 5,000 newest matching transactions. Additional transactions exist and were not included.",
   "Items tracked",
   "Movement summary",
   "Waste tracking",

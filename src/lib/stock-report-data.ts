@@ -1,4 +1,7 @@
-import { db } from "./supabase";
+async function getDb() {
+  const { db } = await import("./supabase");
+  return db();
+}
 import { fmtQty, fmtDate, daysUntil } from "./format";
 import { stockStatus } from "./status";
 import {
@@ -55,19 +58,34 @@ function exportCap(
   name: "CAFETRACK_EXPORT_ITEM_CAP" | "CAFETRACK_EXPORT_MOVEMENT_CAP",
   fallback: number
 ): number {
-  const raw = (process.env[name] ?? "").trim();
-  if (!raw) return fallback;
+  const rawEnv = process.env[name];
+  if (rawEnv === undefined) return fallback;
+  const raw = rawEnv.trim();
+  if (!raw) {
+    throw new Error(
+      `Invalid ${name}: empty value is not allowed (omit the variable for the default of ${fallback})`
+    );
+  }
+
+  // Configuration cannot remove or bypass the safety limits. An explicitly
+  // configured value must be a positive whole number within the documented
+  // maximum; anything else is a configuration error rather than a silent
+  // fallback to the default.
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(
+      `Invalid ${name}: expected a positive whole number (1-${MAX_EXPORT_CAP}), got ${JSON.stringify(raw)}`
+    );
+  }
   const parsed = Number(raw);
-  // Zero, negative, non-finite, non-integer and implausibly large values all
-  // fall back to the documented default — configuration cannot remove the
-  // safety limits.
   if (
     !Number.isFinite(parsed) ||
     !Number.isInteger(parsed) ||
     parsed < 1 ||
     parsed > MAX_EXPORT_CAP
   ) {
-    return fallback;
+    throw new Error(
+      `Invalid ${name}: expected a positive whole number (1-${MAX_EXPORT_CAP}), got ${JSON.stringify(raw)}`
+    );
   }
   return parsed;
 }
@@ -152,7 +170,7 @@ export async function buildStockReportData(
   }
 
   const categoryName = filters.categoryId
-    ? (await db()
+    ? (await (await getDb())
         .from("categories")
         .select("name")
         .eq("id", filters.categoryId)
@@ -160,7 +178,7 @@ export async function buildStockReportData(
     : "";
   let staffName = filters.staff;
   if (/^[0-9a-f-]{36}$/i.test(filters.staff)) {
-    const staffResult = await db()
+    const staffResult = await (await getDb())
       .from("users")
       .select("full_name")
       .eq("id", filters.staff)
@@ -252,7 +270,7 @@ export async function buildStockReportData(
     completeness: {
       items: itemCompleteness,
       movements: movementCompleteness,
-      itemsScanned: items.length,
+      itemsScanned: itemFetch.rows.length,
       movementsScanned: movements.length,
       itemCap,
       movementCap,
@@ -326,7 +344,7 @@ async function hasAnyMatchingTransactionRow(
   filters: StockReportFilters,
   offset: number
 ): Promise<ExportCompleteness> {
-  let query = db()
+  let query = (await getDb())
     .from("transactions")
     .select("id")
     .order("created_at", { ascending: false })
@@ -355,7 +373,7 @@ async function hasAnyMatchingTransactionRow(
 }
 
 async function hasAnyMoreItems(offset: number): Promise<ExportCompleteness> {
-  const result = await db()
+  const result = await (await getDb())
     .from("items")
     .select("id")
     .eq("item_status", "active")
@@ -374,7 +392,7 @@ async function fetchItems(
 
   while (all.length < cap) {
     const take = Math.min(pageSize, cap - all.length);
-    const itemResult = await db()
+    const itemResult = await (await getDb())
       .from("items")
       .select(
         `sku, name, unit, quantity, low_stock_threshold, expiration_date,
@@ -437,7 +455,7 @@ async function fetchMovements(
       if (triedSelections.has(selectionKey)) continue;
       triedSelections.add(selectionKey);
 
-      let query = db()
+      let query = (await getDb())
         .from("transactions")
         .select(
           `${selection.transactionNote ? "id, type, actor_id, actor_name, note, created_at" : "id, type, actor_id, actor_name, created_at"},
@@ -526,7 +544,7 @@ function wasteByItem(movements: any[]) {
 }
 
 async function businessName(): Promise<string> {
-  const { data } = await db()
+  const { data } = await (await getDb())
     .from("settings")
     .select("value")
     .eq("key", "business_name")

@@ -912,6 +912,19 @@ export default function ReportsPage() {
   } | null>(null);
 
   const [reportPreviewOpen, setReportPreviewOpen] = useState(false);
+  const [reportPreviewCompleteness, setReportPreviewCompleteness] = useState<{
+    completeness: {
+      items: "complete" | "truncated" | "unknown";
+      movements: "complete" | "truncated" | "unknown";
+      itemsScanned: number;
+      movementsScanned: number;
+      itemCap: number;
+      movementCap: number;
+    };
+    warnings: string[];
+  } | null>(null);
+  const [reportPreviewCompletenessLoading, setReportPreviewCompletenessLoading] = useState(false);
+  const [reportPreviewCompletenessError, setReportPreviewCompletenessError] = useState<string | null>(null);
   const [emailModalOpen, setEmailModalOpen] = useState(false);
   const [priceEditorOpen, setPriceEditorOpen] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
@@ -923,6 +936,7 @@ export default function ReportsPage() {
   const loadController = useRef<AbortController | null>(null);
   const historySequence = useRef(0);
   const historyController = useRef<AbortController | null>(null);
+  const itemsSequence = useRef(0);
   const itemsController = useRef<AbortController | null>(null);
   const previewPanelRef = useRef<HTMLElement | null>(null);
   useDialogFocusTrap(previewPanelRef, reportPreviewOpen);
@@ -1036,37 +1050,71 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
     itemsController.current?.abort();
     const controller = new AbortController();
     itemsController.current = controller;
+    const requestId = ++itemsSequence.current;
+    setItemsLoading(true);
     try {
       const collected: Item[] = [];
       let offset = 0;
       let complete = false;
+      let seenTotal: number | null = null;
 
       for (let page = 0; page < MAX_ITEM_PAGES; page += 1) {
+        if (requestId !== itemsSequence.current) return;
+
         const response = await fetch(
           `/api/items?limit=${ITEM_PAGE_SIZE}&offset=${offset}`,
           { signal: controller.signal }
         );
         const data = await response.json().catch(() => ({}));
+        if (requestId !== itemsSequence.current) return;
         if (!response.ok || data.error) {
           throw new Error(data.error || "Could not load the inventory");
         }
 
         const pageItems: Item[] = Array.isArray(data.items) ? data.items : [];
         const returned = Number(data.returned ?? pageItems.length);
-        const total = Number(data.total ?? returned);
+        const respOffset = Number(data.offset);
+        const respLimit = Number(data.limit);
+        const total = Number(data.total);
         const hasMore = Boolean(data.has_more);
 
-        if (returned !== pageItems.length || returned > ITEM_PAGE_SIZE) {
+        // Strict metadata validation: never silently accept contradictory
+        // pagination metadata.
+        if (!Number.isFinite(returned) || returned !== pageItems.length) {
           throw new Error("The item catalogue response is inconsistent");
         }
-        const nextOffset = offset + pageItems.length;
-        if (hasMore) {
-          if (pageItems.length === 0) {
-            throw new Error("The item catalogue pagination stalled");
-          }
-          if (Number.isFinite(total) && nextOffset > total) {
-            throw new Error("The item catalogue pagination metadata is inconsistent");
-          }
+        if (returned > ITEM_PAGE_SIZE) {
+          throw new Error("The item catalogue response is inconsistent");
+        }
+        if (!Number.isFinite(respOffset) || respOffset !== offset) {
+          throw new Error("The item catalogue response offset is incorrect");
+        }
+        if (!Number.isFinite(respLimit) || respLimit !== ITEM_PAGE_SIZE) {
+          throw new Error("The item catalogue response limit is incorrect");
+        }
+        if (!Number.isFinite(total) || total < 0) {
+          throw new Error("The item catalogue total is invalid");
+        }
+        if (offset + returned > total) {
+          throw new Error("The item catalogue pagination metadata is inconsistent");
+        }
+        if (hasMore && offset + returned >= total) {
+          throw new Error("The item catalogue pagination metadata is inconsistent");
+        }
+        if (!hasMore && offset + returned < total) {
+          throw new Error("The item catalogue pagination metadata is inconsistent");
+        }
+        if (hasMore && pageItems.length === 0) {
+          throw new Error("The item catalogue pagination stalled");
+        }
+        if (seenTotal !== null && total !== seenTotal) {
+          throw new Error("The item catalogue pagination metadata is inconsistent");
+        }
+        if (seenTotal === null) seenTotal = total;
+
+        const nextOffset = offset + returned;
+        if (hasMore && !(nextOffset > offset)) {
+          throw new Error("The item catalogue pagination did not advance");
         }
 
         collected.push(...pageItems);
@@ -1078,23 +1126,23 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
         offset = nextOffset;
       }
 
+      if (requestId !== itemsSequence.current) return;
       if (!complete) {
-        throw new Error("The item catalogue could not be loaded completely");
+        throw new Error("The item catalogue pagination exceeded the 40-page maximum");
       }
       setItems(collected);
       setError(null);
     } catch (e) {
       if (controller.signal.aborted) return;
+      if (requestId !== itemsSequence.current) return;
       // Never render a partial catalogue as the full report.
       setItems([]);
-      setError(
-        e instanceof Error
-          ? `${e.message}. The inventory report is shown empty rather than incomplete.`
-          : "Could not load the inventory. The inventory report is shown empty rather than incomplete."
-      );
+      setError("Could not load the full item catalogue. The inventory report is shown empty rather than incomplete.");
     } finally {
-      if (itemsController.current === controller) itemsController.current = null;
-      setItemsLoading(false);
+      if (requestId === itemsSequence.current) {
+        if (itemsController.current === controller) itemsController.current = null;
+        setItemsLoading(false);
+      }
     }
   }
 
@@ -1236,6 +1284,47 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
     loadAdvisory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Verify report completeness from the shared report builder whenever the
+  // export preview is open. The preview never assumes completeness; it waits
+  // for authoritative metadata.
+  useEffect(() => {
+    if (!reportPreviewOpen) return;
+    const controller = new AbortController();
+    setReportPreviewCompleteness(null);
+    setReportPreviewCompletenessLoading(true);
+    setReportPreviewCompletenessError(null);
+
+    fetch("/api/report-preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: rangeParams.from,
+        to: rangeParams.to,
+        staff,
+        type: typeFilter,
+        category_id: catFilter,
+        tz: rangeBounds.zone,
+      }),
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || "Could not verify report completeness");
+        setReportPreviewCompleteness(data);
+      })
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+        setReportPreviewCompletenessError(
+          error instanceof Error ? error.message : "Could not verify report completeness"
+        );
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setReportPreviewCompletenessLoading(false);
+      });
+
+    return () => controller.abort();
+  }, [reportPreviewOpen, rangeParams.from, rangeParams.to, staff, typeFilter, catFilter, rangeBounds.zone]);
 
   // Transactions refetch whenever a range / staff / movement filter changes.
   useEffect(() => {
@@ -2799,13 +2888,13 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
           </div>
           <div className="flex items-center gap-2">
             <label className="sr-only" htmlFor="onhand-search">
-              Search items by name, SKU, category or location
+              Search items by name, SKU, category or location…
             </label>
             <input
               id="onhand-search"
               className="input w-44 sm:w-56"
               type="search"
-              placeholder="Search name, SKU, category or location…"
+              placeholder="Search items by name, SKU, category or location…"
               value={tableQuery}
               onChange={(event) => setTableQuery(event.target.value)}
             />
@@ -3388,9 +3477,55 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
                 </p>
                 <p className="mt-0.5 text-[10px] leading-4 text-cocoa-400">
                   Matching rows are included up to the report safety caps
-                  (by default 10,000 items / 5,000 transactions). If a cap
-                  truncates the report, the PDF says so on its cover.
+                  (by default 10,000 items / 5,000 transactions). Completeness
+                  is verified from the shared report builder before download.
                 </p>
+                <div className="mt-2 rounded-lg border border-cream-200 bg-cream-50 px-3 py-2 text-[11px] text-cocoa-700">
+                  {reportPreviewCompletenessLoading && (
+                    <p>Verifying report completeness…</p>
+                  )}
+                  {reportPreviewCompletenessError && (
+                    <p role="alert" className="text-terracotta-700">
+                      Could not verify completeness: {reportPreviewCompletenessError}
+                    </p>
+                  )}
+                  {reportPreviewCompleteness && (
+                    <>
+                      <p>
+                        Catalogue items:{" "}
+                        <strong>
+                          {reportPreviewCompleteness.completeness.items === "complete"
+                            ? "Complete"
+                            : "Truncated"}
+                        </strong>{" "}
+                        ({reportPreviewCompleteness.completeness.itemsScanned.toLocaleString("en-PH")} scanned of cap{" "}
+                        {reportPreviewCompleteness.completeness.itemCap.toLocaleString("en-PH")})
+                      </p>
+                      <p>
+                        Transactions:{" "}
+                        <strong>
+                          {reportPreviewCompleteness.completeness.movements === "complete"
+                            ? "Complete"
+                            : "Truncated"}
+                        </strong>{" "}
+                        ({reportPreviewCompleteness.completeness.movementsScanned.toLocaleString("en-PH")} scanned of cap{" "}
+                        {reportPreviewCompleteness.completeness.movementCap.toLocaleString("en-PH")})
+                      </p>
+                      {reportPreviewCompleteness.warnings.length > 0 && (
+                        <ul className="mt-1 list-disc pl-4 text-terracotta-700">
+                          {reportPreviewCompleteness.warnings.map((warning) => (
+                            <li key={warning}>{warning}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </>
+                  )}
+                  {!reportPreviewCompletenessLoading &&
+                    !reportPreviewCompletenessError &&
+                    !reportPreviewCompleteness && (
+                      <p>Completeness not yet verified.</p>
+                    )}
+                </div>
               </div>
               <button
                 type="button"

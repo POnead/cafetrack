@@ -343,18 +343,24 @@ function writeHeader(doc: PDFKit.PDFDocument, report: PdfReport) {
   doc.y = itemCountTop + 13;
 
   for (const warning of report.warnings) {
+    doc.font("Helvetica-Bold").fontSize(8);
+    const textHeight = doc.heightOfString(warning, {
+      width: CONTENT_WIDTH - 16,
+    });
+    const boxHeight = Math.max(19, textHeight + 10);
+    ensure(doc, boxHeight + 4);
+    const top = doc.y;
     doc
-      .roundedRect(MARGIN, doc.y, CONTENT_WIDTH, 19, 3)
+      .roundedRect(MARGIN, top, CONTENT_WIDTH, boxHeight, 3)
       .fill(TERRACOTTA_WASH);
     doc
       .font("Helvetica-Bold")
       .fontSize(8)
       .fillColor(TERRACOTTA)
-      .text(warning, MARGIN + 8, doc.y + 5, {
+      .text(warning, MARGIN + 8, top + 5, {
         width: CONTENT_WIDTH - 16,
-        lineBreak: false,
       });
-    doc.y += 23;
+    doc.y = top + boxHeight + 4;
   }
 
   doc.moveDown(0.6);
