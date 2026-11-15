@@ -263,7 +263,9 @@ export const GET = handler(async (req: Request) => {
   /* ---------------- most needed items (by checkout volume) ---------------- */
 
   const toSortedArray = (m: Map<string, { name: string; qty: number }>) =>
-    Array.from(m.values()).sort((a, b) => b.qty - a.qty);
+    Array.from(m.entries())
+      .map(([sku, v]) => ({ sku, name: v.name, qty: v.qty }))
+      .sort((a, b) => b.qty - a.qty);
 
   const mostNeeded = {
     thisMonth: toSortedArray(checkoutThisMonth).slice(0, 10),

@@ -159,8 +159,11 @@ async function main() {
     `got ${res.status}`
   );
 
+  // Unique per run: transaction_items keeps the name forever, so a repeated
+  // static name accumulates identical-named rows in the ledger.
+  const smokeStamp = Date.now().toString(36);
   res = await call("POST", "/api/items", {
-    name: "Smoke Test Item",
+    name: `Smoke Test Item ${smokeStamp}`,
     category_id: null,
     location_id: null,
     physical_form: "solid",
@@ -173,8 +176,13 @@ async function main() {
   check("POST /api/items -> 201", res.status === 201, newItem?.sku || JSON.stringify(res.data));
   check("generated a SKU", typeof newItem?.sku === "string" && newItem.sku.startsWith("CT-"));
 
-  res = await call("PATCH", `/api/items/${newItem?.id}`, { name: "Smoke Test Item v2" });
-  check("PATCH /api/items/:id", res.status === 200 && res.data?.item?.name === "Smoke Test Item v2");
+  res = await call("PATCH", `/api/items/${newItem?.id}`, {
+    name: `Smoke Test Item v2 ${smokeStamp}`,
+  });
+  check(
+    "PATCH /api/items/:id",
+    res.status === 200 && res.data?.item?.name === `Smoke Test Item v2 ${smokeStamp}`
+  );
 
   section("stock movements");
   res = await call("POST", "/api/transactions", {

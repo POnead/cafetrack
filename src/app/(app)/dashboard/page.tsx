@@ -58,7 +58,7 @@ type SnapshotItem = {
 };
 
 type Analytics = {
-  mostNeeded: { thisMonth: { name: string; qty: number }[] };
+  mostNeeded: { thisMonth: { sku: string; name: string; qty: number }[] };
   soonestExpiry: {
     sku: string;
     name: string;
@@ -550,7 +550,7 @@ export default function DashboardPage() {
                   </thead>
                   <tbody>
                     {demandRows.map((d) => (
-                      <tr key={d.name}>
+                      <tr key={d.sku}>
                         <td className="td !px-0 !py-1.5 text-cocoa-800">{d.name}</td>
                         <td className="td !px-0 !py-1.5 text-right tabular-nums">
                           {d.qty}
