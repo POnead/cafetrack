@@ -6,8 +6,8 @@ import {
   HistoryRequestError,
   isCalendarDay,
   MAX_RANGE_DAYS,
-  todayUtcDay,
 } from "@/lib/inventory-history";
+import { isValidTimeZone, todayInZone } from "@/lib/zoned-time";
 
 export const runtime = "nodejs";
 
@@ -22,6 +22,20 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * The reconstructed inventory value of the stock on hand, over a date range.
+ *
+ * CafeTrack stores the *current* unit price on the item and the on-hand
+ * quantity on the item too. It does not keep a price history and it does not
+ * keep a stock snapshot per day. What it does keep is the movement ledger:
+ * `transaction_items` records `qty_before` and `qty_after` for every line, so
+ * the on-hand quantity of every item at any point in time can be rebuilt from
+ * the movements that produced it.
+ *
+ * `from`/`to` bound calendar days in the IANA timezone named by `tz`
+ * (e.g. "Asia/Manila"). A calendar day is not a fixed span of hours — it is
+ * 25 long on one side of a DST shift — so each day's boundary is resolved
+ * per date in that zone. Omit `tz` and days are UTC days, as they always
+ * were. Local midnight is inclusive and the following local midnight is
+ * exclusive: a movement lands on exactly one calendar day, in every zone.
  *
  * A read-only view over the movement ledger: it rebuilds each item's
  * on-hand quantity from the `qty_before`/`qty_after` recorded on every
@@ -42,6 +56,18 @@ export const GET = handler(async (req: Request) => {
   const fromRaw = searchParams.get("from");
   const toRaw = searchParams.get("to");
   const categoryRaw = searchParams.get("category");
+  const tzRaw = searchParams.get("tz");
+
+  /*
+   * The timezone the day keys mean. A calendar day is not a fixed span of
+   * milliseconds — it is 25 hours long on one side of a DST transition — so
+   * the boundary of each requested day is resolved per date in this zone.
+   * Omit it and everything is reconstructed in UTC, as it always was.
+   */
+  if (tzRaw !== null && !isValidTimeZone(tzRaw)) {
+    return fail("That timezone is not recognised", 400);
+  }
+  const tz = tzRaw ?? "UTC";
 
   /*
    * Dates.
@@ -60,7 +86,7 @@ export const GET = handler(async (req: Request) => {
 
   // A missing end date means "up to today"; a missing start date means "as
   // far back as the recorded movements reach", which the service resolves.
-  const to = toRaw ?? todayUtcDay();
+  const to = toRaw ?? todayInZone(tz);
   const from = fromRaw;
 
   if (from) {
@@ -79,7 +105,7 @@ export const GET = handler(async (req: Request) => {
   const category = categoryRaw || null;
 
   try {
-    const history = await buildInventoryHistory({ from, to, category });
+    const history = await buildInventoryHistory({ from, to, category, tz });
     return ok(history);
   } catch (error) {
     if (error instanceof HistoryRequestError) {

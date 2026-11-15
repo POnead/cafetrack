@@ -31,8 +31,19 @@ if (PORT === 3100) {
   process.exit(1);
 }
 
+// Two suites are pure unit tests — synthetic ledgers, no database, no BASE_URL
+// involved. They run first because they are the fastest signal and the only
+// ones that can never touch real data. Everything after them expects the
+// isolated server from `npm run dev:test`.
+//
+// `test:smoke` runs LAST on purpose. Its sign-in throttle checks deliberately
+// engage the shared admin-login lockout (60 seconds) and it expects that
+// lockout to still be in place when it finishes. Every other suite logs in
+// as admin, so running smoke before them guarantees the first of them fails
+// on a login it should never see fail.
 const SUITES = [
-  ["test:smoke", "smoke-test.mjs"],
+  ["test:inventory-history", "_ts-node.mjs", "_inventory-history-tests.mjs"],
+  ["test:day-boundaries", "_ts-node.mjs", "_day-boundary-tests.mjs"],
   ["test:edge", "_edge-tests.mjs"],
   ["test:id", "_id-verification-tests.mjs"],
   ["test:angles", "_face-angles-tests.mjs"],
@@ -43,6 +54,7 @@ const SUITES = [
   ["test:camera", "_camera-tests.mjs"],
   ["test:tour", "_usertour.mjs"],
   ["perf", "perf-check.mjs"],
+  ["test:smoke", "smoke-test.mjs"],
 ];
 
 const isWindows = process.platform === "win32";
@@ -50,10 +62,10 @@ const node = isWindows ? "node.exe" : "node";
 
 let failed = 0;
 
-for (const [name, file] of SUITES) {
+for (const [name, ...files] of SUITES) {
   console.log(`\n${"=".repeat(52)}\n== ${name} (${BASE})\n${"=".repeat(52)}`);
   const code = await new Promise((resolve) => {
-    const child = spawn(node, [join("scripts", file)], {
+    const child = spawn(node, files.map((file) => join("scripts", file)), {
       stdio: "inherit",
       env: { ...process.env, BASE_URL: BASE },
     });

@@ -20,13 +20,6 @@ import type { HistoryGranularity, InventoryHistory } from "@/lib/inventory-histo
 
 export type { Grouping };
 
-const GROUPING_LABEL: Record<HistoryGranularity, string> = {
-  day: "Daily",
-  week: "Weekly",
-  month: "Monthly",
-  quarter: "Quarterly",
-};
-
 function formatDay(day: string): string {
   return new Date(`${day}T00:00:00.000Z`).toLocaleDateString("en-PH", {
     month: "short",
@@ -53,16 +46,66 @@ function formatDayShort(day: string): string {
  * `qty_before`/`qty_after` recorded on every movement line, so a restock
  * raises the line and a checkout or a waste log lowers it.
  */
+/**
+ * A small Auto/Daily/Weekly/Monthly control for the trend.
+ *
+ * Lives in the chart's header so the setting is next to the chart it
+ * re-buckets. It does not refetch anything: it only picks how the already
+ * fetched series is grouped on screen.
+ */
+function GroupingControl({
+  value,
+  onChange,
+}: {
+  value: Grouping;
+  onChange: (grouping: Grouping) => void;
+}) {
+  const options: { value: Grouping; label: string }[] = [
+    { value: "auto", label: "Auto" },
+    { value: "daily", label: "Daily" },
+    { value: "weekly", label: "Weekly" },
+    { value: "monthly", label: "Monthly" },
+  ];
+  return (
+    <div
+      className="inline-flex items-center gap-0.5 rounded-lg border border-cream-200 bg-cream-100 p-0.5"
+      role="group"
+      aria-label="Chart grouping"
+    >
+      {options.map((option) => {
+        const active = value === option.value;
+        return (
+          <button
+            key={option.value}
+            type="button"
+            aria-pressed={active}
+            onClick={() => onChange(option.value)}
+            className={`rounded-md px-2 py-1 text-[10px] font-semibold transition-colors ${
+              active
+                ? "bg-white text-cocoa-800 shadow-sm"
+                : "text-cocoa-500 hover:text-cocoa-800"
+            }`}
+          >
+            {option.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export function InventoryValueTrendChart({
   data,
   loading,
   error,
   grouping,
+  onGroupingChange,
 }: {
   data: InventoryHistory | null;
   loading: boolean;
   error: string | null;
   grouping: Grouping;
+  onGroupingChange?: (grouping: Grouping) => void;
 }) {
   const bucketed = useMemo(() => {
     if (!data) {
@@ -145,15 +188,16 @@ export function InventoryValueTrendChart({
       title="Inventory value over time"
       description="On-hand quantities reconstructed from recorded movements, valued at current unit prices."
       badge={
-        coverage && completeness !== "complete" ? (
-          <Badge tone="amber" variant="tag">
-            {completeness === "truncated" ? "Incomplete history" : "History unverified"}
-          </Badge>
-        ) : (
-          <Badge tone="slate" variant="tag" dot={false}>
-            {GROUPING_LABEL[bucketed.effective]}
-          </Badge>
-        )
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {onGroupingChange && (
+            <GroupingControl value={grouping} onChange={onGroupingChange} />
+          )}
+          {coverage && completeness !== "complete" && (
+            <Badge tone="amber" variant="tag">
+              {completeness === "truncated" ? "Incomplete history" : "History unverified"}
+            </Badge>
+          )}
+        </div>
       }
       loading={loading}
       error={error}

@@ -264,6 +264,19 @@ async function main() {
   );
   check("invalid history date range -> 400", res.status === 400, `got ${res.status}`);
 
+  res = await call("GET", "/api/inventory-history?tz=Not%2FAZone");
+  check(
+    "inventory history rejects an unrecognised timezone -> 400",
+    res.status === 400,
+    `got ${res.status}`
+  );
+  res = await call("GET", "/api/inventory-history?tz=Asia%2FManila");
+  check(
+    "inventory history accepts a named timezone -> 200",
+    res.status === 200,
+    `got ${res.status}`
+  );
+
   section("inventory history cache");
   // Prime the history scan, then prove a stock movement invalidates it rather
   // than waiting out the 15-second TTL.

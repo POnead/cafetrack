@@ -23,6 +23,10 @@ import { fmtQty, fmtDate, daysUntil, toCsv, formatPeso } from "@/lib/format";
 import { stockStatus } from "@/lib/status";
 import { TRANSACTION_NOTE_SCHEMA_WARNING } from "@/lib/transaction-note-schema";
 import { usePullToRefresh } from "@/lib/use-pull-to-refresh";
+import {
+  localDayBoundsIso,
+  resolvedTimeZone,
+} from "@/lib/zoned-time";
 import { InventoryValueTrendChart } from "@/components/charts/InventoryValueTrendChart";
 import { StockMovementChart } from "@/components/charts/StockMovementChart";
 import { ValueTrendChart } from "@/components/charts/ValueTrendChart";
@@ -104,6 +108,8 @@ type FinancialItem = {
   unitPrice: number;
   valueCents: number;
   events: number;
+  /** True when the SKU no longer exists in the catalogue. */
+  archived?: boolean;
 };
 
 /* Stock wording + tones come from @/lib/status so every page agrees. */
@@ -128,18 +134,34 @@ function buildMoneySlices(entries: FinancialItem[]): MoneySlice[] {
   const sorted = entries.filter((entry) => entry.valueCents > 0);
   const leading = sorted.slice(0, 7);
   const other = sorted.slice(7);
+  const asSliceName = (item: FinancialItem) =>
+    item.archived ? `${item.name} (archived)` : item.name;
   const slices: MoneySlice[] = leading.map((item) => ({
     key: item.sku,
-    name: item.name,
+    name: asSliceName(item),
     valueCents: item.valueCents,
-    items: [item],
+    items: [
+      {
+        sku: item.sku,
+        name: asSliceName(item),
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+        valueCents: item.valueCents,
+      },
+    ],
   }));
   if (other.length > 0) {
     slices.push({
       key: "__other__",
       name: "Other items",
       valueCents: other.reduce((sum, item) => sum + item.valueCents, 0),
-      items: other,
+      items: other.map((item) => ({
+        sku: item.sku,
+        name: asSliceName(item),
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+        valueCents: item.valueCents,
+      })),
     });
   }
   return slices;
@@ -822,6 +844,56 @@ function BadgeTone({ status }: { status: { tone: "slate" | "green" | "amber" | "
   return <Badge tone={status.tone} variant="tag">{status.label}</Badge>;
 }
 
+type ReportsTab = "overview" | "inventory" | "movements" | "performance";
+const REPORT_TABS: { id: ReportsTab; label: string }[] = [
+  { id: "overview", label: "Overview" },
+  { id: "inventory", label: "Inventory" },
+  { id: "movements", label: "Movements & Financials" },
+  { id: "performance", label: "Item Performance" },
+];
+type OnHandSortKey =
+  | "name"
+  | "sku"
+  | "category"
+  | "location"
+  | "quantity"
+  | "threshold"
+  | "expiry"
+  | "status";
+
+function OnHandSortHeader({
+  label,
+  sortKey,
+  className,
+  tableSort,
+  onSort,
+}: {
+  label: string;
+  sortKey: OnHandSortKey;
+  className?: string;
+  tableSort: { key: OnHandSortKey; dir: 1 | -1 };
+  onSort: (key: OnHandSortKey) => void;
+}) {
+  const active = tableSort.key === sortKey;
+  return (
+    <th
+      className={`th sticky top-0 z-10 border-b border-cream-200 bg-cream-100 ${className ?? ""}`}
+      aria-sort={active ? (tableSort.dir === 1 ? "ascending" : "descending") : "none"}
+    >
+      <button
+        type="button"
+        className="inline-flex items-center gap-1 font-semibold"
+        onClick={() => onSort(sortKey)}
+      >
+        {label}
+        <span aria-hidden="true" className={active ? "text-cocoa-700" : "text-cocoa-300"}>
+          {active ? (tableSort.dir === 1 ? "↑" : "↓") : "↕"}
+        </span>
+      </button>
+    </th>
+  );
+}
+
 export default function ReportsPage() {
   const [items, setItems] = useState<Item[]>([]);
   const [txns, setTxns] = useState<Txn[]>([]);
@@ -870,6 +942,15 @@ export default function ReportsPage() {
   const [typeFilter, setTypeFilter] = useState("");
   const [catFilter, setCatFilter] = useState("");
   const [grouping, setGrouping] = useState<Grouping>("auto");
+const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [tableQuery, setTableQuery] = useState("");
+  const [tableSort, setTableSort] = useState<{ key: OnHandSortKey; dir: 1 | -1 }>({
+    key: "name",
+    dir: 1,
+  });
+  const [tablePage, setTablePage] = useState(1);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
   const [availableStaff, setAvailableStaff] = useState<{ id: string; name: string }[]>([]);
 
@@ -888,6 +969,29 @@ export default function ReportsPage() {
     if (range === "year") return { from: `${today.getFullYear()}-01-01`, to };
     return { from: fromDay, to: toDay };
   }, [range, fromDay, toDay]);
+
+  /*
+   * The calendar-day filters mean local calendar days in the user's own
+   * IANA zone — not UTC days, and not a fixed offset, which cannot describe
+   * a 25-hour day across a DST shift. Every request that interprets those
+   * days resolves the boundary per date in this zone:
+   *
+   *   transactions     — half-open instant bounds (from_at / before)
+   *   inventory history — the `tz` parameter, bucketing in the same zone
+   *   PDF / email       — the same `tz` in the export body
+   */
+  const rangeBounds = useMemo(() => {
+    const zone = resolvedTimeZone();
+    return {
+      zone,
+      fromAt: rangeParams.from
+        ? localDayBoundsIso(rangeParams.from, zone)?.fromAt ?? null
+        : null,
+      before: rangeParams.to
+        ? localDayBoundsIso(rangeParams.to, zone)?.before ?? null
+        : null,
+    };
+  }, [rangeParams.from, rangeParams.to]);
 
   /* ---------- loading ----------
    * Three independent loads, so a filter change does not drag the whole
@@ -952,8 +1056,8 @@ export default function ReportsPage() {
           limit: String(TRANSACTION_PAGE_SIZE),
           offset: String(offset),
         });
-        if (rangeParams.from) qs.set("from", rangeParams.from);
-        if (rangeParams.to) qs.set("to", rangeParams.to);
+        if (rangeBounds.fromAt) qs.set("from_at", rangeBounds.fromAt);
+        if (rangeBounds.before) qs.set("before", rangeBounds.before);
         if (staff) qs.set("staff", staff);
         if (typeFilter) qs.set("type", typeFilter);
 
@@ -1019,6 +1123,7 @@ export default function ReportsPage() {
     if (rangeParams.from) qs.set("from", rangeParams.from);
     if (rangeParams.to) qs.set("to", rangeParams.to);
     if (catFilter) qs.set("category", catFilter);
+    qs.set("tz", rangeBounds.zone);
 
     try {
       const response = await fetch(`/api/inventory-history?${qs}`, {
@@ -1154,14 +1259,16 @@ export default function ReportsPage() {
   );
 
   const topMovers = useMemo(() => {
-    const tally = new Map<string, { name: string; qty: number; events: number }>();
+    const tally = new Map<string, { name: string; qty: number; events: number; archived: boolean }>();
     for (const t of filteredTransactions) {
       if (t.type !== "checkout") continue;
       for (const li of t.transaction_items ?? []) {
+        const current = itemsBySku.get(li.sku);
         const cur = tally.get(li.sku) ?? {
-          name: li.item_name,
+          name: current?.name ?? li.item_name,
           qty: 0,
           events: 0,
+          archived: !current,
         };
         cur.qty += Number(li.quantity);
         cur.events += 1;
@@ -1172,7 +1279,7 @@ export default function ReportsPage() {
       .map(([sku, v]) => ({ sku, ...v }))
       .sort((a, b) => b.qty - a.qty)
       .slice(0, 10);
-  }, [filteredTransactions]);
+  }, [filteredTransactions, itemsBySku]);
 
   /*
    * The expiry work queue, ranked the way the alert is ranked: fewest days
@@ -1199,11 +1306,17 @@ export default function ReportsPage() {
   const wasteTotal = movement.find((m) => m.type === "waste")?.qty ?? 0;
   const wasteCount = movement.find((m) => m.type === "waste")?.count ?? 0;
   const wasteByItem = useMemo(() => {
-    const tally = new Map<string, { name: string; qty: number; count: number }>();
+    const tally = new Map<string, { name: string; qty: number; count: number; archived: boolean }>();
     for (const t of filteredTransactions) {
       if (t.type !== "waste") continue;
       for (const li of t.transaction_items ?? []) {
-        const cur = tally.get(li.sku) ?? { name: li.item_name, qty: 0, count: 0 };
+        const current = itemsBySku.get(li.sku);
+        const cur = tally.get(li.sku) ?? {
+          name: current?.name ?? li.item_name,
+          qty: 0,
+          count: 0,
+          archived: !current,
+        };
         cur.qty += Number(li.quantity);
         cur.count += 1;
         tally.set(li.sku, cur);
@@ -1213,7 +1326,7 @@ export default function ReportsPage() {
       .map(([sku, v]) => ({ sku, ...v }))
       .sort((a, b) => b.qty - a.qty)
       .slice(0, 5);
-  }, [filteredTransactions]);
+  }, [filteredTransactions, itemsBySku]);
   const wasteByCategory = useMemo(() => {
     const tally = new Map<string, { quantity: number; events: number }>();
     for (const t of filteredTransactions) {
@@ -1267,11 +1380,12 @@ export default function ReportsPage() {
         const unitPrice = Number(item.unit_price);
         const current = target.get(line.sku) ?? {
           sku: line.sku,
-          name: line.item_name,
+          name: item?.name ?? line.item_name,
           quantity: 0,
           unitPrice,
           valueCents: 0,
           events: 0,
+          archived: !item,
         };
         current.quantity += quantity;
         current.valueCents += Math.round(quantity * unitPrice * 100);
@@ -1589,7 +1703,9 @@ export default function ReportsPage() {
         name: item.name,
         value: item.qty,
         label: fmtQty(item.qty, itemsBySku.get(item.sku)?.unit),
-        detail: `SKU ${item.sku}`,
+        detail: item.archived ? "archived" : `SKU ${item.sku}`,
+        sku: item.sku,
+        archived: item.archived,
       })),
     [topMovers, itemsBySku]
   );
@@ -1601,7 +1717,9 @@ export default function ReportsPage() {
         name: item.name,
         value: item.qty,
         label: fmtQty(item.qty, itemsBySku.get(item.sku)?.unit),
-        detail: `SKU ${item.sku}`,
+        detail: item.archived ? "archived" : `SKU ${item.sku}`,
+        sku: item.sku,
+        archived: item.archived,
       })),
     [wasteByItem, itemsBySku]
   );
@@ -1616,6 +1734,237 @@ export default function ReportsPage() {
       })),
     [wasteByCategory]
   );
+
+/* ---------- on-hand table: search, table filters, sort, columns, pagination ---------- */
+
+  type OnHandOptionalColumn = "category" | "threshold" | "location" | "expiry";
+  const DEFAULT_ONHAND_COLUMNS: Record<OnHandOptionalColumn, boolean> = {
+    category: true,
+    threshold: true,
+    location: false,
+    expiry: false,
+  };
+  const [tablePageSize, setTablePageSize] = useState<25 | 50 | 100>(25);
+  const [tableColumns, setTableColumns] =
+    useState<Record<OnHandOptionalColumn, boolean>>(DEFAULT_ONHAND_COLUMNS);
+  const [columnsMenuOpen, setColumnsMenuOpen] = useState(false);
+  const [tableCategoryFilter, setTableCategoryFilter] = useState("");
+  const [tableLocationFilter, setTableLocationFilter] = useState("");
+  const [tableStatusFilter, setTableStatusFilter] = useState("");
+
+  /*
+   * The location options come from the loaded catalogue itself — one read,
+   * zero extra requests, and the list can never name a location the report
+   * does not also show.
+   */
+  const locationOptions = useMemo(() => {
+    const byId = new Map<string, string>();
+    for (const item of items) {
+      const location = item.location;
+      if (location?.id && !byId.has(location.id)) {
+        byId.set(location.id, location.name ?? location.id);
+      }
+    }
+    return [...byId.entries()]
+      .map(([id, name]) => ({ id, name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [items]);
+
+  const onHandRows = useMemo(() => {
+    const query = tableQuery.trim().toLowerCase();
+    let matched = shownItems;
+
+    if (tableCategoryFilter) {
+      matched = matched.filter((item) => item.category?.id === tableCategoryFilter);
+    }
+    if (tableLocationFilter) {
+      matched = matched.filter((item) => item.location?.id === tableLocationFilter);
+    }
+    if (tableStatusFilter) {
+      matched = matched.filter(
+        (item) =>
+          stockStatus(item.quantity, item.low_stock_threshold).key === tableStatusFilter
+      );
+    }
+    if (query) {
+      matched = matched.filter((item) =>
+        [item.sku, item.name, item.category?.name ?? "", item.location?.name ?? ""]
+          .join(" ")
+          .toLowerCase()
+          .includes(query)
+      );
+    }
+
+    const rank: Record<string, number> = { out: 0, low: 1, ok: 2 };
+    const value = (item: Item, key: OnHandSortKey): string | number => {
+      switch (key) {
+        case "sku":
+          return item.sku.toLowerCase();
+        case "name":
+          return item.name.toLowerCase();
+        case "category":
+          return (item.category?.name ?? "").toLowerCase();
+        case "location":
+          return (item.location?.name ?? "").toLowerCase();
+        case "quantity":
+          return Number(item.quantity);
+        case "threshold":
+          return Number(item.low_stock_threshold);
+        case "expiry": {
+          const d = daysUntil(item.expiration_date);
+          return d === null ? Number.POSITIVE_INFINITY : d;
+        }
+        case "status":
+          return rank[stockStatus(item.quantity, item.low_stock_threshold).key as "out" | "low" | "ok"];
+      }
+    };
+
+    const dir = tableSort.dir;
+    return [...matched].sort((a, b) => {
+      const av = value(a, tableSort.key);
+      const bv = value(b, tableSort.key);
+      if (typeof av === "string" && typeof bv === "string") {
+        return av.localeCompare(bv) * dir;
+      }
+      return ((av as number) - (bv as number)) * dir;
+    });
+  }, [
+    shownItems,
+    tableQuery,
+    tableCategoryFilter,
+    tableLocationFilter,
+    tableStatusFilter,
+    tableSort,
+  ]);
+
+  const onHandPageCount = Math.max(1, Math.ceil(onHandRows.length / tablePageSize));
+  const onHandPage = Math.min(tablePage, onHandPageCount);
+  const onHandSliced = onHandRows.slice(
+    (onHandPage - 1) * tablePageSize,
+    onHandPage * tablePageSize
+  );
+  const onHandRangeStart =
+    onHandRows.length === 0 ? 0 : (onHandPage - 1) * tablePageSize + 1;
+  const onHandRangeEnd = Math.min(onHandPage * tablePageSize, onHandRows.length);
+
+  const activeTableFilterCount =
+    (tableQuery.trim() ? 1 : 0) +
+    (tableCategoryFilter ? 1 : 0) +
+    (tableLocationFilter ? 1 : 0) +
+    (tableStatusFilter ? 1 : 0);
+
+  function clearTableFilters() {
+    setTableQuery("");
+    setTableCategoryFilter("");
+    setTableLocationFilter("");
+    setTableStatusFilter("");
+  }
+
+  useEffect(() => {
+    setTablePage(1);
+  }, [
+    tableQuery,
+    tableCategoryFilter,
+    tableLocationFilter,
+    tableStatusFilter,
+    tablePageSize,
+    catFilter,
+  ]);
+
+  function toggleOnHandColumn(column: OnHandOptionalColumn) {
+    setTableColumns((current) => {
+      const next = { ...current, [column]: !current[column] };
+      /*
+       * Hiding the column the table is sorted by would leave the order
+       * correct but unexplained — sorting silently by something off-screen.
+       * Reset to a sort that is always visible.
+       */
+      if (!next[column] && tableSort.key === column) {
+        setTableSort({ key: "name", dir: 1 });
+      }
+      return next;
+    });
+  }
+
+  const visibleOptionalColumns = (
+    ["category", "threshold", "location", "expiry"] as const
+  ).filter((column) => tableColumns[column]);
+  const lockedColumns = ["sku", "name", "quantity", "status"];
+  const visibleColumnCount = lockedColumns.length + visibleOptionalColumns.length;
+
+  function toggleOnHandSort(key: OnHandSortKey) {
+    setTableSort((current) =>
+      current.key === key
+        ? { key, dir: current.dir === 1 ? -1 : 1 }
+        : { key, dir: 1 }
+    );
+  }
+
+  const soonestExpiryFull = useMemo(
+    () =>
+      shownItems
+        .filter((i) => i.expiration_date)
+        .map((i) => ({ ...i, days: daysUntil(i.expiration_date) }))
+        .sort(
+          (a, b) =>
+            (a.days ?? Number.POSITIVE_INFINITY) -
+            (b.days ?? Number.POSITIVE_INFINITY)
+        ),
+    [shownItems]
+  );
+
+  const expiringSoonCount = useMemo(
+    () =>
+      shownItems.filter((i) => {
+        const d = daysUntil(i.expiration_date);
+        return d !== null && d <= 7;
+      }).length,
+    [shownItems]
+  );
+
+  const activityTotals = useMemo(
+    () => ({
+      restock: movement.find((entry) => entry.type === "restock")?.count ?? 0,
+      checkout: movement.find((entry) => entry.type === "checkout")?.count ?? 0,
+      waste: movement.find((entry) => entry.type === "waste")?.count ?? 0,
+    }),
+    [movement]
+  );
+
+  const overviewMetrics: ReportMetric[] = [
+    {
+      label: "Items Tracked",
+      value: shownItems.length,
+      hint: "Across your inventory",
+      icon: "items",
+      tone: "sage",
+    },
+    {
+      label: "Low Stock",
+      value: low.length,
+      hint: "Below reorder threshold",
+      icon: "low",
+      tone: "ochre",
+    },
+    {
+      label: "Out of Stock",
+      value: out.length,
+      hint: "Replenishment needed",
+      icon: "out",
+      tone: "terracotta",
+    },
+    {
+      label: "Inventory Value",
+      value: inventoryValue.cents,
+      format: "peso-cents" as const,
+      hint:
+        inventoryValue.unpriced > 0
+          ? `${inventoryValue.unpriced} item${inventoryValue.unpriced === 1 ? " has" : "s have"} no price and ${inventoryValue.unpriced === 1 ? "is" : "are"} excluded`
+          : "Quantity × current unit price",
+      icon: "value",
+      tone: "cocoa",
+    },
+  ];
 
   const filterDescription = useMemo(
     () =>
@@ -1778,6 +2127,7 @@ export default function ReportsPage() {
           staff,
           type: typeFilter,
           category_id: catFilter,
+          tz: rangeBounds.zone,
         }),
       });
 
@@ -1829,6 +2179,7 @@ export default function ReportsPage() {
             staff,
             type: typeFilter,
             category_id: catFilter,
+            tz: rangeBounds.zone,
           },
         }),
       });
@@ -1886,240 +2237,669 @@ export default function ReportsPage() {
     range === "custom"
       ? "custom dates"
       : RANGE_OPTIONS.find((option) => option.key === range)?.label.toLowerCase() ?? "selected range";
-  const reportMetrics: ReportMetric[] = [
-    {
-      label: "Items Tracked",
-      value: shownItems.length,
-      hint: "Across your inventory",
-      icon: "items",
-      tone: "sage",
-    },
-    {
-      label: "Low Stock",
-      value: low.length,
-      hint: "Below reorder threshold",
-      icon: "low",
-      tone: "ochre",
-    },
-    {
-      label: "Out of Stock",
-      value: out.length,
-      hint: "Replenishment needed",
-      icon: "out",
-      tone: "terracotta",
-    },
-    {
-      label: "Movements",
-      value: filteredTransactions.length,
-      hint: `Recorded transactions · ${movementPeriodLabel}`,
-      icon: "movements",
-      tone: "cocoa",
-    },
-    {
-      label: "Inventory Value",
-      value: inventoryValue.cents,
-      format: "peso-cents" as const,
-      hint:
-        inventoryValue.unpriced > 0
-          ? `${inventoryValue.unpriced} item${inventoryValue.unpriced === 1 ? " has" : "s have"} no price and ${inventoryValue.unpriced === 1 ? "is" : "are"} excluded`
-          : "Quantity × current unit price",
-      icon: "value",
-      tone: "cocoa",
-    },
-  ];
 
-  /* ---------- the dashboard body, shared by the page and the export preview ---------- */
-  const dashboard = (
-    <>
-      {/* Section 1 — Summary */}
-      <section aria-labelledby="reports-summary" className="space-y-3">
-        <h2 id="reports-summary" className="text-base font-bold text-cocoa-800">
-          Summary
-        </h2>
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
-          {reportMetrics.map((metric) => (
-            <ReportMetricCard key={metric.label} metric={metric} />
+/* ---------- tab bar ---------- */
+
+  const tabBar = (
+    <nav
+      role="tablist"
+      aria-label="Report sections"
+      className="flex gap-2 overflow-x-auto rounded-2xl border border-cream-200 bg-cream-50 p-2"
+    >
+      {REPORT_TABS.map((tab) => (
+        <button
+          key={tab.id}
+          id={`reports-tab-${tab.id}`}
+          type="button"
+          role="tab"
+          aria-selected={activeTab === tab.id}
+          aria-controls={`reports-panel-${tab.id}`}
+          onClick={() => setActiveTab(tab.id)}
+          className={`inline-flex shrink-0 items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold transition-colors ${
+            activeTab === tab.id
+              ? "bg-cocoa-800 text-white shadow-warm"
+              : "text-cocoa-600 hover:bg-cream-100"
+          }`}
+        >
+          {tab.label}
+        </button>
+      ))}
+    </nav>
+  );
+
+  /* ---------- filters: state, chips, and the shared filter panel ---------- */
+
+  const rangeLabel =
+    range === "custom"
+      ? "Custom dates"
+      : RANGE_OPTIONS.find((option) => option.key === range)?.label ?? "This week";
+  const advancedFilterCount = [typeFilter, staff, catFilter].filter(Boolean).length;
+  const selectedCategoryName = catFilter
+    ? categories.find((category) => category.id === catFilter)?.name ?? "selected category"
+    : null;
+  const filterChips: { key: string; label: string; onRemove: () => void }[] = [
+    range !== "week"
+      ? { key: "range", label: `Range: ${rangeLabel}`, onRemove: () => { setRange("week"); setFromDay(""); setToDay(""); } }
+      : null,
+    typeFilter
+      ? {
+          key: "type",
+          label: `Movement: ${MOVEMENT_LABEL[typeFilter] ?? typeFilter}`,
+          onRemove: () => setTypeFilter(""),
+        }
+      : null,
+    staff
+      ? {
+          key: "staff",
+          label: `Staff: ${selectedStaffName ?? "selected staff"}`,
+          onRemove: () => setStaff(""),
+        }
+      : null,
+    catFilter
+      ? {
+          key: "cat",
+          label: `Category: ${selectedCategoryName}`,
+          onRemove: () => setCatFilter(""),
+        }
+      : null,
+  ].filter((chip): chip is { key: string; label: string; onRemove: () => void } => Boolean(chip));
+
+  function clearAllFilters() {
+    setRange("week");
+    setFromDay("");
+    setToDay("");
+    setStaff("");
+    setTypeFilter("");
+    setCatFilter("");
+    setGrouping("auto");
+  }
+
+  const filterPanel = (
+    <Card>
+      <div className="flex flex-wrap items-end gap-3">
+        <div>
+          <label className="label" htmlFor="f-range">Date range</label>
+          <select
+            id="f-range"
+            className="input"
+            value={range}
+            onChange={(event) => setRange(event.target.value as RangeKey)}
+          >
+            {RANGE_OPTIONS.map((option) => (
+              <option key={option.key} value={option.key}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {range === "custom" && (
+          <>
+            <div>
+              <label className="label" htmlFor="f-from">From</label>
+              <input
+                id="f-from"
+                type="date"
+                className="input"
+                value={fromDay}
+                max={toDay || undefined}
+                onChange={(event) => setFromDay(event.target.value)}
+              />
+            </div>
+            <div>
+              <label className="label" htmlFor="f-to">To</label>
+              <input
+                id="f-to"
+                type="date"
+                className="input"
+                value={toDay}
+                min={fromDay || undefined}
+                onChange={(event) => setToDay(event.target.value)}
+              />
+            </div>
+          </>
+        )}
+
+        <button
+          type="button"
+          className="btn-ghost"
+          aria-expanded={filtersOpen}
+          aria-controls="filters-panel"
+          onClick={() => setFiltersOpen((open) => !open)}
+        >
+          Filters
+          {advancedFilterCount > 0 && (
+            <span className="ml-1.5 rounded-full bg-cocoa-800 px-1.5 py-0.5 text-[10px] font-bold text-white">
+              {advancedFilterCount}
+            </span>
+          )}
+          <span aria-hidden="true" className="ml-1.5 inline-block text-[10px]">
+            {filtersOpen ? "▲" : "▼"}
+          </span>
+        </button>
+
+        {(rangeParams.from || rangeParams.to || staff || typeFilter || catFilter) && (
+          <button type="button" className="btn-ghost" onClick={clearAllFilters}>
+            Clear filters
+          </button>
+        )}
+      </div>
+
+      {filtersOpen && (
+        <div
+          id="filters-panel"
+          className="mt-3 grid gap-3 border-t border-cream-200 pt-3 sm:grid-cols-2 md:grid-cols-3"
+        >
+          <div>
+            <label className="label" htmlFor="f-type">Movement</label>
+            <select
+              id="f-type"
+              className="input w-full"
+              value={typeFilter}
+              onChange={(event) => setTypeFilter(event.target.value)}
+            >
+              <option value="">All movements</option>
+              <option value="checkout">Checked out</option>
+              <option value="restock">Restocked</option>
+              <option value="waste">Waste</option>
+            </select>
+          </div>
+          <div>
+            <label className="label" htmlFor="f-staff">Staff</label>
+            <select
+              id="f-staff"
+              className="input w-full"
+              value={staff}
+              onChange={(event) => setStaff(event.target.value)}
+            >
+              <option value="">Everyone</option>
+              {staffOptions.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="label" htmlFor="f-cat">Category</label>
+            <select
+              id="f-cat"
+              className="input w-full"
+              value={catFilter}
+              onChange={(e) => setCatFilter(e.target.value)}
+            >
+              <option value="">All categories</option>
+              {categories.map((category) => (
+                <option key={category.id} value={category.id}>
+                  {category.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      )}
+
+      {filterChips.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-1.5 border-t border-cream-200 pt-3">
+          {filterChips.map((chip) => (
+            <button
+              key={chip.key}
+              type="button"
+              onClick={chip.onRemove}
+              aria-label={`Remove filter: ${chip.label}`}
+              className="inline-flex items-center gap-1.5 rounded-full border border-cream-200 bg-cream-100 px-2.5 py-1 text-[11px] font-medium text-cocoa-600 transition-colors hover:border-cream-300 hover:text-cocoa-800"
+            >
+              {chip.label}
+              <span aria-hidden="true" className="text-cocoa-400">×</span>
+            </button>
           ))}
         </div>
-        <div className="grid gap-3 lg:grid-cols-2">
-          <ReportPriceInsight
-            title="Total Revenue"
-            cents={financialSummary.revenueCents}
-            missingLines={financialSummary.unpricedRevenueLines}
-            missingItems={financialSummary.unpricedRevenueItems}
-            kind="revenue"
-            onAddPrices={() => setPriceEditorOpen(true)}
-          />
-          <ReportPriceInsight
-            title="Total Waste Cost"
-            cents={financialSummary.lossCents}
-            missingLines={financialSummary.unpricedLossLines}
-            missingItems={financialSummary.unpricedLossItems}
-            kind="waste"
-            onAddPrices={() => setPriceEditorOpen(true)}
-          />
-        </div>
-      </section>
+      )}
+    </Card>
+  );
 
-      {/* Section 2 — Inventory trends */}
-      <section aria-labelledby="reports-trends" className="space-y-3">
-        <h2 id="reports-trends" className="text-base font-bold text-cocoa-800">
-          Inventory trends
-        </h2>
-        <div className="grid gap-4 xl:grid-cols-2">
-          <InventoryValueTrendChart
-            data={inventoryHistory}
-            loading={historyLoading}
-            error={historyError}
-            grouping={grouping}
-          />
-          <StockMovementChart
-            movement={chartAnalytics.movementPoints}
-            periodLabel={chartAnalytics.periodLabel}
-          />
-          <ValueTrendChart
-            points={chartAnalytics.trendPoints}
-            periodLabel={chartAnalytics.periodLabel}
-            unpricedLines={
-              financialSummary.unpricedRevenueLines + financialSummary.unpricedLossLines
-            }
-          />
-          <TransactionHistogramChart bins={chartAnalytics.bins} />
+  const alerts = (
+    <>
+      {error && (
+        <div role="alert" className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
+          {error}
         </div>
-      </section>
-
-      {/* Section 3 — Inventory breakdown */}
-      <section aria-labelledby="reports-breakdown" className="space-y-3">
-        <h2 id="reports-breakdown" className="text-base font-bold text-cocoa-800">
-          Inventory breakdown
-        </h2>
-        <div className="grid gap-4 xl:grid-cols-2">
-          <StockByCategoryChart categories={categoryStock} />
-          <StockStatusDonutChart status={statusDistribution} />
-          <ValueBreakdownChart
-            title="Revenue by item"
-            description="Checkout value by item. Select a slice to inspect its quantity and value."
-            slices={valueSlices}
-            totalCents={financialSummary.revenueCents}
-            emptyMessage="No priced items in this date range."
-          />
-          <ValueBreakdownChart
-            title="Lost value by item"
-            description="Waste cost by item. Select a slice to inspect its quantity and value."
-            slices={lossSlices}
-            totalCents={financialSummary.lossCents}
-            emptyMessage="No priced waste in this date range."
-          />
+      )}
+      {!transactionNotesAvailable && (
+        <div className="rounded-xl bg-ochre-50 px-3.5 py-2.5 text-sm text-ochre-700">
+          {TRANSACTION_NOTE_SCHEMA_WARNING}
         </div>
-        <TransactionActivityDonutChart activity={activitySlices} />
-      </section>
+      )}
+      {exportError && (
+        <div role="alert" className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
+          {exportError}
+        </div>
+      )}
+    </>
+  );
 
-      {/* Section 4 — Item performance */}
-      <section aria-labelledby="reports-performance" className="space-y-3">
-        <h2 id="reports-performance" className="text-base font-bold text-cocoa-800">
-          Item performance
-        </h2>
-        <div className="grid gap-4 lg:grid-cols-2">
-          <Card className="!p-0">
-            <div className="border-b border-cream-200 bg-cream-50 px-4 py-3">
-              <h2 className="text-sm font-bold text-cocoa-800">Waste Summary</h2>
-              <p className="mt-1 text-xs text-cocoa-400">
-                Recorded waste in the selected report.
+  const pageHeader = (
+    <div className="flex flex-wrap items-end justify-between gap-3">
+      <div>
+        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cocoa-400">
+          {businessName} / Management workspace
+        </p>
+        <h1 className="deco-title mt-1 text-3xl">Analytics &amp; Stock Report</h1>
+        <p className="mt-1 text-sm text-cocoa-400">
+          A clear view of your stock, movements, and expiry operations.
+        </p>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          className="btn-ghost hidden lg:inline-flex"
+          onClick={loadAll}
+          disabled={loading}
+        >
+          {loading ? "Refreshing..." : "Reload"}
+        </button>
+        <div className="relative">
+          <button
+            className="btn-primary inline-flex items-center gap-2"
+            onClick={() => setExportMenuOpen((open) => !open)}
+            aria-expanded={exportMenuOpen}
+            aria-haspopup="menu"
+            disabled={items.length === 0 || loading}
+          >
+            Export
+            <span aria-hidden="true" className="text-[10px]">▾</span>
+          </button>
+          {exportMenuOpen && (
+            <>
+              <button
+                tabIndex={-1}
+                aria-hidden="true"
+                className="fixed inset-0 z-20 cursor-default"
+                onClick={() => setExportMenuOpen(false)}
+              />
+              <div
+                role="menu"
+                aria-label="Export report"
+                className="absolute right-0 z-30 mt-2 w-48 overflow-hidden rounded-xl border border-cream-200 bg-white shadow-warm"
+              >
+                <button
+                  role="menuitem"
+                  className="block w-full px-3 py-2.5 text-left text-sm text-cocoa-700 hover:bg-cream-50"
+                  onClick={() => {
+                    setExportMenuOpen(false);
+                    setReportPreviewOpen(true);
+                    setEmailModalOpen(false);
+                    setExportError(null);
+                  }}
+                >
+                  Download PDF…
+                </button>
+                <button
+                  role="menuitem"
+                  className="block w-full border-t border-cream-100 px-3 py-2.5 text-left text-sm text-cocoa-700 hover:bg-cream-50"
+                  onClick={() => {
+                    setExportMenuOpen(false);
+                    exportCsv();
+                  }}
+                >
+                  Download CSV
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+/* ---------- the four report sections, shared by the page and the PDF preview ---------- */
+
+  const overviewSection = (
+    <section
+      id="reports-panel-overview"
+      role="tabpanel"
+      aria-labelledby="reports-tab-overview"
+      className="space-y-4"
+    >
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {overviewMetrics.map((metric) => (
+          <ReportMetricCard key={metric.label} metric={metric} />
+        ))}
+      </div>
+
+      {inventoryValue.unpriced > 0 && (
+        <button
+          type="button"
+          className="inline-flex w-full items-center justify-between gap-3 rounded-xl border border-ochre-200 bg-ochre-50 px-4 py-2.5 text-left text-xs font-medium text-ochre-800 transition-colors hover:bg-ochre-100 sm:w-auto"
+          onClick={() => setPriceEditorOpen(true)}
+        >
+          <span>
+            {inventoryValue.unpriced} item{inventoryValue.unpriced === 1 ? " has" : "s have"} no unit price.
+            Value charts leave them out.
+          </span>
+          <span className="shrink-0 font-semibold underline">Add prices</span>
+        </button>
+      )}
+
+      <div className="grid gap-3 lg:grid-cols-3">
+        {/* Needs attention — the triage panel */}
+        <div className="rounded-2xl border border-cream-200 bg-white p-4 lg:col-span-2">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-sm font-bold text-cocoa-800">Needs attention</h2>
+            <button
+              type="button"
+              className="text-[11px] font-semibold text-cocoa-500 hover:text-cocoa-800"
+              onClick={() => setActiveTab("inventory")}
+            >
+              Open inventory →
+            </button>
+          </div>
+          <div className="mt-3 grid grid-cols-3 gap-2">
+            <button
+              type="button"
+              onClick={() => setActiveTab("inventory")}
+              className="rounded-xl bg-ochre-50 px-3 py-3 text-left transition-colors hover:bg-ochre-100"
+            >
+              <p className="text-2xl font-semibold leading-none tabular-nums text-ochre-800">
+                {low.length}
               </p>
-            </div>
-            <div className="grid grid-cols-2 gap-3 p-4">
-              <Stat label="Total Waste" value={fmtQty(wasteTotal)} tone="danger" />
-              <Stat label="Waste Events" value={wasteCount} tone="warn" />
-            </div>
-          </Card>
-          <TopItemsBarChart
-            title="Waste by category"
-            description="Waste item entries by category. Select a bar to see its total quantity."
-            metric="waste entries"
-            entries={wasteByCategoryEntries}
-            color={CHART_COLORS.neutral}
-            emptyMessage="No waste recorded yet."
-            unitLabel="entries"
-            notes={
-              <>
-                Counted by waste item entries, not quantities, because the
-                quantities are in mixed units. Total quantity is in the tooltip.
-              </>
-            }
-          />
+              <p className="mt-1.5 text-[10px] font-semibold text-ochre-700">Low stock</p>
+              <p className="text-[9px] text-ochre-600/80">At or below threshold</p>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("inventory")}
+              className="rounded-xl bg-terracotta-50 px-3 py-3 text-left transition-colors hover:bg-terracotta-100"
+            >
+              <p className="text-2xl font-semibold leading-none tabular-nums text-terracotta-800">
+                {out.length}
+              </p>
+              <p className="mt-1.5 text-[10px] font-semibold text-terracotta-700">Out of stock</p>
+              <p className="text-[9px] text-terracotta-600/80">Replenishment needed</p>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("inventory")}
+              className="rounded-xl bg-cream-50 px-3 py-3 text-left transition-colors hover:bg-cream-100"
+            >
+              <p className="text-2xl font-semibold leading-none tabular-nums text-cocoa-800">
+                {expiringSoonCount}
+              </p>
+              <p className="mt-1.5 text-[10px] font-semibold text-cocoa-600">Expiring soon</p>
+              <p className="text-[9px] text-cocoa-400">Within 7 days or already expired</p>
+            </button>
+          </div>
         </div>
-        <div className="grid gap-4 xl:grid-cols-2">
-          <TopItemsBarChart
-            title="Top-moving inventory items"
-            description="Top ten items by units checked out in this date range."
-            metric="units checked out"
-            entries={topMoverEntries}
-            color={CHART_COLORS.revenue}
-            emptyMessage="No checkout activity in this date range."
-            unitLabel="units"
-            notes={
-              <>
-                Ranked by checkout units, not by how often the item was
-                checked out, and not by waste. An item checked out once with
-                ten units ranks above an item checked out ten times with one.
-              </>
-            }
-          />
-          <TopItemsBarChart
-            title="Most wasted items"
-            description="Ranked by waste quantity in this date range · mixed units."
-            metric="units wasted"
-            entries={wasteByItemEntries}
-            color={CHART_COLORS.waste}
-            emptyMessage="No waste activity in this date range."
-            unitLabel="units"
-          />
-          <MovementActivityChart
-            activity={activitySlices}
-            transactions={filteredTransactions}
-          />
-        </div>
-        <ActivityScatterChart
-          points={chartAnalytics.scatterPoints}
-          periodLabel={movementPeriodLabel}
-        />
-      </section>
 
-      <SoonestExpiries items={soonestExpiry} />
-
-      {/* On hand by item — the full snapshot, with a mobile card view below lg. */}
-      <Card className="!p-0">
-        <div className="flex items-center justify-between border-b border-cream-200 bg-cream-50 px-4 py-3">
-          <div>
-            <h2 className="text-sm font-bold text-cocoa-800">On hand by item</h2>
-            <p className="mt-1 text-[11px] text-cocoa-400">
-              Complete inventory · quantities, reorder thresholds, and stock status
+        {/* Recent stock activity */}
+        <div className="rounded-2xl border border-cream-200 bg-white p-4">
+          <h2 className="text-sm font-bold text-cocoa-800">Recent stock activity</h2>
+          <p className="mt-1 text-xs text-cocoa-400">
+            {movementPeriodLabel} · {filteredTransactions.length} movements
+          </p>
+          <div className="mt-3 space-y-2 text-xs">
+            <p className="flex items-center justify-between gap-2">
+              <span className="flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-sage-500" aria-hidden="true" />
+                Restocked
+              </span>
+              <span className="font-semibold tabular-nums text-cocoa-800">{activityTotals.restock}</span>
+            </p>
+            <p className="flex items-center justify-between gap-2">
+              <span className="flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-cocoa-500" aria-hidden="true" />
+                Checked out
+              </span>
+              <span className="font-semibold tabular-nums text-cocoa-800">{activityTotals.checkout}</span>
+            </p>
+            <p className="flex items-center justify-between gap-2">
+              <span className="flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-rust-500" aria-hidden="true" />
+                Logged as waste
+              </span>
+              <span className="font-semibold tabular-nums text-cocoa-800">{activityTotals.waste}</span>
             </p>
           </div>
-          <span className="shrink-0 text-[11px] text-cocoa-400">{shownItems.length} items</span>
+        </div>
+      </div>
+
+      <InventoryValueTrendChart
+        data={inventoryHistory}
+        loading={historyLoading}
+        error={historyError}
+        grouping={grouping}
+        onGroupingChange={setGrouping}
+      />
+    </section>
+  );
+
+  const inventorySection = (
+    <section
+      id="reports-panel-inventory"
+      role="tabpanel"
+      aria-labelledby="reports-tab-inventory"
+      className="space-y-3"
+    >
+      <div className="grid gap-4 xl:grid-cols-2">
+        <StockByCategoryChart categories={categoryStock} />
+        <StockStatusDonutChart status={statusDistribution} />
+      </div>
+
+      <SoonestExpiries items={soonestExpiryFull} />
+
+      {/* On hand by item — searchable, filterable, sortable, paginated */}
+      <Card className="!p-0">
+        {/* header: title + summary, search, column visibility */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-cream-200 bg-cream-50 px-4 py-3">
+          <div className="min-w-0">
+            <h2 className="text-sm font-bold text-cocoa-800">On hand by item</h2>
+            <p className="mt-1 text-[11px] tabular-nums text-cocoa-400">
+              {activeTableFilterCount > 0
+                ? `${onHandRows.length} of ${shownItems.length} match`
+                : `${shownItems.length} items tracked`}
+              {` · page ${onHandPage} of ${onHandPageCount}`}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="sr-only" htmlFor="onhand-search">
+              Search items by name or SKU
+            </label>
+            <input
+              id="onhand-search"
+              className="input w-44 sm:w-56"
+              type="search"
+              placeholder="Search item or SKU…"
+              value={tableQuery}
+              onChange={(event) => setTableQuery(event.target.value)}
+            />
+
+            {/* column visibility — tablet and up */}
+            <div className="relative hidden md:block">
+              <button
+                type="button"
+                className="btn-ghost inline-flex items-center gap-1.5"
+                aria-expanded={columnsMenuOpen}
+                aria-haspopup="menu"
+                onClick={() => setColumnsMenuOpen((open) => !open)}
+              >
+                Columns
+                <span className="text-[10px] tabular-nums text-cocoa-400">
+                  {visibleColumnCount}/8
+                </span>
+                <span aria-hidden="true" className="text-[10px] text-cocoa-400">
+                  ▾
+                </span>
+              </button>
+              {columnsMenuOpen && (
+                <>
+                  <button
+                    tabIndex={-1}
+                    aria-hidden="true"
+                    className="fixed inset-0 z-20 cursor-default"
+                    onClick={() => setColumnsMenuOpen(false)}
+                  />
+                  <div
+                    role="menu"
+                    aria-label="Toggle columns"
+                    className="absolute right-0 z-30 mt-2 w-56 overflow-hidden rounded-xl border border-cream-200 bg-white py-1 shadow-warm"
+                  >
+                    <p className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-cocoa-400">
+                      Optional columns
+                    </p>
+                    {(
+                      [
+                        ["category", "Category"],
+                        ["threshold", "Threshold"],
+                        ["location", "Location"],
+                        ["expiry", "Expiry"],
+                      ] as [OnHandOptionalColumn, string][]
+                    ).map(([column, label]) => (
+                      <button
+                        key={column}
+                        role="menuitemcheckbox"
+                        type="button"
+                        aria-checked={tableColumns[column]}
+                        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-cocoa-700 hover:bg-cream-50"
+                        onClick={() => toggleOnHandColumn(column)}
+                      >
+                        <span
+                          aria-hidden="true"
+                          className={`inline-flex h-3.5 w-3.5 items-center justify-center rounded border text-[10px] leading-none ${
+                            tableColumns[column]
+                              ? "border-cocoa-800 bg-cocoa-800 text-white"
+                              : "border-cream-300 bg-white text-transparent"
+                          }`}
+                        >
+                          ✓
+                        </span>
+                        {label}
+                      </button>
+                    ))}
+                    <button
+                      role="menuitem"
+                      type="button"
+                      className="block w-full border-t border-cream-100 px-3 py-2 text-left text-xs font-medium text-cocoa-500 hover:bg-cream-50"
+                      onClick={() => {
+                        setTableColumns({ ...DEFAULT_ONHAND_COLUMNS });
+                        setColumnsMenuOpen(false);
+                      }}
+                    >
+                      Reset columns
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* table-level filters — affect only this table */}
+        <div className="flex flex-wrap items-center gap-2 border-b border-cream-200 px-4 py-2">
+          <label className="sr-only" htmlFor="onhand-cat">
+            Filter by category
+          </label>
+          <select
+            id="onhand-cat"
+            className={`input w-auto text-xs ${
+              tableCategoryFilter ? "border-cocoa-300 bg-cream-100 font-medium" : ""
+            }`}
+            value={tableCategoryFilter}
+            onChange={(event) => setTableCategoryFilter(event.target.value)}
+          >
+            <option value="">All categories</option>
+            {categories.map((category) => (
+              <option key={category.id} value={category.id}>
+                {category.name}
+              </option>
+            ))}
+          </select>
+
+          <label className="sr-only" htmlFor="onhand-loc">
+            Filter by location
+          </label>
+          <select
+            id="onhand-loc"
+            className={`input w-auto text-xs ${
+              tableLocationFilter ? "border-cocoa-300 bg-cream-100 font-medium" : ""
+            }`}
+            value={tableLocationFilter}
+            onChange={(event) => setTableLocationFilter(event.target.value)}
+          >
+            <option value="">All locations</option>
+            {locationOptions.map((location) => (
+              <option key={location.id} value={location.id}>
+                {location.name}
+              </option>
+            ))}
+          </select>
+
+          <label className="sr-only" htmlFor="onhand-status">
+            Filter by stock status
+          </label>
+          <select
+            id="onhand-status"
+            className={`input w-auto text-xs ${
+              tableStatusFilter ? "border-cocoa-300 bg-cream-100 font-medium" : ""
+            }`}
+            value={tableStatusFilter}
+            onChange={(event) => setTableStatusFilter(event.target.value)}
+          >
+            <option value="">All statuses</option>
+            <option value="ok">In Stock</option>
+            <option value="low">Low Stock</option>
+            <option value="out">Out of Stock</option>
+          </select>
+
+          {activeTableFilterCount > 0 && (
+            <button
+              type="button"
+              className="text-[11px] font-semibold text-cocoa-500 underline-offset-2 hover:text-cocoa-800 hover:underline"
+              onClick={clearTableFilters}
+            >
+              Clear table filters
+            </button>
+          )}
         </div>
 
         {shownItems.length === 0 ? (
           <Empty>{items.length === 0 ? "No items yet." : "No items in this category."}</Empty>
+        ) : onHandRows.length === 0 ? (
+          <div className="px-4 py-8 text-center">
+            <p className="text-sm font-medium text-cocoa-700">
+              No items match the current search and filters.
+            </p>
+            <p className="mt-1 text-xs text-cocoa-400">
+              Try a different search term, or clear the filters.
+            </p>
+            <button
+              type="button"
+              className="btn-ghost mt-3"
+              onClick={clearTableFilters}
+            >
+              Clear search &amp; filters
+            </button>
+          </div>
         ) : (
           <>
-            <div className="space-y-2.5 pb-3 lg:hidden">
-              {shownItems.map((item) => {
+            {/* mobile card view */}
+            <div className="space-y-2.5 p-3 md:hidden">
+              {onHandSliced.map((item) => {
                 const status = stockStatus(item.quantity, item.low_stock_threshold);
                 const days = daysUntil(item.expiration_date);
                 return (
                   <DataCard key={item.id}>
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
-                        <div className="font-semibold text-cocoa-800">{item.name}</div>
-                        <div className="font-mono text-xs text-cocoa-400">{item.sku}</div>
+                        <div className="truncate font-semibold text-cocoa-800" title={item.name}>
+                          {item.name}
+                        </div>
+                        <div className="truncate font-mono text-xs text-cocoa-400" title={item.sku}>
+                          {item.sku}
+                        </div>
                       </div>
                       <BadgeTone status={status} />
                     </div>
                     <DataField label="On hand">{fmtQty(item.quantity, item.unit)}</DataField>
-                    <DataField label="Threshold">
-                      {fmtQty(item.low_stock_threshold, item.unit)}
-                    </DataField>
+                    <DataField label="Threshold">{fmtQty(item.low_stock_threshold, item.unit)}</DataField>
                     <DataField label="Category">{item.category?.name ?? "—"}</DataField>
                     <DataField label="Location">{item.location?.name ?? "—"}</DataField>
                     <DataField label="Expiry">
@@ -2139,49 +2919,82 @@ export default function ReportsPage() {
               })}
             </div>
 
-            <div className="hidden overflow-x-auto lg:block">
+            {/* desktop table */}
+            <div className="hidden max-h-[34rem] overflow-auto md:block">
               <table className="w-full">
                 <thead>
-                  <tr className="bg-cream-100/60">
-                    <th className="th">SKU</th>
-                    <th className="th">Item</th>
-                    <th className="th">Category</th>
-                    <th className="th">Location</th>
-                    <th className="th text-right">On hand</th>
-                    <th className="th text-right">Threshold</th>
-                    <th className="th">Expiry</th>
-                    <th className="th">Stock status</th>
+                  <tr>
+                    <OnHandSortHeader label="SKU" sortKey="sku" tableSort={tableSort} onSort={toggleOnHandSort} />
+                    <OnHandSortHeader label="Item" sortKey="name" tableSort={tableSort} onSort={toggleOnHandSort} />
+                    {tableColumns.category && (
+                      <OnHandSortHeader label="Category" sortKey="category" tableSort={tableSort} onSort={toggleOnHandSort} />
+                    )}
+                    {tableColumns.location && (
+                      <OnHandSortHeader label="Location" sortKey="location" tableSort={tableSort} onSort={toggleOnHandSort} />
+                    )}
+                    <OnHandSortHeader label="On hand" sortKey="quantity" className="text-right" tableSort={tableSort} onSort={toggleOnHandSort} />
+                    {tableColumns.threshold && (
+                      <OnHandSortHeader label="Threshold" sortKey="threshold" className="text-right" tableSort={tableSort} onSort={toggleOnHandSort} />
+                    )}
+                    {tableColumns.expiry && (
+                      <OnHandSortHeader label="Expiry" sortKey="expiry" tableSort={tableSort} onSort={toggleOnHandSort} />
+                    )}
+                    <OnHandSortHeader label="Stock status" sortKey="status" tableSort={tableSort} onSort={toggleOnHandSort} />
                   </tr>
                 </thead>
                 <tbody>
-                  {shownItems.map((item) => {
+                  {onHandSliced.map((item) => {
                     const status = stockStatus(item.quantity, item.low_stock_threshold);
                     const days = daysUntil(item.expiration_date);
                     return (
                       <tr key={item.id} className="transition-colors hover:bg-cream-50">
-                        <td className="td font-mono text-xs text-cocoa-400">{item.sku}</td>
-                        <td className="td font-medium text-cocoa-800">{item.name}</td>
-                        <td className="td text-cocoa-500">{item.category?.name ?? "—"}</td>
-                        <td className="td text-cocoa-500">{item.location?.name ?? "—"}</td>
-                        <td className="td text-right tabular-nums">
+                        <td className="td max-w-[8.5rem]">
+                          <span className="block truncate font-mono text-xs text-cocoa-400" title={item.sku}>
+                            {item.sku}
+                          </span>
+                        </td>
+                        <td className="td max-w-[13rem] lg:max-w-[18rem]">
+                          <span className="block truncate font-medium text-cocoa-800" title={item.name}>
+                            {item.name}
+                          </span>
+                        </td>
+                        {tableColumns.category && (
+                          <td className="td max-w-[9rem]">
+                            <span className="block truncate text-cocoa-500" title={item.category?.name ?? ""}>
+                              {item.category?.name ?? "—"}
+                            </span>
+                          </td>
+                        )}
+                        {tableColumns.location && (
+                          <td className="td max-w-[9rem]">
+                            <span className="block truncate text-cocoa-500" title={item.location?.name ?? ""}>
+                              {item.location?.name ?? "—"}
+                            </span>
+                          </td>
+                        )}
+                        <td className="td whitespace-nowrap text-right tabular-nums">
                           {fmtQty(item.quantity, item.unit)}
                         </td>
-                        <td className="td text-right tabular-nums text-cocoa-500">
-                          {fmtQty(item.low_stock_threshold, item.unit)}
-                        </td>
-                        <td className="td whitespace-nowrap text-xs text-cocoa-500">
-                          {item.expiration_date ? (
-                            <>
-                              {fmtDate(item.expiration_date)}
-                              {days !== null && days < 0 && (
-                                <span className="text-terracotta-700"> (expired)</span>
-                              )}
-                            </>
-                          ) : (
-                            <span className="text-cocoa-200">—</span>
-                          )}
-                        </td>
-                        <td className="td">
+                        {tableColumns.threshold && (
+                          <td className="td whitespace-nowrap text-right tabular-nums text-cocoa-500">
+                            {fmtQty(item.low_stock_threshold, item.unit)}
+                          </td>
+                        )}
+                        {tableColumns.expiry && (
+                          <td className="td whitespace-nowrap text-xs text-cocoa-500">
+                            {item.expiration_date ? (
+                              <>
+                                {fmtDate(item.expiration_date)}
+                                {days !== null && days < 0 && (
+                                  <span className="text-terracotta-700"> (expired)</span>
+                                )}
+                              </>
+                            ) : (
+                              <span className="text-cocoa-200">—</span>
+                            )}
+                          </td>
+                        )}
+                        <td className="td whitespace-nowrap">
                           <Badge tone={status.tone} variant="tag">
                             {status.label}
                           </Badge>
@@ -2195,11 +3008,233 @@ export default function ReportsPage() {
           </>
         )}
 
+        {/* pagination — on the filtered set, always visible */}
+        {shownItems.length > 0 && (
+        <div
+          className="flex flex-wrap items-center justify-between gap-2 border-t border-cream-200 px-4 py-2 text-[11px] text-cocoa-400"
+          aria-label="Table pagination"
+        >
+          <span className="tabular-nums">
+            Showing {onHandRangeStart}–{onHandRangeEnd} of {onHandRows.length}{" "}
+            {onHandRows.length === 1 ? "item" : "items"}
+          </span>
+          <div className="flex items-center gap-2">
+            <label className="sr-only" htmlFor="onhand-pagesize">
+              Items per page
+            </label>
+            <select
+              id="onhand-pagesize"
+              className="input w-auto pr-8 text-[11px]"
+              value={tablePageSize}
+              onChange={(event) =>
+                setTablePageSize(Number(event.target.value) as 25 | 50 | 100)
+              }
+            >
+              <option value={25}>25</option>
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+            </select>
+            <span className="hidden text-cocoa-400 sm:inline">per page</span>
+            <button
+              type="button"
+              className="btn-ghost !px-2.5 !py-1 text-[11px]"
+              onClick={() => setTablePage((page) => Math.max(1, page - 1))}
+              disabled={onHandPage <= 1}
+            >
+              ← Prev
+            </button>
+            <span className="tabular-nums">
+              Page {onHandPage} of {onHandPageCount}
+            </span>
+            <button
+              type="button"
+              className="btn-ghost !px-2.5 !py-1 text-[11px]"
+              onClick={() => setTablePage((page) => Math.min(onHandPageCount, page + 1))}
+              disabled={onHandPage >= onHandPageCount}
+            >
+              Next →
+            </button>
+          </div>
+        </div>
+        )}
+
         <p className="border-t border-cream-200 bg-cream-50 px-4 py-2 text-[10px] text-cocoa-400">
           Stock status reflects quantity only. Review expired items before use.
         </p>
       </Card>
+    </section>
+  );
 
+  const movementsSection = (
+    <section
+      id="reports-panel-movements"
+      role="tabpanel"
+      aria-labelledby="reports-tab-movements"
+      className="space-y-4"
+    >
+      <div className="grid gap-3 lg:grid-cols-2">
+        <ReportPriceInsight
+          title="Total Revenue"
+          cents={financialSummary.revenueCents}
+          missingLines={financialSummary.unpricedRevenueLines}
+          missingItems={financialSummary.unpricedRevenueItems}
+          kind="revenue"
+          onAddPrices={() => setPriceEditorOpen(true)}
+        />
+        <ReportPriceInsight
+          title="Total Waste Cost"
+          cents={financialSummary.lossCents}
+          missingLines={financialSummary.unpricedLossLines}
+          missingItems={financialSummary.unpricedLossItems}
+          kind="waste"
+          onAddPrices={() => setPriceEditorOpen(true)}
+        />
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        <StockMovementChart
+          movement={chartAnalytics.movementPoints}
+          periodLabel={chartAnalytics.periodLabel}
+        />
+        <ValueTrendChart
+          points={chartAnalytics.trendPoints}
+          periodLabel={chartAnalytics.periodLabel}
+          unpricedLines={
+            financialSummary.unpricedRevenueLines + financialSummary.unpricedLossLines
+          }
+        />
+      </div>
+
+      <TransactionActivityDonutChart activity={activitySlices} />
+      <MovementActivityChart
+        activity={activitySlices}
+        transactions={filteredTransactions}
+      />
+
+      <details
+        /* Preview shows the complete report — the collapsible stays open
+           while the export modal is open, collapsed otherwise. The key
+           remounts the element on the boundary so the default flips. */
+        key={String(reportPreviewOpen)}
+        className="rounded-2xl border border-cream-200 bg-cream-50"
+        open={reportPreviewOpen || undefined}
+      >
+        <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-cocoa-700">
+          Advanced analysis
+        </summary>
+        <div className="border-t border-cream-200 p-3">
+          <TransactionHistogramChart bins={chartAnalytics.bins} />
+        </div>
+      </details>
+    </section>
+  );
+
+  const performanceSection = (
+    <section
+      id="reports-panel-performance"
+      role="tabpanel"
+      aria-labelledby="reports-tab-performance"
+      className="space-y-4"
+    >
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card className="!p-0">
+          <div className="border-b border-cream-200 bg-cream-50 px-4 py-3">
+            <h2 className="text-sm font-bold text-cocoa-800">Waste Summary</h2>
+            <p className="mt-1 text-xs text-cocoa-400">
+              Recorded waste in the selected report.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-3 p-4">
+            <Stat label="Total Waste" value={fmtQty(wasteTotal)} tone="danger" />
+            <Stat label="Waste Events" value={wasteCount} tone="warn" />
+          </div>
+        </Card>
+        <TopItemsBarChart
+          title="Waste by category"
+          description="Waste item entries by category. Select a bar to see its total quantity."
+          metric="waste entries"
+          entries={wasteByCategoryEntries}
+          color={CHART_COLORS.neutral}
+          emptyMessage="No waste recorded yet."
+          unitLabel="entries"
+          notes={
+            <>
+              Counted by waste item entries, not quantities, because the
+              quantities are in mixed units. Total quantity is in the tooltip.
+            </>
+          }
+        />
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        <TopItemsBarChart
+          title="Top-moving inventory items"
+          description="Top ten items by units checked out in this date range."
+          metric="units checked out"
+          entries={topMoverEntries}
+          color={CHART_COLORS.revenue}
+          emptyMessage="No checkout activity in this date range."
+          unitLabel="units"
+          notes={
+            <>
+              Ranked by checkout units, not by how often the item was
+              checked out, and not by waste. An item checked out once with
+              ten units ranks above an item checked out ten times with one.
+            </>
+          }
+        />
+        <TopItemsBarChart
+          title="Most wasted items"
+          description="Ranked by waste quantity in this date range · mixed units."
+          metric="units wasted"
+          entries={wasteByItemEntries}
+          color={CHART_COLORS.waste}
+          emptyMessage="No waste activity in this date range."
+          unitLabel="units"
+        />
+        <ValueBreakdownChart
+          title="Revenue by item"
+          description="Checkout value by item. Select a slice to inspect its quantity and value."
+          slices={valueSlices}
+          totalCents={financialSummary.revenueCents}
+          emptyMessage="No priced items in this date range."
+        />
+        <ValueBreakdownChart
+          title="Lost value by item"
+          description="Waste cost by item. Select a slice to inspect its quantity and value."
+          slices={lossSlices}
+          totalCents={financialSummary.lossCents}
+          emptyMessage="No priced waste in this date range."
+        />
+      </div>
+
+      <details
+        /* Preview shows the complete report — the collapsible stays open
+           while the export modal is open, collapsed otherwise. The key
+           remounts the element on the boundary so the default flips. */
+        key={String(reportPreviewOpen)}
+        className="rounded-2xl border border-cream-200 bg-cream-50"
+        open={reportPreviewOpen || undefined}
+      >
+        <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-cocoa-700">
+          Advanced analysis
+        </summary>
+        <div className="border-t border-cream-200 p-3">
+          <ActivityScatterChart
+            points={chartAnalytics.scatterPoints}
+            periodLabel={movementPeriodLabel}
+          />
+        </div>
+      </details>
+    </section>
+  );
+
+  const reportSections = (
+    <>
+      {overviewSection}
+      {inventorySection}
+      {movementsSection}
+      {performanceSection}
       <div className="flex flex-wrap items-center justify-between gap-2 border-t border-cream-200 pt-3 text-[11px] text-cocoa-400">
         <span>{filterDescription}</span>
         <span>Stock status reflects quantity only · {businessName}</span>
@@ -2207,397 +3242,25 @@ export default function ReportsPage() {
     </>
   );
 
-  if (!reportPreviewOpen) {
-    return (
-      <div className="space-y-5" data-pull-to-refresh {...pullToRefresh.handlers}>
-        {pullToRefresh.indicator}
-        <div className="flex flex-wrap items-end justify-between gap-3">
-          <div>
-            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cocoa-400">
-              {businessName} / Management workspace
-            </p>
-            <h1 className="deco-title mt-1 text-3xl">Analytics &amp; Stock Report</h1>
-            <p className="mt-1 text-sm text-cocoa-400">
-              A clear view of your stock, movements, and expiry operations.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <button className="btn-ghost hidden lg:inline-flex" onClick={loadAll} disabled={loading}>
-              {loading ? "Refreshing..." : "Reload"}
-            </button>
-            <button
-              className="btn-primary"
-              onClick={() => {
-                setReportPreviewOpen(true);
-                setEmailModalOpen(false);
-                setExportError(null);
-              }}
-              disabled={items.length === 0 || loading}
-            >
-              Export Report
-            </button>
-            <button
-              className="btn-ghost"
-              onClick={exportCsv}
-              disabled={items.length === 0 || loading}
-            >
-              Export CSV
-            </button>
-          </div>
-        </div>
-
-        <Card>
-          <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-4 xl:grid-cols-6">
-            <div>
-              <label className="label" htmlFor="f-range">Date range</label>
-              <select
-                id="f-range"
-                className="input w-full"
-                value={range}
-                onChange={(event) => setRange(event.target.value as RangeKey)}
-              >
-                {RANGE_OPTIONS.map((option) => (
-                  <option key={option.key} value={option.key}>{option.label}</option>
-                ))}
-              </select>
-            </div>
-            {range === "custom" && (
-              <>
-                <div>
-                  <label className="label" htmlFor="f-from">From</label>
-                  <input
-                    id="f-from"
-                    type="date"
-                    className="input w-full"
-                    value={fromDay}
-                    max={toDay || undefined}
-                    onChange={(event) => setFromDay(event.target.value)}
-                  />
-                </div>
-                <div>
-                  <label className="label" htmlFor="f-to">To</label>
-                  <input
-                    id="f-to"
-                    type="date"
-                    className="input w-full"
-                    value={toDay}
-                    min={fromDay || undefined}
-                    onChange={(event) => setToDay(event.target.value)}
-                  />
-                </div>
-              </>
-            )}
-            <div>
-              <label className="label" htmlFor="f-type">Movement</label>
-              <select
-                id="f-type"
-                className="input w-full"
-                value={typeFilter}
-                onChange={(event) => setTypeFilter(event.target.value)}
-              >
-                <option value="">All movements</option>
-                <option value="checkout">Checked out</option>
-                <option value="restock">Restocked</option>
-                <option value="waste">Waste</option>
-              </select>
-            </div>
-            <div>
-              <label className="label" htmlFor="f-staff">Staff</label>
-              <select
-                id="f-staff"
-                className="input w-full"
-                value={staff}
-                onChange={(event) => setStaff(event.target.value)}
-              >
-                <option value="">All staff</option>
-                {staffOptions.map((option) => (
-                  <option key={option.id} value={option.id}>{option.name}</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="label" htmlFor="f-cat">Category</label>
-              <select
-                id="f-cat"
-                className="input w-full"
-                value={catFilter}
-                onChange={(event) => setCatFilter(event.target.value)}
-              >
-                <option value="">All categories</option>
-                {categories.map((category) => (
-                  <option key={category.id} value={category.id}>{category.name}</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="label" htmlFor="f-grouping">Grouping</label>
-              <select
-                id="f-grouping"
-                className="input w-full"
-                value={grouping}
-                onChange={(event) => setGrouping(event.target.value as Grouping)}
-              >
-                <option value="auto">Auto</option>
-                <option value="daily">Daily</option>
-                <option value="weekly">Weekly</option>
-                <option value="monthly">Monthly</option>
-              </select>
-              <p className="mt-1 text-[11px] text-cocoa-400">
-                Grouping applies client-side; changing it costs no request.
-              </p>
-            </div>
-            {(rangeParams.from || rangeParams.to || staff || typeFilter || catFilter || grouping !== "auto") && (
-              <div className="flex items-end">
-                <button
-                  type="button"
-                  className="btn-ghost w-full"
-                  onClick={() => {
-                    setRange("week");
-                    setFromDay("");
-                    setToDay("");
-                    setStaff("");
-                    setTypeFilter("");
-                    setCatFilter("");
-                    setGrouping("auto");
-                  }}
-                >
-                  Clear filters
-                </button>
-              </div>
-            )}
-          </div>
-        </Card>
-
-        {error && (
-          <div role="alert" className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
-            {error}
-          </div>
-        )}
-        {!transactionNotesAvailable && (
-          <div className="rounded-xl bg-ochre-50 px-3.5 py-2.5 text-sm text-ochre-700">
-            {TRANSACTION_NOTE_SCHEMA_WARNING}
-          </div>
-        )}
-        {exportError && (
-          <div role="alert" className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
-            {exportError}
-          </div>
-        )}
-
-        {dashboard}
-
-        <Toast
-          message={toast?.msg ?? null}
-          tone={toast?.tone}
-          onDone={() => setToast(null)}
-        />
-        {priceEditor}
-      </div>
-    );
-  }
+  const tabContent = {
+    overview: overviewSection,
+    inventory: inventorySection,
+    movements: movementsSection,
+    performance: performanceSection,
+  }[activeTab];
 
   return (
     <div className="space-y-5" data-pull-to-refresh {...pullToRefresh.handlers}>
       {pullToRefresh.indicator}
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="deco-title text-3xl">Analytics &amp; Stock Report</h1>
-          <p className="mt-1 text-sm text-cocoa-400">
-            Track checkout value and waste cost over any date range.
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <button className="btn-ghost hidden lg:inline-flex" onClick={loadAll}>
-            Reload
-          </button>
-          <button
-            className="btn-primary"
-            onClick={() => {
-              setReportPreviewOpen(true);
-              setEmailModalOpen(false);
-              setExportError(null);
-            }}
-            disabled={items.length === 0 || loading}
-          >
-            Export Report
-          </button>
-          <button
-            className="btn-ghost"
-            onClick={exportCsv}
-            disabled={items.length === 0}
-          >
-            Export CSV
-          </button>
-        </div>
-      </div>
+      {pageHeader}
 
-      {/* Filters. Date range / staff / type change the transactions query;
-          category narrows the inventory snapshot in place. */}
-      <Card>
-        <div className="flex flex-wrap items-end gap-3">
-          <div>
-            <label className="label" htmlFor="f-range">
-              Date range
-            </label>
-            <select
-              id="f-range"
-              className="input"
-              value={range}
-              onChange={(e) => setRange(e.target.value as RangeKey)}
-            >
-              {RANGE_OPTIONS.map((o) => (
-                <option key={o.key} value={o.key}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </div>
+      {alerts}
 
-          {range === "custom" && (
-            <>
-              <div>
-                <label className="label" htmlFor="f-from">
-                  From
-                </label>
-                <input
-                  id="f-from"
-                  type="date"
-                  className="input"
-                  value={fromDay}
-                  max={toDay || undefined}
-                  onChange={(e) => setFromDay(e.target.value)}
-                />
-              </div>
-              <div>
-                <label className="label" htmlFor="f-to">
-                  To
-                </label>
-                <input
-                  id="f-to"
-                  type="date"
-                  className="input"
-                  value={toDay}
-                  min={fromDay || undefined}
-                  onChange={(e) => setToDay(e.target.value)}
-                />
-              </div>
-            </>
-          )}
+      {filterPanel}
 
-          <div>
-            <label className="label" htmlFor="f-type">
-              Movement
-            </label>
-            <select
-              id="f-type"
-              className="input"
-              value={typeFilter}
-              onChange={(e) => setTypeFilter(e.target.value)}
-            >
-              <option value="">All movements</option>
-              <option value="checkout">Checked out</option>
-              <option value="restock">Restocked</option>
-              <option value="waste">Waste</option>
-            </select>
-          </div>
+      {tabBar}
 
-          <div>
-            <label className="label" htmlFor="f-staff">
-              Staff
-            </label>
-            <select
-              id="f-staff"
-              className="input"
-              value={staff}
-              onChange={(e) => setStaff(e.target.value)}
-            >
-              <option value="">Everyone</option>
-              {staffOptions.map((option) => (
-                <option key={option.id} value={option.id}>
-                  {option.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="label" htmlFor="f-cat">
-              Category
-            </label>
-            <select
-              id="f-cat"
-              className="input"
-              value={catFilter}
-              onChange={(e) => setCatFilter(e.target.value)}
-            >
-              <option value="">All categories</option>
-              {categories.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="label" htmlFor="f-grouping">
-              Grouping
-            </label>
-            <select
-              id="f-grouping"
-              className="input"
-              value={grouping}
-              onChange={(e) => setGrouping(e.target.value as Grouping)}
-            >
-              <option value="auto">Auto</option>
-              <option value="daily">Daily</option>
-              <option value="weekly">Weekly</option>
-              <option value="monthly">Monthly</option>
-            </select>
-          </div>
-
-          {(rangeParams.from ||
-            rangeParams.to ||
-            staff ||
-            typeFilter ||
-            catFilter ||
-            grouping !== "auto") && (
-            <button
-              className="btn-ghost"
-              onClick={() => {
-                setRange("week");
-                setFromDay("");
-                setToDay("");
-                setStaff("");
-                setTypeFilter("");
-                setCatFilter("");
-                setGrouping("auto");
-              }}
-            >
-              Clear filters
-            </button>
-          )}
-        </div>
-      </Card>
-
-      {error && (
-        <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
-          {error}
-        </div>
-      )}
-      {!transactionNotesAvailable && (
-        <div className="rounded-xl bg-ochre-50 px-3.5 py-2.5 text-sm text-ochre-700">
-          {TRANSACTION_NOTE_SCHEMA_WARNING}
-        </div>
-      )}
-
-      {exportError && (
-        <div className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
-          {exportError}
-        </div>
-      )}
-
-      {dashboard}
+      {tabContent}
 
       {reportPreviewOpen && (
         <div
@@ -2679,7 +3342,7 @@ export default function ReportsPage() {
                   ))}
                 </div>
 
-                {dashboard}
+                {reportSections}
 
               </div>
             </div>

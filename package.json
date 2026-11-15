@@ -24,6 +24,8 @@
     "test:restore": "node scripts/_restore-tests.mjs",
     "perf": "node scripts/perf-check.mjs",
     "test:batches": "node scripts/_batch-tests.mjs",
+    "test:day-boundaries": "node scripts/_ts-node.mjs scripts/_day-boundary-tests.mjs",
+    "test:inventory-history": "node scripts/_ts-node.mjs scripts/_inventory-history-tests.mjs",
     "test:rate-limit": "node scripts/_ts-node.mjs scripts/_rate-limit-tests.mjs",
     "test:smoke": "node scripts/smoke-test.mjs",
     "test:edge": "node scripts/_edge-tests.mjs",

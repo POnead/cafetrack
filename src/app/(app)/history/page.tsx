@@ -14,6 +14,11 @@ import {
 import { fmtQty, fmtDateTime, fmtDate } from "@/lib/format";
 import { TRANSACTION_NOTE_SCHEMA_WARNING } from "@/lib/transaction-note-schema";
 import { usePullToRefresh } from "@/lib/use-pull-to-refresh";
+import {
+  isCalendarDayString,
+  localDayBoundsIso,
+  resolvedTimeZone,
+} from "@/lib/zoned-time";
 
 type TxnItem = {
   id?: string;
@@ -57,13 +62,14 @@ function localDateValue(date: Date): string {
   return `${year}-${month}-${day}`;
 }
 
+/*
+ * Boundaries for one calendar day in the user's own IANA timezone,
+ * inclusive local midnight / exclusive next-local-midnight — the same
+ * convention the reports page and the history APIs use.
+ */
 function localDayBounds(day: string): { fromAt: string; before: string } | null {
-  const start = new Date(`${day}T00:00:00`);
-  if (Number.isNaN(start.getTime()) || localDateValue(start) !== day) return null;
-
-  const end = new Date(start);
-  end.setDate(end.getDate() + 1);
-  return { fromAt: start.toISOString(), before: end.toISOString() };
+  if (!isCalendarDayString(day)) return null;
+  return localDayBoundsIso(day, resolvedTimeZone());
 }
 
 function wasteStockStatus(

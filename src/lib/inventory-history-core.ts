@@ -29,6 +29,15 @@
  * `inventory-history.ts`.
  */
 
+import {
+  dayKeyInZone,
+  dayKeyWeekday,
+  isCalendarDayString,
+  isValidTimeZone,
+  shiftDayKey,
+  zonedDayEndUtc,
+} from "./zoned-time";
+
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
 /* ------------------------------------------------------------------ */
@@ -106,6 +115,8 @@ export type InventoryHistory = {
     from: string;
     to: string;
     category: string | null;
+    /** The timezone the day keys mean — "UTC" unless the caller named one. */
+    timeZone: string;
     /**
      * The start the series actually covers. Equals `from` unless the scanned
      * history was incomplete and could not be verified further back — in
@@ -142,6 +153,22 @@ export class HistoryRequestError extends Error {}
  * a truncated history is always reported as truncated.
  */
 export const SCAN_CAP = 50_000;
+
+/**
+ * How many transaction rows one scan may read.
+ *
+ * The line cap alone does not bound the walk: a ledger holding an enormous
+ * number of transactions that carry no movement lines would be paged forever,
+ * growing no reconstruction and never reaching the cap. 50,000 rows matches
+ * the ten-year range ceiling the endpoint accepts (~14 movements a day for
+ * ten years), so an ordinary ledger never feels it, while a pathological
+ * line-free ledger costs at most 100 pages before this limit stops the
+ * walk. The cap is a budget for rows examined, not a promise about what
+ * remains — stopping at it is never reported as "complete" on its own: the
+ * bounded probe below decides, and an undecidable answer is reported as
+ * "unknown".
+ */
+export const MAX_TRANSACTION_ROWS = 50_000;
 
 /** Rows per page while paging the ledger. */
 export const PAGE_SIZE = 500;
@@ -284,7 +311,8 @@ export async function scanLedger(source: LedgerSource): Promise<RawScan> {
    *
    * The cap is on movement lines, not on transactions: a transaction with
    * thirty items is thirty lines, and counting it once would quietly hand
-   * back thirty times more history than the cap promises.
+   * back thirty times more history than the cap promises. A separate cap
+   * bounds rows examined — see MAX_TRANSACTION_ROWS.
    */
   const movements: RawMovement[] = [];
   let offset = 0;
@@ -294,7 +322,10 @@ export async function scanLedger(source: LedgerSource): Promise<RawScan> {
   let latest: number | null = null;
   let completeness: HistoryCompleteness | null = null;
 
-  while (scannedLines < SCAN_CAP) {
+  while (
+    scannedLines < SCAN_CAP &&
+    transactionsScanned < MAX_TRANSACTION_ROWS
+  ) {
     const page = await source.fetchTransactionPage(offset, PAGE_SIZE);
 
     if (page.length === 0) {
@@ -304,7 +335,18 @@ export async function scanLedger(source: LedgerSource): Promise<RawScan> {
     }
 
     let stopped = false;
+    let transactionCapHit = false;
+    let examinedOnThisPage = 0;
     for (const transaction of page) {
+      if (transactionsScanned >= MAX_TRANSACTION_ROWS) {
+        // The transaction budget is exhausted and more rows exist past this
+        // one. `offset + examinedOnThisPage` is the first unexamined row, so
+        // the probe starts exactly there — nothing is skipped or counted
+        // twice.
+        transactionCapHit = true;
+        break;
+      }
+      examinedOnThisPage += 1;
       const at = new Date(transaction.created_at).getTime();
       if (!Number.isFinite(at)) {
         // An unreadable timestamp still yields the lines themselves: each
@@ -360,6 +402,22 @@ export async function scanLedger(source: LedgerSource): Promise<RawScan> {
       transactionsScanned += 1;
     }
 
+    if (transactionCapHit) {
+      /*
+       * Stopped by the transaction budget mid-page. Whether the remainder of
+       * the ledger holds a line is what the bounded probe decides — starting
+       * at the first unexamined row, so nothing is skipped and nothing is
+       * counted twice. A line there is a truncation; a ledger that has ended
+       * is complete; an undecidable answer is reported as unknown, never as
+       * complete.
+       */
+      completeness = await probeForNextLine(
+        source,
+        offset + examinedOnThisPage
+      );
+      break;
+    }
+
     if (stopped) {
       completeness = "truncated";
       break;
@@ -373,9 +431,10 @@ export async function scanLedger(source: LedgerSource): Promise<RawScan> {
 
   if (completeness === null) {
     /*
-     * The loop left on the cap exactly at a page boundary — every fetched
-     * line was taken and there was no line left to refuse. Whether anything
-     * exists past that point is precisely what the probe is for.
+     * The loop left on a page boundary — every fetched line was taken and
+     * there was no line left to refuse, or the transaction budget was
+     * exhausted exactly as a page completed. Whether anything exists past
+     * that point is precisely what the probe is for.
      */
     completeness = await probeForNextLine(source, offset);
   }
@@ -397,24 +456,21 @@ export async function scanLedger(source: LedgerSource): Promise<RawScan> {
 }
 
 /* ------------------------------------------------------------------ */
-/* Dates                                                               */
+/* Dates — day keys are calendar facts; boundaries are zone facts       */
 /* ------------------------------------------------------------------ */
 
-const DAY_MS = 86_400_000;
+/*
+ * A day key (YYYY-MM-DD) is a calendar fact: 2026-11-15 is a Sunday in every
+ * zone on Earth, so arithmetic on day keys is timezone-free. What is NOT
+ * zone-free is which instant bounds a day — a local day is 24 hours long
+ * here and 25 there, so every boundary is resolved per date in the request's
+ * zone via zoned-time. Defaulting the zone to UTC reproduces the original
+ * behavior byte for byte.
+ */
 
-/** YYYY-MM-DD for an instant, in UTC — the same day the ledger APIs use. */
-function utcDay(at: number): string {
-  return new Date(at).toISOString().slice(0, 10);
-}
-
-/** Epoch ms of the start of a UTC day. */
-function dayStart(day: string): number {
-  return Date.parse(`${day}T00:00:00.000Z`);
-}
-
-/** Epoch ms of the end of a UTC day. */
-function dayEnd(day: string): number {
-  return Date.parse(`${day}T23:59:59.999Z`);
+/** Epoch ms of the last instant of `day` in `zone`. */
+function dayEnd(day: string, zone: string): number {
+  return zonedDayEndUtc(day, zone);
 }
 
 /**
@@ -426,26 +482,23 @@ function dayEnd(day: string): number {
  * applies to its own `from`/`to`.
  */
 export function isCalendarDay(value: string | null): value is string {
-  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const parsed = new Date(`${value}T00:00:00.000Z`);
-  return (
-    !Number.isNaN(parsed.getTime()) &&
-    new Date(parsed.getTime()).toISOString().slice(0, 10) === value
-  );
-}
-
-/** Today, as a UTC calendar day. */
-export function todayUtcDay(): string {
-  return utcDay(Date.now());
+  return isCalendarDayString(value);
 }
 
 /** How many days from `from` to `to`, inclusive. Negative when reversed. */
 export function daysBetween(from: string, to: string): number {
-  return Math.round((dayStart(to) - dayStart(from)) / DAY_MS) + 1;
+  // Day keys parse as UTC midnights, and two calendar dates differ by a
+  // whole number of UTC days in every zone — this is zone-invariant.
+  return (
+    Math.round(
+      (Date.parse(`${to}T00:00:00.000Z`) - Date.parse(`${from}T00:00:00.000Z`)) /
+        86_400_000
+    ) + 1
+  );
 }
 
 /* ------------------------------------------------------------------ */
-/* Buckets                                                             */
+/* Buckets — pure calendar math on day keys, no instants involved       */
 /* ------------------------------------------------------------------ */
 
 /**
@@ -455,26 +508,24 @@ export function daysBetween(from: string, to: string): number {
  * the two never disagree about where a week begins.
  */
 function periodStart(day: string, granularity: HistoryGranularity): string {
-  const at = dayStart(day);
-  const date = new Date(at);
   if (granularity === "week") {
-    const offset = (date.getUTCDay() + 6) % 7;
-    return utcDay(at - offset * DAY_MS);
+    const offset = (dayKeyWeekday(day) + 6) % 7;
+    return shiftDayKey(day, -offset);
   }
   if (granularity === "month") {
-    return utcDay(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+    return `${day.slice(0, 7)}-01`;
   }
   if (granularity === "quarter") {
-    return utcDay(
-      Date.UTC(date.getUTCFullYear(), Math.floor(date.getUTCMonth() / 3) * 3, 1)
-    );
+    const month = Number(day.slice(5, 7));
+    const quarterStart = Math.floor((month - 1) / 3) * 3 + 1;
+    return `${day.slice(0, 4)}-${String(quarterStart).padStart(2, "0")}-01`;
   }
   return day;
 }
 
 /** A short axis label for a period. */
 function periodLabel(day: string, granularity: HistoryGranularity): string {
-  const date = new Date(dayStart(day));
+  const date = new Date(`${day}T00:00:00.000Z`);
   if (granularity === "month") {
     return date.toLocaleDateString("en-PH", {
       month: "short",
@@ -592,10 +643,22 @@ export function buildHistoryFromScan(
     from: string | null;
     to: string;
     category: string | null;
+    /**
+     * IANA timezone (e.g. "Asia/Manila") the day keys mean. Day boundaries
+     * are resolved per date in this zone, so a 1 November series is 25 hours
+     * long where the zone falls back. Omit for UTC, which reproduces the
+     * original behavior exactly.
+     */
+    tz?: string | null;
   }
 ): InventoryHistory {
+  const zone = input.tz ?? "UTC";
+  if (!isValidTimeZone(zone)) {
+    throw new HistoryRequestError("That timezone is not recognised");
+  }
+
   const earliestHistory = scan.historyFrom
-    ? utcDay(new Date(scan.historyFrom).getTime())
+    ? dayKeyInZone(Date.parse(scan.historyFrom), zone)
     : null;
 
   const to = input.to;
@@ -626,11 +689,24 @@ export function buildHistoryFromScan(
     );
   }
 
+  /*
+   * The days are enumerated by calendar arithmetic, not by adding 86,400,000
+   * ms at a time: a local day is not exactly DAY_MS long across a DST shift,
+   * and fixed-stepping the epoch would drift a boundary into the wrong day.
+   * The range is capped at ten years, so the list is bounded.
+   */
   const days: string[] = [];
-  for (let at = dayStart(effectiveFrom); at <= dayStart(to); at += DAY_MS) {
-    days.push(utcDay(at));
+  let cursor = effectiveFrom;
+  for (;;) {
+    days.push(cursor);
+    if (cursor >= to) break;
+    cursor = shiftDayKey(cursor, 1);
+    if (days.length > MAX_RANGE_DAYS + 1) {
+      throw new HistoryRequestError(
+        "Choose a date range of ten years or less for the inventory history"
+      );
+    }
   }
-  if (days.length === 0) days.push(effectiveFrom);
 
   /* ---- items in scope ---- */
 
@@ -666,7 +742,7 @@ export function buildHistoryFromScan(
    * applied, and the balance after the last movement stays that movement's
    * `qty_after` rather than today's quantity.
    */
-  const dayEnds = days.map((day) => dayEnd(day));
+  const dayEnds = days.map((day) => dayEnd(day, zone));
   const seriesPerItem: number[][] = [];
 
   for (const item of valued) {
@@ -743,6 +819,7 @@ export function buildHistoryFromScan(
       from,
       to,
       category: input.category,
+      timeZone: zone,
       effectiveFrom,
       rangeShortened,
     },

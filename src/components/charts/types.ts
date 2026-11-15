@@ -25,6 +25,7 @@ export type StatusDatum = {
 
 /** One entry in a ranked horizontal bar chart. */
 export type BarDatum = {
+  /** Stable identity of the row — the SKU, or the name for group rows. */
   key: string;
   name: string;
   /** The measured value — the bar's length. */
@@ -35,6 +36,14 @@ export type BarDatum = {
   detail?: string;
   /** The unit the value is counted in, when there is one. */
   unit?: string | null;
+  /** The item's SKU, when the row is about one item. */
+  sku?: string;
+  /**
+   * True when the SKU no longer exists in the catalogue. The ranked lists
+   * prefer the current catalogue name; archived rows keep their historical
+   * name and are tagged as archived.
+   */
+  archived?: boolean;
 };
 
 /** Stock in and stock out for one period. */

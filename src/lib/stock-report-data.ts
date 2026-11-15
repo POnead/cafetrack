@@ -1,6 +1,11 @@
 import { db } from "./supabase";
 import { fmtQty, fmtDate, daysUntil } from "./format";
 import { stockStatus } from "./status";
+import {
+  isCalendarDayString,
+  isValidTimeZone,
+  localDayBoundsIso,
+} from "./zoned-time";
 import type { PdfReport } from "./report-pdf";
 import {
   isMissingTransactionNoteColumn,
@@ -13,6 +18,12 @@ export type StockReportFilters = {
   staff: string;
   type: string;
   categoryId: string;
+  /**
+   * IANA timezone the calendar-day filters mean. Each day boundary is
+   * resolved per date in this zone — a day is not a fixed span of hours.
+   * Empty means UTC, matching the pre-existing behavior.
+   */
+  tz: string;
 };
 
 const MOVEMENT_LABEL: Record<string, string> = {
@@ -28,7 +39,7 @@ export function parseStockReportFilters(input: unknown): StockReportFilters {
       ? (outer.filters as Record<string, unknown>)
       : outer;
   const day = (value: unknown) =>
-    typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : "";
+    typeof value === "string" && isCalendarDayString(value) ? value : "";
   const movementType =
     typeof body.type === "string" && ["checkout", "restock", "waste"].includes(body.type)
       ? body.type
@@ -40,6 +51,7 @@ export function parseStockReportFilters(input: unknown): StockReportFilters {
     staff: typeof body.staff === "string" ? body.staff.trim() : "",
     type: movementType,
     categoryId: typeof body.category_id === "string" ? body.category_id.trim() : "",
+    tz: isValidTimeZone(body.tz) ? body.tz : "",
   };
 }
 
@@ -198,6 +210,7 @@ export async function buildStockReportData(filters: StockReportFilters): Promise
           date: new Date(transaction.created_at).toLocaleString("en-PH", {
             dateStyle: "short",
             timeStyle: "short",
+            timeZone: filters.tz || "UTC",
           }),
           actorName: transaction.actor_name,
           label: MOVEMENT_LABEL[transaction.type] ?? transaction.type,
@@ -248,8 +261,17 @@ async function fetchMovements(
         .range(offset, offset + pageSize - 1);
 
       if (filters.type) query = query.eq("type", filters.type);
-      if (filters.from) query = query.gte("created_at", `${filters.from}T00:00:00.000Z`);
-      if (filters.to) query = query.lte("created_at", `${filters.to}T23:59:59.999Z`);
+      const zone = filters.tz || "UTC";
+      if (filters.from) {
+        const bounds = localDayBoundsIso(filters.from, zone);
+        // A day the calendar does not have is ignored rather than passed to
+        // Postgres, matching the route's own lenient parse.
+        if (bounds) query = query.gte("created_at", bounds.fromAt);
+      }
+      if (filters.to) {
+        const bounds = localDayBoundsIso(filters.to, zone);
+        if (bounds) query = query.lt("created_at", bounds.before);
+      }
       if (filters.staff) {
         query = /^[0-9a-f-]{36}$/i.test(filters.staff)
           ? query.eq("actor_id", filters.staff)
@@ -333,6 +355,7 @@ function describeFilters(
     filters.from || filters.to
       ? `Dates: ${filters.from || "beginning"} to ${filters.to || "today"}`
       : "All dates",
+    filters.tz ? `Timezone: ${filters.tz}` : null,
     staffName ? `Staff: ${staffName}` : null,
     filters.type ? `Movement: ${movementLabel[filters.type]}` : null,
     categoryName ? `Category: ${categoryName}` : null,

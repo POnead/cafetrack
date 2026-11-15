@@ -15,6 +15,62 @@ import { useIsNarrow } from "./use-narrow";
 import { CHART_COLORS, formatQuantity, truncateLabel } from "./theme";
 import type { BarDatum } from "./types";
 
+/** The props a two-line axis tick receives from Recharts. */
+type RankedTickProps = {
+  x?: number | string;
+  y?: number | string;
+  payload?: { value?: string | number };
+};
+
+/**
+ * A category-axis tick with the item's SKU under its name.
+ *
+ * The catalogue can hold two distinct items with the same name (the ledger
+ * keeps both honestly), so the SKU is the identity on screen; the name is
+ * the reading experience. Rows the catalogue no longer holds — deleted
+ * items whose movements are still real — keep their historical name and are
+ * tagged as archived.
+ */
+function makeRankedTick(entries: BarDatum[], width: number) {
+  const byKey = new Map(entries.map((entry) => [entry.key, entry]));
+  return function RankedTick(props: RankedTickProps) {
+    const key = String(props.payload?.value ?? "");
+    const entry = byKey.get(key);
+    const x = Number(props.x ?? 0);
+    const y = Number(props.y ?? 0);
+    if (!entry) {
+      return (
+        <text x={x} y={y} textAnchor="end" fill={CHART_COLORS.axis} fontSize={11}>
+          <tspan x={x} dy={4}>
+            {truncateLabel(key, width)}
+          </tspan>
+        </text>
+      );
+    }
+    const name = entry.archived
+      ? `${entry.name} (archived)`
+      : entry.name;
+    return (
+      <text
+        x={x}
+        y={y}
+        textAnchor="end"
+        fill={CHART_COLORS.axis}
+        fontSize={11}
+      >
+        <tspan x={x} dy={-2}>
+          {truncateLabel(name, width)}
+        </tspan>
+        {entry.sku && (
+          <tspan x={x} dy={12} fontSize={9} fill={CHART_COLORS.axis} opacity={0.75}>
+            {entry.sku}
+          </tspan>
+        )}
+      </text>
+    );
+  };
+}
+
 /**
  * A ranked horizontal bar chart.
  *
@@ -46,6 +102,7 @@ export function TopItemsBarChart({
   unitLabel?: string;
 }) {
   const narrow = useIsNarrow();
+  const tickWidth = narrow ? 96 : 152;
 
   return (
     <ChartCard
@@ -53,7 +110,7 @@ export function TopItemsBarChart({
       description={description}
       isEmpty={entries.length === 0}
       emptyMessage={emptyMessage}
-      height={Math.max(200, Math.min(entries.length, 10) * 30 + 40)}
+      height={Math.max(220, Math.min(entries.length, 10) * 36 + 40)}
       notes={notes}
     >
       <ResponsiveContainer
@@ -82,17 +139,22 @@ export function TopItemsBarChart({
           />
           <YAxis
             type="category"
-            dataKey="name"
-            width={narrow ? 92 : 132}
-            tick={{ fill: CHART_COLORS.axis, fontSize: 10 }}
+            dataKey="key"
+            width={tickWidth}
+            tick={makeRankedTick(entries, narrow ? 12 : 19)}
             tickLine={false}
             axisLine={{ stroke: CHART_COLORS.grid }}
-            tickFormatter={(value: string) => truncateLabel(value, narrow ? 12 : 20)}
+            interval={0}
           />
           <Tooltip
             cursor={{ fill: "#F6F1E8" }}
             content={
               <ChartTooltip
+                titleFromPayload={(payload) => {
+                  const datum = payload?.[0]?.payload as BarDatum | undefined;
+                  if (!datum) return null;
+                  return datum.archived ? `${datum.name} (archived)` : datum.name;
+                }}
                 formatValue={(value) => `${formatQuantity(value)} ${unitLabel}`}
               />
             }

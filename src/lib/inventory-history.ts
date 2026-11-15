@@ -11,6 +11,12 @@
  *     adapters support;
  *   - the memoised scan, so a reports page that is opened by ten tabs at
  *     once does not walk the ledger ten times per reload.
+ *
+ * The memo cache holds the *raw scan* — items and movements as epochs and
+ * quantities. It is deliberately timezone-free: the reconstruction that
+ * buckets movements into calendar days runs per request, so callers in
+ * different timezones can share the cache without ever sharing an
+ * aggregated answer computed for somebody else's zone.
  */
 import { db, usingLocalDb } from "./supabase";
 import { memoize } from "./ttl-cache";
@@ -26,13 +32,13 @@ import {
 
 export {
   isCalendarDay,
-  todayUtcDay,
   daysBetween,
   MAX_RANGE_DAYS,
   HistoryRequestError,
   buildHistoryFromScan,
   scanLedger,
   SCAN_CAP,
+  MAX_TRANSACTION_ROWS,
   PAGE_SIZE,
 } from "./inventory-history-core";
 export type {
@@ -116,12 +122,14 @@ function rawScan(): Promise<RawScan> {
  * Build the historical series for one range and category.
  *
  * `from` may be null, which means "as far back as the scanned history
- * reaches" — the caller decides what the floor is.
+ * reaches" — the caller decides what the floor is. `tz` names the IANA
+ * timezone the day keys mean; omit for UTC.
  */
 export async function buildInventoryHistory(input: {
   from: string | null;
   to: string;
   category: string | null;
+  tz?: string | null;
 }): Promise<InventoryHistory> {
   const scan = await rawScan();
   return buildHistoryFromScan(scan, input);

@@ -24,6 +24,7 @@ import {
   buildHistoryFromScan,
   scanLedger,
   SCAN_CAP,
+  MAX_TRANSACTION_ROWS,
 } from "../src/lib/inventory-history-core.ts";
 
 let pass = 0;
@@ -375,6 +376,135 @@ console.log("\nscan — probe sees a short page and stops");
     "a short probe page concludes the ledger ended",
     scan.completeness === "complete" && scan.truncated === false,
     `completeness ${scan.completeness}`
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* scan — the transaction-row budget bounds a line-free ledger          */
+/* ------------------------------------------------------------------ */
+
+console.log("\nscan — transaction budget stops a ledger of empty transactions");
+{
+  // 60,000 transactions with no movement lines at all: the movement-line cap
+  // never fires, so without the row budget this walk would never end. The
+  // scan stops at MAX_TRANSACTION_ROWS and asks the bounded probe what lies
+  // past it; four full pages of line-free rows cannot establish that, so the
+  // answer is "unknown" — never "complete".
+  const ledger = makeLedger(
+    60_000,
+    0,
+    Date.parse("2026-11-01T00:00:00.000Z")
+  );
+  const scan = await scanLedger(makeSource(ledger));
+  check(
+    "the scan stops at the transaction budget",
+    scan.transactionsScanned === MAX_TRANSACTION_ROWS,
+    `${scan.transactionsScanned} transactions`
+  );
+  check(
+    "a full ledger of empty transactions past the budget reports unknown, never complete",
+    scan.completeness === "unknown" && scan.truncated === false,
+    `completeness ${scan.completeness}`
+  );
+  check(
+    "the movement-line accounting is untouched by the transaction budget",
+    scan.movementsScanned === 0
+  );
+}
+
+console.log("\nscan — exactly at the transaction budget, the ledger ends");
+{
+  // Exactly MAX_TRANSACTION_ROWS transactions and then nothing: the bounded
+  // probe sees the ledger ended, so this reports complete.
+  const ledger = makeLedger(
+    MAX_TRANSACTION_ROWS,
+    0,
+    Date.parse("2026-11-01T00:00:00.000Z")
+  );
+  const scan = await scanLedger(makeSource(ledger));
+  check(
+    "the ledger ending exactly at the transaction budget reports complete",
+    scan.completeness === "complete" &&
+      scan.transactionsScanned === MAX_TRANSACTION_ROWS &&
+      scan.truncated === false,
+    `completeness ${scan.completeness}, transactionsScanned ${scan.transactionsScanned}`
+  );
+}
+
+console.log("\nscan — a movement line found past the transaction budget");
+{
+  // MAX_TRANSACTION_ROWS empty transactions, then one transaction carrying a
+  // line. The budget stops the walk before it; the probe finds the line and
+  // reports truncation — history definitively does not reach that row.
+  const empty = makeLedger(
+    MAX_TRANSACTION_ROWS,
+    0,
+    Date.parse("2026-11-01T00:00:00.000Z")
+  );
+  const withLine = {
+    created_at: new Date(Date.parse("2026-10-01T00:00:00.000Z")).toISOString(),
+    lines: [{ sku: "AAA", qty_before: 1, qty_after: 2 }],
+  };
+  const scan = await scanLedger(makeSource([...empty, withLine]));
+  check(
+    "a line past the transaction budget is reported truncated",
+    scan.completeness === "truncated" &&
+      scan.truncated === true &&
+      scan.transactionsScanned === MAX_TRANSACTION_ROWS,
+    `completeness ${scan.completeness}`
+  );
+}
+
+console.log("\nscan — movement-line cap and transaction budget interact");
+{
+  // 60,000 single-line transactions: the 50,000-line cap fires on the
+  // 50,000th line, before the transaction budget is spent. The line cap
+  // wins, exactly as before the budget existed.
+  const ledger = makeLedger(
+    60_000,
+    1,
+    Date.parse("2026-11-01T00:00:00.000Z")
+  );
+  const scan = await scanLedger(makeSource(ledger));
+  check(
+    "the movement-line cap fires before the transaction budget",
+    scan.completeness === "truncated" &&
+      scan.truncated === true &&
+      scan.movementsScanned === SCAN_CAP &&
+      scan.transactionsScanned === SCAN_CAP,
+    `completeness ${scan.completeness}, transactionsScanned ${scan.transactionsScanned}`
+  );
+}
+
+console.log("\nscan — empty transactions are counted exactly once");
+{
+  // A small ledger of mixed shape: some transactions carry lines, some do
+  // not. Every transaction is counted exactly once either way.
+  const ledger = [
+    { created_at: "2026-11-03T00:00:00.000Z", lines: [] },
+    {
+      created_at: "2026-11-02T00:00:00.000Z",
+      lines: [{ sku: "AAA", qty_before: 10, qty_after: 12 }],
+    },
+    { created_at: "2026-11-01T00:00:00.000Z", lines: [] },
+    {
+      created_at: "2026-10-31T00:00:00.000Z",
+      lines: [
+        { sku: "AAA", qty_before: 12, qty_after: 9 },
+        { sku: "AAA", qty_before: 9, qty_after: 8 },
+      ],
+    },
+  ];
+  const scan = await scanLedger(makeSource(ledger));
+  check(
+    "transactions with no lines are counted exactly once",
+    scan.transactionsScanned === 4,
+    `${scan.transactionsScanned} transactions`
+  );
+  check(
+    "every line of every transaction is read, and the ledger ends complete",
+    scan.movementsScanned === 3 && scan.completeness === "complete",
+    `${scan.movementsScanned} lines, completeness ${scan.completeness}`
   );
 }
 
