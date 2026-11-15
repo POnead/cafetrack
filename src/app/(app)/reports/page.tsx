@@ -2,7 +2,6 @@
 
 import {
   useEffect,
-  useId,
   useMemo,
   useRef,
   useState,
@@ -20,10 +19,35 @@ import {
   DataField,
   Modal,
 } from "@/components/ui";
-import { fmtQty, fmtDate, daysUntil, toCsv } from "@/lib/format";
+import { fmtQty, fmtDate, daysUntil, toCsv, formatPeso } from "@/lib/format";
 import { stockStatus } from "@/lib/status";
 import { TRANSACTION_NOTE_SCHEMA_WARNING } from "@/lib/transaction-note-schema";
 import { usePullToRefresh } from "@/lib/use-pull-to-refresh";
+import { InventoryValueTrendChart } from "@/components/charts/InventoryValueTrendChart";
+import { StockMovementChart } from "@/components/charts/StockMovementChart";
+import { ValueTrendChart } from "@/components/charts/ValueTrendChart";
+import { TransactionHistogramChart } from "@/components/charts/TransactionHistogramChart";
+import { StockByCategoryChart } from "@/components/charts/StockByCategoryChart";
+import {
+  StockStatusDonutChart,
+} from "@/components/charts/StockStatusDonutChart";
+import { TopItemsBarChart } from "@/components/charts/TopItemsBarChart";
+import { ValueBreakdownChart } from "@/components/charts/ValueBreakdownChart";
+import {
+  TransactionActivityDonutChart,
+  ACTIVITY_COLORS,
+} from "@/components/charts/TransactionActivityDonutChart";
+import { MovementActivityChart } from "@/components/charts/MovementActivityChart";
+import { ActivityScatterChart } from "@/components/charts/ActivityScatterChart";
+import { CHART_COLORS } from "@/components/charts/theme";
+import type {
+  MovementDatum,
+  HistogramDatum,
+  ValueTrendDatum,
+  MoneySlice,
+} from "@/components/charts/types";
+import type { InventoryHistory } from "@/lib/inventory-history";
+import type { Grouping } from "@/components/charts/bucketHistory";
 
 const TRANSACTION_PAGE_SIZE = 500;
 
@@ -73,8 +97,6 @@ const RANGE_OPTIONS: { key: RangeKey; label: string }[] = [
   { key: "custom", label: "Custom dates" },
 ];
 
-/* Stock wording + tones come from @/lib/status so every page agrees. */
-
 type FinancialItem = {
   sku: string;
   name: string;
@@ -84,74 +106,7 @@ type FinancialItem = {
   events: number;
 };
 
-type FinancialGroup = {
-  key: string;
-  name: string;
-  valueCents: number;
-  items: FinancialItem[];
-};
-
-const MONEY_COLORS = [
-  "#8d6040",
-  "#bd8c53",
-  "#9b6f4a",
-  "#8b3a24",
-  "#c8a274",
-  "#70482d",
-  "#b8862f",
-  "#a67642",
-];
-const MOVEMENT_COLORS: Record<string, string> = {
-  checkout: "#8d6040",
-  restock: "#bd8c53",
-  waste: "#8b3a24",
-};
-
-type MovementSummary = {
-  type: string;
-  count: number;
-  qty: number;
-};
-
-type MovementTransaction = {
-  type: string;
-  transaction_items: {
-    sku: string;
-    item_name: string;
-    quantity: number;
-  }[] | null;
-};
-
-type QuantityChartEntry = {
-  key: string;
-  name: string;
-  quantity: number;
-  quantityLabel: string;
-  detail?: string;
-  events?: number;
-};
-
-type TrendPoint = {
-  key: string;
-  label: string;
-  revenueCents: number;
-  lossCents: number;
-};
-
-type HistogramBin = {
-  label: string;
-  minCents: number;
-  maxCents: number;
-  checkoutCount: number;
-  wasteCount: number;
-};
-
-type ScatterPoint = {
-  sku: string;
-  name: string;
-  checkoutEvents: number;
-  wasteEvents: number;
-};
+/* Stock wording + tones come from @/lib/status so every page agrees. */
 
 type ExpiryItem = Item & { days: number | null };
 
@@ -162,14 +117,34 @@ function localDayKey(date: Date) {
   return `${year}-${month}-${day}`;
 }
 
-function formatPeso(cents: number) {
-  return new Intl.NumberFormat("en-PH", {
-    style: "currency",
-    currency: "PHP",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(cents / 100);
+/**
+ * Split a value list into at most seven slices plus "Other items".
+ *
+ * Seven named slices plus a remainder reads as a breakdown; a wheel of
+ * thirty slices reads as a colour chart. The total is not affected, and the
+ * remainder is a single honest slice rather than a rounding-away.
+ */
+function buildMoneySlices(entries: FinancialItem[]): MoneySlice[] {
+  const sorted = entries.filter((entry) => entry.valueCents > 0);
+  const leading = sorted.slice(0, 7);
+  const other = sorted.slice(7);
+  const slices: MoneySlice[] = leading.map((item) => ({
+    key: item.sku,
+    name: item.name,
+    valueCents: item.valueCents,
+    items: [item],
+  }));
+  if (other.length > 0) {
+    slices.push({
+      key: "__other__",
+      name: "Other items",
+      valueCents: other.reduce((sum, item) => sum + item.valueCents, 0),
+      items: other,
+    });
+  }
+  return slices;
 }
+
 
 function useReportReveal<T extends HTMLElement>() {
   const ref = useRef<T>(null);
@@ -302,8 +277,10 @@ type ReportMetric = {
   label: string;
   value: number;
   hint: string;
-  icon: "items" | "low" | "out" | "movements";
+  icon: "items" | "low" | "out" | "movements" | "value";
   tone: "sage" | "ochre" | "terracotta" | "cocoa";
+  /** How to write `value`. `peso-cents` reads it as cents and prints ₱. */
+  format?: "number" | "peso-cents";
 };
 
 function ReportMetricCard({ metric }: { metric: ReportMetric }) {
@@ -347,6 +324,13 @@ function ReportMetricCard({ metric }: { metric: ReportMetric }) {
               <path d="M3 7l9 5 9-5M12 12v10m-3-7 6 3m0-3-6 3" />
             </>
           )}
+          {metric.icon === "value" && (
+            <>
+              <rect x="3" y="5" width="18" height="15" rx="2" />
+              <path d="M3 9h18" />
+              <path d="M12 13v.01" />
+            </>
+          )}
           {metric.icon === "movements" && (
             <>
               <path d="M4 7h15l-3-3m4 13H5l3 3" />
@@ -356,7 +340,11 @@ function ReportMetricCard({ metric }: { metric: ReportMetric }) {
         </svg>
       </div>
       <p className="mt-1 text-3xl font-semibold leading-none tabular-nums text-cocoa-800">
-        <AnimatedReportValue value={metric.value} format="number" label={metric.label} />
+        <AnimatedReportValue
+          value={metric.value}
+          format={metric.format ?? "number"}
+          label={metric.label}
+        />
       </p>
       <div className="mt-3 flex items-center justify-between gap-3">
         <p className={`text-[11px] ${toneClass}`}>{metric.hint}</p>
@@ -682,461 +670,6 @@ function ItemPriceEditor({
   );
 }
 
-function LineTrendChart({
-  points,
-  periodLabel,
-  unpricedLines,
-}: {
-  points: TrendPoint[];
-  periodLabel: string;
-  unpricedLines: number;
-}) {
-  const chartId = useId().replaceAll(":", "");
-  const width = 640;
-  const height = 220;
-  const left = 44;
-  const right = 12;
-  const top = 14;
-  const bottom = 34;
-  const plotWidth = width - left - right;
-  const plotHeight = height - top - bottom;
-  const maxValue = Math.max(
-    ...points.flatMap((point) => [point.revenueCents, point.lossCents]),
-    1
-  );
-  const x = (index: number) =>
-    left + (points.length <= 1 ? plotWidth / 2 : (index / (points.length - 1)) * plotWidth);
-  const y = (value: number) => top + plotHeight - (value / maxValue) * plotHeight;
-  const series = [
-    { key: "revenueCents", label: "Checkout value", color: "#8d6040" },
-    { key: "lossCents", label: "Waste cost", color: "#8b3a24" },
-  ] as const;
-  const labelIndexes = [...new Set([0, Math.floor((points.length - 1) / 2), points.length - 1])];
-  const hasMonetaryValues = points.some(
-    (point) => point.revenueCents > 0 || point.lossCents > 0
-  );
-  const showPriceEmptyState = unpricedLines > 0 && !hasMonetaryValues;
-  const hasPartialPrices = unpricedLines > 0 && hasMonetaryValues;
-  const revenuePath = points
-    .map((point, index) => `${index === 0 ? "M" : "L"} ${x(index)} ${y(point.revenueCents)}`)
-    .join(" ");
-  const revenueAreaPath = points.length
-    ? `${revenuePath} L ${x(points.length - 1)} ${top + plotHeight} L ${x(0)} ${top + plotHeight} Z`
-    : "";
-
-  return (
-    <ReportReveal>
-    <Card className="!p-0">
-      <div className="relative border-b border-cream-200 bg-cream-50 px-4 py-3">
-        <h2 className="text-sm font-bold text-cocoa-800">Value over time</h2>
-        <p className="mt-1 text-xs text-cocoa-400">
-          Revenue and waste cost · {periodLabel}
-        </p>
-        {(showPriceEmptyState || hasPartialPrices) && (
-          <span className="absolute right-4 top-4 rounded-full bg-cream-200 px-2.5 py-1 text-[10px] font-medium text-cocoa-500">
-            • {hasPartialPrices ? "Some prices missing" : "Awaiting prices"}
-          </span>
-        )}
-      </div>
-      {points.length === 0 && !showPriceEmptyState ? (
-        <Empty>No priced checkout or waste activity in this date range.</Empty>
-      ) : (
-        <div className="relative p-3 sm:p-4">
-          <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1">
-            {series.map((entry) => (
-              <span key={entry.key} className="inline-flex items-center gap-1.5 text-[11px] text-cocoa-600">
-                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: entry.color }} />
-                {entry.label}
-              </span>
-            ))}
-          </div>
-          <svg
-            viewBox={`0 0 ${width} ${height}`}
-            className="h-auto w-full"
-            role="img"
-            aria-label={`Line chart of checkout value and waste cost over time, grouped ${periodLabel}`}
-          >
-            <defs>
-              <linearGradient id={`${chartId}-revenue`} x1="0" y1="0" x2="1" y2="0">
-                <stop offset="0%" stopColor="#c9a477" />
-                <stop offset="100%" stopColor="#8f6748" />
-              </linearGradient>
-              <linearGradient id={`${chartId}-revenue-area`} x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#c9a477" stopOpacity="0.22" />
-                <stop offset="100%" stopColor="#c9a477" stopOpacity="0" />
-              </linearGradient>
-              <linearGradient id={`${chartId}-waste`} x1="0" y1="0" x2="1" y2="0">
-                <stop offset="0%" stopColor="#d39a82" />
-                <stop offset="100%" stopColor="#8b3a24" />
-              </linearGradient>
-            </defs>
-            {[0, 0.5, 1].map((fraction) => {
-              const gridY = top + plotHeight * fraction;
-              return (
-                <g key={fraction}>
-                  <line
-                    x1={left}
-                    y1={gridY}
-                    x2={width - right}
-                    y2={gridY}
-                    stroke="#eadfce"
-                    strokeDasharray="3 4"
-                  />
-                  {!showPriceEmptyState && (
-                    <text x={left - 5} y={gridY + 3} textAnchor="end" fill="#927f6e" fontSize="9">
-                      {formatPeso(Math.round((maxValue * (1 - fraction)) / 100) * 100)}
-                    </text>
-                  )}
-                </g>
-              );
-            })}
-            {!showPriceEmptyState && series.map((entry) => {
-              const path = points
-                .map((point, index) => {
-                  const value = point[entry.key];
-                  return `${index === 0 ? "M" : "L"} ${x(index)} ${y(value)}`;
-                })
-                .join(" ");
-              return (
-                <g key={entry.key}>
-                  {entry.key === "revenueCents" && (
-                    <path
-                      d={revenueAreaPath}
-                      fill={`url(#${chartId}-revenue-area)`}
-                      className="report-trend-area"
-                    />
-                  )}
-                  <path
-                    d={path}
-                    fill="none"
-                    stroke={`url(#${chartId}-${entry.key === "revenueCents" ? "revenue" : "waste"})`}
-                    strokeWidth="2.5"
-                    strokeLinejoin="round"
-                    strokeLinecap="round"
-                    pathLength="1"
-                    className="report-trend-line"
-                  />
-                  {points.map((point, index) => (
-                    <circle
-                      key={point.key}
-                      cx={x(index)}
-                      cy={y(point[entry.key])}
-                      r={points.length > 50 ? 1.8 : 3}
-                      fill={`url(#${chartId}-${entry.key === "revenueCents" ? "revenue" : "waste"})`}
-                      className="report-trend-dot"
-                      style={{ animationDelay: `${Math.min(index * 12, 300)}ms` }}
-                    >
-                      <title>{`${point.label} · ${entry.label}: ${formatPeso(point[entry.key])}`}</title>
-                    </circle>
-                  ))}
-                </g>
-              );
-            })}
-            {!showPriceEmptyState && labelIndexes.map((index) => (
-              <text
-                key={points[index].key}
-                x={x(index)}
-                y={height - 10}
-                textAnchor={index === 0 ? "start" : index === points.length - 1 ? "end" : "middle"}
-                fill="#927f6e"
-                fontSize="9"
-              >
-                {points[index].label}
-              </text>
-            ))}
-            {showPriceEmptyState && (
-              <>
-                <path
-                  d={`M ${left} ${top + plotHeight * 0.72} C ${left + plotWidth * 0.17} ${top + plotHeight * 0.78}, ${left + plotWidth * 0.19} ${top + plotHeight * 0.45}, ${left + plotWidth * 0.34} ${top + plotHeight * 0.58} S ${left + plotWidth * 0.5} ${top + plotHeight * 0.72}, ${left + plotWidth * 0.62} ${top + plotHeight * 0.42} S ${left + plotWidth * 0.82} ${top + plotHeight * 0.62}, ${width - right} ${top + plotHeight * 0.3}`}
-                  fill="none"
-                  stroke="#c8a274"
-                  strokeWidth="2"
-                  pathLength="1"
-                  className="report-trend-line"
-                />
-                <path
-                  d={`M ${left} ${top + plotHeight * 0.72} C ${left + plotWidth * 0.17} ${top + plotHeight * 0.78}, ${left + plotWidth * 0.19} ${top + plotHeight * 0.45}, ${left + plotWidth * 0.34} ${top + plotHeight * 0.58} S ${left + plotWidth * 0.5} ${top + plotHeight * 0.72}, ${left + plotWidth * 0.62} ${top + plotHeight * 0.42} S ${left + plotWidth * 0.82} ${top + plotHeight * 0.62}, ${width - right} ${top + plotHeight * 0.3} L ${width - right} ${top + plotHeight} L ${left} ${top + plotHeight} Z`}
-                  fill="#c8a274"
-                  fillOpacity="0.18"
-                  className="report-trend-area"
-                />
-                <text x={left} y={height - 10} fill="#927f6e" fontSize="9">Illustrative trend only</text>
-              </>
-            )}
-          </svg>
-          {showPriceEmptyState && (
-            <div className="pointer-events-none absolute inset-x-8 top-1/2 -translate-y-1/2 text-center">
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="#c8a274"
-                strokeWidth="1.7"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-                className="mx-auto mb-2 h-6 w-6"
-              >
-                <path d="M3 19h18M5 16l5-5 3 3 6-8" />
-                <path d="M15 6h4v4" />
-              </svg>
-              <p className="text-sm font-semibold text-cocoa-700">
-                Your next insight starts with a price
-              </p>
-              <p className="mx-auto mt-1 max-w-xs text-xs text-cocoa-400">
-                Add selling prices and item costs to see monetary history.
-              </p>
-              <p className="mt-3 text-[10px] text-cocoa-400">
-                Illustrative curve only · no monetary values are available
-              </p>
-            </div>
-          )}
-          {hasPartialPrices && (
-            <p className="mt-2 text-[10px] text-cocoa-400">
-              Showing values for priced items; {unpricedLines} unpriced movement{" "}
-              {unpricedLines === 1 ? "line is" : "lines are"} excluded.
-            </p>
-          )}
-        </div>
-      )}
-    </Card>
-    </ReportReveal>
-  );
-}
-
-function TransactionHistogram({ bins }: { bins: HistogramBin[] }) {
-  const maxCount = Math.max(
-    ...bins.flatMap((bin) => [bin.checkoutCount, bin.wasteCount]),
-    1
-  );
-
-  return (
-    <ReportReveal>
-    <Card className="!p-0">
-      <div className="border-b border-cream-200 bg-cream-50 px-4 py-3">
-        <h2 className="text-sm font-bold text-cocoa-800">Transaction value distribution</h2>
-        <p className="mt-1 text-xs text-cocoa-400">
-          Histogram of estimated value per checkout or waste transaction.
-        </p>
-      </div>
-      {bins.length === 0 ? (
-        <Empty>No priced transactions in this date range.</Empty>
-      ) : (
-        <div className="p-3 sm:p-4">
-          <div className="mb-3 flex flex-wrap gap-x-4 gap-y-1">
-            <span className="inline-flex items-center gap-1.5 text-[11px] text-cocoa-600">
-              <span className="h-2 w-2 rounded-sm bg-[#8d6040]" /> Checkout
-            </span>
-            <span className="inline-flex items-center gap-1.5 text-[11px] text-cocoa-600">
-              <span className="h-2 w-2 rounded-sm bg-[#8b3a24]" /> Waste
-            </span>
-          </div>
-          <div
-            className="grid grid-cols-[2rem_minmax(0,1fr)] gap-1"
-            role="img"
-            aria-label="Histogram showing checkout and waste transaction frequency across estimated transaction value ranges"
-          >
-            <div className="flex h-36 flex-col justify-between pb-5 text-right text-[9px] tabular-nums text-cocoa-400">
-              <span>{maxCount}</span>
-              <span>{Math.ceil(maxCount / 2)}</span>
-              <span>0</span>
-            </div>
-            <div className="grid h-36 grid-cols-5 items-end gap-2 border-b border-l border-cream-300 px-2">
-              {bins.map((bin, index) => (
-                <div
-                  key={bin.label}
-                  className="flex h-full min-w-0 flex-col justify-end"
-                  title={`${bin.label}: ${bin.checkoutCount} checkouts, ${bin.wasteCount} waste transactions`}
-                >
-                  <div className="flex h-[calc(100%-1.25rem)] items-end justify-center gap-1">
-                    {[
-                      { key: "checkout", count: bin.checkoutCount, color: "#8d6040" },
-                      { key: "waste", count: bin.wasteCount, color: "#8b3a24" },
-                    ].map((bar) => (
-                      <div
-                        key={bar.key}
-                        className="report-bar-rise min-w-1 flex-1 max-w-5 rounded-t-sm"
-                        style={{
-                          height: `${bar.count > 0 ? Math.max((bar.count / maxCount) * 100, 4) : 0}%`,
-                          backgroundImage: `linear-gradient(180deg, ${bar.key === "checkout" ? "#c9a477" : "#d39a82"}, ${bar.color})`,
-                          animationDelay: `${index * 70}ms`,
-                        }}
-                      />
-                    ))}
-                  </div>
-                  <span className="mt-1 truncate text-center text-[9px] text-cocoa-400">
-                    {bin.label}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-          <p className="mt-2 text-right text-[10px] text-cocoa-400">
-            X: transaction value (PHP) · Y: transaction count
-          </p>
-        </div>
-      )}
-    </Card>
-    </ReportReveal>
-  );
-}
-
-function ActivityScatterPlot({
-  points,
-  periodLabel,
-}: {
-  points: ScatterPoint[];
-  periodLabel: string;
-}) {
-  const [selectedSku, setSelectedSku] = useState<string | null>(null);
-  const width = 640;
-  const height = 280;
-  const left = 48;
-  const right = 14;
-  const top = 18;
-  const bottom = 42;
-  const plotWidth = width - left - right;
-  const plotHeight = height - top - bottom;
-  const maxCheckout = Math.max(...points.map((point) => point.checkoutEvents), 0);
-  const maxWaste = Math.max(...points.map((point) => point.wasteEvents), 0);
-  const maxX = Math.max(4, Math.ceil((maxCheckout * 1.1) / 4) * 4);
-  const maxY = Math.max(3, Math.ceil((maxWaste * 1.1) / 3) * 3);
-  const xStep = maxX / 4;
-  const yStep = maxY / 3;
-  const xTicks = Array.from({ length: Math.floor(maxX / xStep) + 1 }, (_, index) => index * xStep);
-  const yTicks = Array.from({ length: Math.floor(maxY / yStep) + 1 }, (_, index) => index * yStep);
-  const x = (value: number) => left + (value / maxX) * plotWidth;
-  const y = (value: number) => top + plotHeight - (value / maxY) * plotHeight;
-  const selected = points.find((point) => point.sku === selectedSku) ?? null;
-  const midpointX = maxX / 2;
-  const midpointY = maxY / 2;
-
-  return (
-    <ReportReveal>
-    <Card className="!p-0">
-      <div className="flex items-start justify-between gap-3 border-b border-cream-200 bg-cream-50 px-4 py-3">
-        <div>
-          <h2 className="text-sm font-bold text-cocoa-800">Checkout vs Waste</h2>
-        <p className="mt-1 text-xs text-cocoa-400">
-            Each point is an item · event counts, not quantities
-        </p>
-        </div>
-        <Badge tone="slate" variant="tag" dot={false}>{periodLabel}</Badge>
-      </div>
-      {points.length === 0 ? (
-        <Empty>No item activity to compare in this date range.</Empty>
-      ) : (
-        <div className="p-3 sm:p-4">
-          <p className="mb-2 text-[10px] text-cocoa-400">Waste events</p>
-          <svg
-            viewBox={`0 0 ${width} ${height}`}
-            className="h-auto w-full"
-            role="img"
-            aria-label={`Scatter plot of checkout and waste event counts per item, ${periodLabel}`}
-          >
-            {yTicks.map((tick) => (
-              <g key={`y-${tick}`}>
-                <line
-                  x1={left}
-                  y1={y(tick)}
-                  x2={width - right}
-                  y2={y(tick)}
-                  stroke={tick === midpointY ? "#e5b184" : "#eadfce"}
-                  strokeWidth={tick === midpointY ? 1.2 : 1}
-                />
-                <text x={left - 8} y={y(tick) + 3} textAnchor="end" fill="#927f6e" fontSize="10">
-                  {tick}
-                </text>
-              </g>
-            ))}
-            {xTicks.map((tick) => (
-              <g key={`x-${tick}`}>
-                <line
-                  x1={x(tick)}
-                  y1={top}
-                  x2={x(tick)}
-                  y2={top + plotHeight}
-                  stroke={tick === midpointX ? "#e5b184" : "#eadfce"}
-                  strokeWidth={tick === midpointX ? 1.2 : 1}
-                />
-                <text x={x(tick)} y={height - 17} textAnchor="middle" fill="#927f6e" fontSize="10">
-                  {tick}
-                </text>
-              </g>
-            ))}
-            <line
-              x1={x(midpointX)}
-              y1={top}
-              x2={x(midpointX)}
-              y2={top + plotHeight}
-              stroke="#bd8c53"
-              strokeDasharray="4 4"
-              strokeOpacity="0.65"
-            />
-            <line
-              x1={left}
-              y1={y(midpointY)}
-              x2={width - right}
-              y2={y(midpointY)}
-              stroke="#bd8c53"
-              strokeDasharray="4 4"
-              strokeOpacity="0.65"
-            />
-            {points.map((point, index) => (
-              <circle
-                key={point.sku}
-                cx={x(point.checkoutEvents)}
-                cy={y(point.wasteEvents)}
-                r={point.sku === selectedSku ? 6 : 4}
-                fill={point.sku === selectedSku ? "#8b3a24" : "#8d6040"}
-                fillOpacity="0.8"
-                stroke="white"
-                strokeWidth="1.5"
-                role="button"
-                tabIndex={0}
-                aria-label={`${point.name}: ${point.checkoutEvents} checkout events, ${point.wasteEvents} waste events`}
-                onClick={() => setSelectedSku(point.sku)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    setSelectedSku(point.sku);
-                  }
-                }}
-                className="report-trend-dot cursor-pointer outline-none focus:stroke-cocoa-800"
-                style={{ animationDelay: `${Math.min(index * 18, 360)}ms` }}
-              >
-                <title>{`${point.name} · checkout ${point.checkoutEvents}, waste ${point.wasteEvents}`}</title>
-              </circle>
-            ))}
-            <text
-              x={left + plotWidth / 2}
-              y={height - 1}
-              textAnchor="middle"
-              fill="#786553"
-              fontSize="10"
-            >
-              Checkout events
-            </text>
-          </svg>
-          <p className="mt-1 text-[10px] text-cocoa-400">
-            Each event counts once per item per transaction. Overlapping items may share a point.
-          </p>
-          {selected && (
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-cream-200 bg-cream-50 px-3 py-2.5 text-xs">
-              <span className="min-w-0 truncate font-semibold text-cocoa-800">
-                {selected.name} <span className="font-normal text-cocoa-400">({selected.sku})</span>
-              </span>
-              <span className="shrink-0 tabular-nums text-cocoa-600">
-                {selected.checkoutEvents} checkout · {selected.wasteEvents} waste
-              </span>
-            </div>
-          )}
-        </div>
-      )}
-    </Card>
-    </ReportReveal>
-  );
-}
-
 function SoonestExpiries({ items }: { items: ExpiryItem[] }) {
   const expiredItems = items
     .filter((item) => item.days !== null && item.days < 0)
@@ -1284,521 +817,20 @@ function SoonestExpiries({ items }: { items: ExpiryItem[] }) {
   );
 }
 
-function QuantityBarChart({
-  title,
-  description,
-  entries,
-  emptyMessage,
-  color = "#8d6040",
-}: {
-  title: string;
-  description: string;
-  entries: QuantityChartEntry[];
-  emptyMessage: string;
-  color?: string;
-}) {
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  const maxQuantity = Math.max(...entries.map((entry) => entry.quantity), 1);
-  const selected =
-    entries.find((entry) => entry.key === selectedKey) ?? entries[0] ?? null;
 
-  return (
-    <ReportReveal>
-    <Card className="!p-0">
-      <div className="border-b border-cream-200 bg-cream-50 px-4 py-3">
-        <h2 className="text-sm font-bold text-cocoa-800">{title}</h2>
-        <p className="mt-1 text-xs text-cocoa-400">{description}</p>
-      </div>
-      {entries.length === 0 ? (
-        <Empty>{emptyMessage}</Empty>
-      ) : (
-        <div className="space-y-2 p-3 sm:p-4">
-          {entries.map((entry, index) => {
-            const isSelected = selected?.key === entry.key;
-            const width =
-              entry.quantity > 0
-                ? Math.max((entry.quantity / maxQuantity) * 100, 4)
-                : 0;
-            return (
-              <button
-                key={entry.key}
-                type="button"
-                onClick={() => setSelectedKey(entry.key)}
-                aria-pressed={isSelected}
-                className={`block w-full rounded-lg p-2 text-left transition-colors ${
-                  isSelected ? "bg-cream-100" : "hover:bg-cream-50"
-                }`}
-              >
-                <span className="mb-1.5 flex min-w-0 items-center justify-between gap-2 text-xs">
-                  <span className="flex min-w-0 items-center gap-2">
-                    <span className="w-4 shrink-0 text-[10px] font-semibold tabular-nums text-cocoa-300">
-                      {index + 1}
-                    </span>
-                    <span className="truncate font-medium text-cocoa-700">{entry.name}</span>
-                  </span>
-                  <span className="shrink-0 font-bold tabular-nums text-cocoa-800">
-                    {entry.quantityLabel}
-                  </span>
-                </span>
-                <span className="ml-6 block h-2 overflow-hidden rounded-full bg-cream-200">
-                  <span
-                  className="report-bar-grow block h-full rounded-full"
-                  style={{
-                    width: `${width}%`,
-                    backgroundImage: `linear-gradient(90deg, #c8a274, ${color})`,
-                    animationDelay: `${index * 70}ms`,
-                  }}
-                />
-              </span>
-              </button>
-            );
-          })}
-          {selected && (
-            <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-cream-200 bg-white px-3 py-2.5 text-xs">
-              <div className="min-w-0">
-                <p className="truncate font-semibold text-cocoa-800">{selected.name}</p>
-                {selected.detail && (
-                  <p className="mt-0.5 truncate text-cocoa-400">{selected.detail}</p>
-                )}
-              </div>
-              <div className="flex shrink-0 items-center gap-3 text-right tabular-nums">
-                {selected.events !== undefined && (
-                  <span className="text-cocoa-500">
-                    {selected.events} {selected.events === 1 ? "event" : "events"}
-                  </span>
-                )}
-                <span className="font-bold text-cocoa-800">{selected.quantityLabel}</span>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </Card>
-    </ReportReveal>
-  );
-}
-
-function MovementChart({
-  movement,
-  transactions,
-}: {
-  movement: MovementSummary[];
-  transactions: MovementTransaction[];
-}) {
-  const [selectedType, setSelectedType] = useState<string | null>(null);
-  const orderedTypes = ["checkout", "restock", "waste"];
-  const rows = orderedTypes
-    .map((type) => movement.find((entry) => entry.type === type))
-    .filter((entry): entry is MovementSummary => Boolean(entry));
-  const maxCount = Math.max(...rows.map((entry) => entry.count), 1);
-  const activeType =
-    selectedType && rows.some((entry) => entry.type === selectedType)
-      ? selectedType
-      : rows.find((entry) => entry.count > 0)?.type ?? null;
-  const selectedLabel = activeType ? MOVEMENT_LABEL[activeType] ?? activeType : "";
-  const itemEvents = new Map<string, { name: string; events: number }>();
-
-  if (activeType) {
-    for (const transaction of transactions) {
-      if (transaction.type !== activeType) continue;
-      const seenInTransaction = new Set<string>();
-      for (const line of transaction.transaction_items ?? []) {
-        if (seenInTransaction.has(line.sku)) continue;
-        seenInTransaction.add(line.sku);
-        const current = itemEvents.get(line.sku) ?? {
-          name: line.item_name,
-          events: 0,
-        };
-        current.events += 1;
-        itemEvents.set(line.sku, current);
-      }
-    }
-  }
-
-  const activeItems = [...itemEvents.entries()]
-    .map(([sku, item]) => ({ sku, ...item }))
-    .sort((a, b) => b.events - a.events || a.name.localeCompare(b.name))
-    .slice(0, 5);
-
-  return (
-    <ReportReveal>
-    <Card className="!p-0">
-      <div className="border-b border-cream-200 bg-cream-50 px-4 py-3">
-        <h2 className="text-sm font-bold text-cocoa-800">Transactions by activity</h2>
-        <p className="mt-1 text-xs text-cocoa-400">
-          Select an activity to see the items recorded most often.
-        </p>
-      </div>
-      <div className="space-y-3 p-4">
-        <div className="space-y-3">
-          {rows.map((entry, index) => {
-            const isSelected = entry.type === activeType;
-            const width = entry.count > 0 ? Math.max((entry.count / maxCount) * 100, 4) : 0;
-            return (
-              <button
-                key={entry.type}
-                type="button"
-                onClick={() => setSelectedType(entry.type)}
-                aria-pressed={isSelected}
-                className={`block w-full rounded-lg p-2 text-left transition-colors ${
-                  isSelected ? "bg-cream-100" : "hover:bg-cream-50"
-                }`}
-              >
-                <span className="mb-1.5 flex items-center justify-between gap-3 text-xs">
-                  <span className="min-w-0 truncate font-medium text-cocoa-700">
-                    {MOVEMENT_LABEL[entry.type] ?? entry.type}
-                  </span>
-                  <span className="shrink-0 font-bold tabular-nums text-cocoa-800">
-                    {entry.count} {entry.count === 1 ? "transaction" : "transactions"}
-                  </span>
-                </span>
-                <span className="block h-2.5 overflow-hidden rounded-full bg-cream-200">
-                  <span
-                    className="report-bar-grow block h-full rounded-full"
-                    style={{
-                      width: `${width}%`,
-                      backgroundColor: MOVEMENT_COLORS[entry.type] ?? "#8d6040",
-                      animationDelay: `${index * 70}ms`,
-                    }}
-                  />
-                </span>
-              </button>
-            );
-          })}
-        </div>
-
-        {activeType && activeItems.length > 0 ? (
-          <div className="rounded-xl border border-cream-200 bg-white p-3">
-            <h3 className="mb-2 text-xs font-semibold text-cocoa-700">
-              Most frequent items · {selectedLabel}
-            </h3>
-            <div className="space-y-1.5">
-              {activeItems.map((item) => (
-                <div key={item.sku} className="flex items-center justify-between gap-3 text-xs">
-                  <span className="min-w-0 truncate text-cocoa-600">{item.name}</span>
-                  <span className="shrink-0 tabular-nums text-cocoa-500">
-                    {item.events} {item.events === 1 ? "time" : "times"}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <p className="rounded-xl bg-cream-50 px-3 py-3 text-center text-xs text-cocoa-400">
-            No movement activity in this date range.
-          </p>
-        )}
-      </div>
-    </Card>
-    </ReportReveal>
-  );
-}
-
-function FinancialBreakdown({
-  title,
-  description,
-  entries,
-  totalCents,
-}: {
-  title: string;
-  description: string;
-  entries: FinancialItem[];
-  totalCents: number;
-}) {
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  const sortedEntries = [...entries]
-    .filter((entry) => entry.valueCents > 0)
-    .sort((a, b) => b.valueCents - a.valueCents);
-  const leadingItems = sortedEntries.slice(0, 7);
-  const otherItems = sortedEntries.slice(7);
-  const chartGroups: FinancialGroup[] = [
-    ...leadingItems.map((item) => ({
-      key: item.sku,
-      name: item.name,
-      valueCents: item.valueCents,
-      items: [item],
-    })),
-    ...(otherItems.length > 0
-      ? [{
-          key: "__other__",
-          name: "Other items",
-          valueCents: otherItems.reduce((sum, item) => sum + item.valueCents, 0),
-          items: otherItems,
-        }]
-      : []),
-  ];
-  const totalChartCents = chartGroups.reduce((sum, group) => sum + group.valueCents, 0);
-  const activeKey =
-    selectedKey && chartGroups.some((group) => group.key === selectedKey)
-      ? selectedKey
-      : chartGroups[0]?.key;
-  const activeGroup = chartGroups.find((group) => group.key === activeKey);
-
-  let startAngle = -90;
-  const slices = chartGroups.map((group, index) => {
-    const sweep = totalChartCents > 0 ? (group.valueCents / totalChartCents) * 360 : 0;
-    const endAngle = startAngle + sweep;
-    const point = (angle: number) => {
-      const radians = (angle * Math.PI) / 180;
-      return { x: 50 + 44 * Math.cos(radians), y: 50 + 44 * Math.sin(radians) };
-    };
-    const start = point(startAngle);
-    const end = point(endAngle);
-    const path =
-      sweep >= 359.99
-        ? ""
-        : `M 50 50 L ${start.x} ${start.y} A 44 44 0 ${sweep > 180 ? 1 : 0} 1 ${end.x} ${end.y} Z`;
-    const slice = { group, color: MONEY_COLORS[index % MONEY_COLORS.length], path };
-    startAngle = endAngle;
-    return slice;
-  });
-
-  function selectSlice(key: string) {
-    setSelectedKey(key);
-  }
-
-  return (
-    <ReportReveal>
-    <Card className="!p-0">
-      <div className="border-b border-cream-200 bg-cream-50 px-4 py-3">
-        <h2 className="text-sm font-bold text-cocoa-800">{title}</h2>
-        <p className="mt-1 text-xs text-cocoa-400">{description}</p>
-      </div>
-      <div className="grid grid-cols-[7rem_minmax(0,1fr)] items-center gap-2 p-3 sm:grid-cols-[minmax(130px,0.8fr)_minmax(0,1.2fr)] sm:gap-4 sm:p-4">
-        <div className="mx-auto grid h-28 w-28 place-items-center sm:h-44 sm:w-44">
-          <div className="relative h-full w-full">
-            <svg
-              viewBox="0 0 100 100"
-              className="h-full w-full -rotate-90"
-              role="group"
-              aria-label={`${title} by item`}
-            >
-              {slices.length === 1 ? (
-                <circle
-                  cx="50"
-                  cy="50"
-                  r="44"
-                  fill={slices[0].color}
-                  role="button"
-                  tabIndex={0}
-                  aria-label={`${slices[0].group.name}: ${formatPeso(slices[0].group.valueCents)}`}
-                  onClick={() => selectSlice(slices[0].group.key)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      selectSlice(slices[0].group.key);
-                    }
-                  }}
-                  className="report-donut-slice cursor-pointer outline-none focus:opacity-70"
-                />
-              ) : (
-                slices.map(({ group, color, path }, index) => (
-                  <path
-                    key={group.key}
-                    d={path}
-                    fill={color}
-                    role="button"
-                    tabIndex={0}
-                    aria-label={`${group.name}: ${formatPeso(group.valueCents)}`}
-                    onClick={() => selectSlice(group.key)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        selectSlice(group.key);
-                      }
-                    }}
-                    className="report-donut-slice cursor-pointer outline-none transition-opacity hover:opacity-75 focus:opacity-75"
-                    style={{ animationDelay: `${index * 70}ms` }}
-                  />
-                ))
-              )}
-              <circle cx="50" cy="50" r="26" fill="white" pointerEvents="none" />
-            </svg>
-            <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
-              <span className="text-[10px] font-semibold uppercase tracking-wide text-cocoa-400">
-                Total
-              </span>
-              <span className="mt-0.5 max-w-[6.5rem] truncate text-sm font-bold tabular-nums text-cocoa-800">
-                {formatPeso(totalCents)}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        <div className="min-w-0">
-          {chartGroups.length === 0 ? (
-            <p className="rounded-xl bg-cream-50 px-3 py-4 text-center text-sm text-cocoa-400">
-              No priced items in this date range.
-            </p>
-          ) : (
-            <>
-              <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-cocoa-400">
-                Select a chart slice or item
-              </p>
-              <div className="max-h-44 space-y-1 overflow-y-auto pr-1">
-                {chartGroups.map((group, index) => (
-                  <button
-                    key={group.key}
-                    type="button"
-                    onClick={() => selectSlice(group.key)}
-                    aria-pressed={activeKey === group.key}
-                    className={`flex min-h-10 w-full items-center gap-2 rounded-lg px-2 text-left text-xs transition-colors ${
-                      activeKey === group.key ? "bg-cream-100" : "hover:bg-cream-50"
-                    }`}
-                  >
-                    <span
-                      className="h-2.5 w-2.5 shrink-0 rounded-full"
-                      style={{ backgroundColor: MONEY_COLORS[index % MONEY_COLORS.length] }}
-                    />
-                    <span className="min-w-0 flex-1 truncate text-cocoa-700">{group.name}</span>
-                    <span className="shrink-0 font-semibold tabular-nums text-cocoa-800">
-                      {formatPeso(group.valueCents)}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-      {activeGroup && (
-        <div className="mx-4 mb-4 rounded-xl border border-cream-200 bg-cream-50/70 p-3">
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <h3 className="truncate text-sm font-semibold text-cocoa-800">{activeGroup.name}</h3>
-            <span className="shrink-0 text-sm font-bold tabular-nums text-cocoa-800">
-              {formatPeso(activeGroup.valueCents)}
-            </span>
-          </div>
-          <div className="space-y-1.5">
-            {activeGroup.items.map((item) => (
-              <div
-                key={item.sku}
-                className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-t border-cream-200/80 pt-1.5 text-xs"
-              >
-                <span className="min-w-0 flex-1 truncate text-cocoa-700">
-                  {item.name} <span className="text-cocoa-400">({item.sku})</span>
-                </span>
-                <span className="shrink-0 tabular-nums text-cocoa-500">
-                  {item.quantity.toLocaleString("en-PH")} × {formatPeso(Math.round(item.unitPrice * 100))}
-                </span>
-                <span className="shrink-0 font-semibold tabular-nums text-cocoa-800">
-                  {formatPeso(item.valueCents)}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </Card>
-    </ReportReveal>
-  );
-}
-
-function MovementActivityDonut({ movement }: { movement: MovementSummary[] }) {
-  const [selectedType, setSelectedType] = useState("checkout");
-  const orderedTypes = ["checkout", "restock", "waste"];
-  const rows = orderedTypes
-    .map((type) => movement.find((entry) => entry.type === type))
-    .filter((entry): entry is MovementSummary => Boolean(entry));
-  const total = rows.reduce((sum, entry) => sum + entry.count, 0);
-  const { displayValue: animatedTotal, ref: animatedTotalRef } =
-    useAnimatedReportValue<SVGTextElement>(total);
-  const selected = rows.find((entry) => entry.type === selectedType) ?? rows[0];
-  const radius = 38;
-  const circumference = 2 * Math.PI * radius;
-  let offset = 0;
-
-  return (
-    <ReportReveal>
-    <Card className="!p-0">
-      <div className="border-b border-cream-200 bg-cream-50 px-4 py-3">
-        <h2 className="text-sm font-bold text-cocoa-800">Transaction activity</h2>
-        <p className="mt-1 text-xs text-cocoa-400">
-          A breakdown of {total.toLocaleString("en-PH")} recorded movements
-        </p>
-      </div>
-      <div className="flex flex-col items-center gap-4 p-4 sm:flex-row sm:justify-center">
-        <svg
-          viewBox="0 0 100 100"
-          className="h-36 w-36 shrink-0"
-          role="img"
-          aria-label={`Donut chart showing ${total} movements`}
-        >
-          <circle cx="50" cy="50" r={radius} fill="none" stroke="#efe7dc" strokeWidth="10" />
-          {rows.map((entry, index) => {
-            const length = total > 0 ? (entry.count / total) * circumference : 0;
-            const circle = (
-              <circle
-                key={entry.type}
-                cx="50"
-                cy="50"
-                r={radius}
-                fill="none"
-                stroke={MOVEMENT_COLORS[entry.type] ?? "#8d6040"}
-                strokeWidth={entry.type === selected?.type ? 12 : 10}
-                strokeDasharray={`${length} ${circumference - length}`}
-                strokeDashoffset={-offset}
-                transform="rotate(-90 50 50)"
-                className="report-donut-slice"
-                style={{ animationDelay: `${index * 90}ms` }}
-              />
-            );
-            offset += length;
-            return circle;
-          })}
-          <text ref={animatedTotalRef} x="50" y="47" textAnchor="middle" fill="#3d2b1f" fontSize="16" fontWeight="700">
-            {Math.round(animatedTotal).toLocaleString("en-PH")}
-          </text>
-          <text x="50" y="58" textAnchor="middle" fill="#927f6e" fontSize="5">
-            movements
-          </text>
-        </svg>
-        <div className="w-full max-w-xs space-y-1">
-          {rows.map((entry) => (
-            <button
-              key={entry.type}
-              type="button"
-              onClick={() => setSelectedType(entry.type)}
-              aria-pressed={selected?.type === entry.type}
-              className={`flex w-full items-center justify-between gap-3 rounded-lg px-2.5 py-2 text-left text-xs ${
-                selected?.type === entry.type ? "bg-cream-100" : "hover:bg-cream-50"
-              }`}
-            >
-              <span className="flex min-w-0 items-center gap-2">
-                <span
-                  className="h-2 w-2 shrink-0 rounded-full"
-                  style={{ backgroundColor: MOVEMENT_COLORS[entry.type] ?? "#8d6040" }}
-                />
-                <span className="truncate text-cocoa-600">
-                  {MOVEMENT_LABEL[entry.type] ?? entry.type}
-                </span>
-              </span>
-              <span className="shrink-0 text-right">
-                <span className="block font-semibold tabular-nums text-cocoa-800">
-                  {entry.count.toLocaleString("en-PH")}
-                </span>
-                <span className="text-[10px] text-cocoa-400">
-                  {total ? `${((entry.count / total) * 100).toFixed(1)}%` : "0%"}
-                </span>
-              </span>
-            </button>
-          ))}
-          {selected && (
-            <p className="border-t border-cream-200 px-2.5 pt-2 text-[10px] text-cocoa-400">
-              {MOVEMENT_LABEL[selected.type] ?? selected.type}: {fmtQty(selected.qty)} units
-            </p>
-          )}
-        </div>
-      </div>
-    </Card>
-    </ReportReveal>
-  );
+function BadgeTone({ status }: { status: { tone: "slate" | "green" | "amber" | "red" | "blue"; label: string } }) {
+  return <Badge tone={status.tone} variant="tag">{status.label}</Badge>;
 }
 
 export default function ReportsPage() {
   const [items, setItems] = useState<Item[]>([]);
   const [txns, setTxns] = useState<Txn[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [itemsLoading, setItemsLoading] = useState(true);
+  const [transactionsLoading, setTransactionsLoading] = useState(true);
+  const loading = itemsLoading || transactionsLoading;
+  const [inventoryHistory, setInventoryHistory] = useState<InventoryHistory | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [transactionNotesAvailable, setTransactionNotesAvailable] = useState(true);
   const [toast, setToast] = useState<{
@@ -1816,6 +848,9 @@ export default function ReportsPage() {
 
   const loadSequence = useRef(0);
   const loadController = useRef<AbortController | null>(null);
+  const historySequence = useRef(0);
+  const historyController = useRef<AbortController | null>(null);
+  const itemsController = useRef<AbortController | null>(null);
 
   // Used as the heading on the printed/PDF report. Defaults to the product
   // name so the export still works if the settings read fails.
@@ -1834,6 +869,7 @@ export default function ReportsPage() {
   const [staff, setStaff] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [catFilter, setCatFilter] = useState("");
+  const [grouping, setGrouping] = useState<Grouping>("auto");
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
   const [availableStaff, setAvailableStaff] = useState<{ id: string; name: string }[]>([]);
 
@@ -1853,59 +889,95 @@ export default function ReportsPage() {
     return { from: fromDay, to: toDay };
   }, [range, fromDay, toDay]);
 
-  async function load() {
+  /* ---------- loading ----------
+   * Three independent loads, so a filter change does not drag the whole
+   * inventory back out of the database:
+   *
+   *   loadItems            — mount and manual reload only
+   *   loadTransactions     — mount, and whenever a range / staff / movement filter changes
+   *   loadInventoryHistory — mount, and whenever a range / category filter changes
+   *
+   * The history request is advisory — a failure disables that one chart, not
+   * the report.
+   */
+
+  async function loadItems() {
+    itemsController.current?.abort();
+    const controller = new AbortController();
+    itemsController.current = controller;
+    try {
+      const response = await fetch("/api/items", { signal: controller.signal });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.error) {
+        throw new Error(data.error || "Could not load the inventory");
+      }
+      setItems(data.items ?? []);
+      setError(null);
+    } catch (e) {
+      if (controller.signal.aborted) return;
+      setError(e instanceof Error ? e.message : "Could not load the inventory");
+    } finally {
+      if (itemsController.current === controller) itemsController.current = null;
+      setItemsLoading(false);
+    }
+  }
+
+  // Advisory reads — a failure here leaves sensible defaults, not an alert.
+  function loadAdvisory() {
+    fetch("/api/refs/categories")
+      .then((r) => r.json())
+      .then((c) => setCategories(c.items ?? []))
+      .catch(() => setCategories([]));
+    fetch("/api/settings")
+      .then((r) => r.json())
+      .then((s) => {
+        if (s?.settings?.business_name) setBusinessName(s.settings.business_name);
+      })
+      .catch(() => {});
+  }
+
+  async function loadTransactions() {
     loadController.current?.abort();
     const controller = new AbortController();
     loadController.current = controller;
     const requestId = ++loadSequence.current;
 
-    try {
-      const loadAllTransactions = async () => {
-        const all: Txn[] = [];
-        let offset = 0;
-        let notesAvailable = true;
+    const loadAllTransactions = async () => {
+      const all: Txn[] = [];
+      let offset = 0;
+      let notesAvailable = true;
 
-        while (true) {
-          const qs = new URLSearchParams({
-            limit: String(TRANSACTION_PAGE_SIZE),
-            offset: String(offset),
-          });
-          if (rangeParams.from) qs.set("from", rangeParams.from);
-          if (rangeParams.to) qs.set("to", rangeParams.to);
-          if (staff) qs.set("staff", staff);
-          if (typeFilter) qs.set("type", typeFilter);
+      while (true) {
+        const qs = new URLSearchParams({
+          limit: String(TRANSACTION_PAGE_SIZE),
+          offset: String(offset),
+        });
+        if (rangeParams.from) qs.set("from", rangeParams.from);
+        if (rangeParams.to) qs.set("to", rangeParams.to);
+        if (staff) qs.set("staff", staff);
+        if (typeFilter) qs.set("type", typeFilter);
 
-          const response = await fetch(`/api/transactions?${qs}`, {
-            signal: controller.signal,
-          });
-          const data = await response.json();
-          if (!response.ok || data.error) {
-            throw new Error(data.error || "Could not load report transactions");
-          }
-
-          const page: Txn[] = data.transactions ?? [];
-          if (data.transactionNotesAvailable === false) notesAvailable = false;
-          all.push(...page);
-          if (page.length < TRANSACTION_PAGE_SIZE) {
-            return { transactions: all, notesAvailable };
-          }
-          offset += page.length;
+        const response = await fetch(`/api/transactions?${qs}`, {
+          signal: controller.signal,
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) {
+          throw new Error(data.error || "Could not load report transactions");
         }
-      };
 
-      const [i, transactionRows, c] = await Promise.all([
-        fetch("/api/items", { signal: controller.signal }).then((r) => r.json()),
-        loadAllTransactions(),
-        // Advisory: the report still works if the reference list fails.
-        fetch("/api/refs/categories", { signal: controller.signal })
-          .then((r) => r.json())
-          .catch(() => ({ items: [] })),
-      ]);
+        const page: Txn[] = data.transactions ?? [];
+        if (data.transactionNotesAvailable === false) notesAvailable = false;
+        all.push(...page);
+        if (page.length < TRANSACTION_PAGE_SIZE) {
+          return { transactions: all, notesAvailable };
+        }
+        offset += page.length;
+      }
+    };
+
+    try {
+      const transactionRows = await loadAllTransactions();
       if (requestId !== loadSequence.current) return;
-      setCategories(c.items ?? []);
-      if (i.error) throw new Error(i.error);
-
-      setItems(i.items ?? []);
       setTxns(transactionRows.transactions);
       setTransactionNotesAvailable(transactionRows.notesAvailable);
       if (!staff) {
@@ -1921,33 +993,83 @@ export default function ReportsPage() {
         );
       }
 
-      // Advisory only: a failure here must not take the whole report down.
-      fetch("/api/settings")
-        .then((r) => r.json())
-        .then((s) => {
-          if (s?.settings?.business_name) setBusinessName(s.settings.business_name);
-        })
-        .catch(() => {});
-
       setError(null);
     } catch (e) {
       if (requestId !== loadSequence.current) return;
-      setError(e instanceof Error ? e.message : "Could not build the report");
+      setError(e instanceof Error ? e.message : "Could not load the report transactions");
     } finally {
       if (requestId === loadSequence.current) {
         loadController.current = null;
-        setLoading(false);
+        setTransactionsLoading(false);
       }
     }
   }
 
-  // Reload whenever a filter changes. `load` is stable enough for this page and
-  // the eslint rule is off throughout the codebase, matching the other pages.
+  async function loadInventoryHistory() {
+    historyController.current?.abort();
+    const controller = new AbortController();
+    historyController.current = controller;
+    const requestId = ++historySequence.current;
+
+    const qs = new URLSearchParams();
+    if (rangeParams.from) qs.set("from", rangeParams.from);
+    if (rangeParams.to) qs.set("to", rangeParams.to);
+    if (catFilter) qs.set("category", catFilter);
+
+    try {
+      const response = await fetch(`/api/inventory-history?${qs}`, {
+        signal: controller.signal,
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.error || "Could not reconstruct the inventory history");
+      }
+      if (requestId !== historySequence.current) return;
+      setInventoryHistory(payload);
+      setHistoryError(null);
+    } catch (e) {
+      if (requestId !== historySequence.current) return;
+      if (controller.signal.aborted) return;
+      setHistoryError(
+        e instanceof Error ? e.message : "Could not reconstruct the inventory history"
+      );
+    } finally {
+      if (requestId === historySequence.current) {
+        historyController.current = null;
+        setHistoryLoading(false);
+      }
+    }
+  }
+
+  function loadAll() {
+    setItemsLoading(true);
+    setTransactionsLoading(true);
+    setHistoryLoading(true);
+    loadItems();
+    loadTransactions();
+    loadInventoryHistory();
+  }
+
   useEffect(() => {
-    load();
+    loadItems();
+    loadAdvisory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Transactions refetch whenever a range / staff / movement filter changes.
+  useEffect(() => {
+    loadTransactions();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rangeParams.from, rangeParams.to, staff, typeFilter]);
-  const pullToRefresh = usePullToRefresh(load);
+
+  // The inventory value trend depends only on the range and the category, so
+  // a staff or movement filter change does not touch it.
+  useEffect(() => {
+    loadInventoryHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rangeParams.from, rangeParams.to, catFilter]);
+
+  const pullToRefresh = usePullToRefresh(loadAll);
 
   /* ---------- derived ---------- */
 
@@ -2045,7 +1167,7 @@ export default function ReportsPage() {
     return [...tally.entries()]
       .map(([sku, v]) => ({ sku, ...v }))
       .sort((a, b) => b.qty - a.qty)
-      .slice(0, 5);
+      .slice(0, 10);
   }, [filteredTransactions]);
 
   /*
@@ -2236,11 +1358,23 @@ export default function ReportsPage() {
     const startDate = rangeParams.from ? toDate(rangeParams.from) : observedStart;
     const endDate = rangeParams.to ? toDate(rangeParams.to) : observedEnd;
 
-    let trendPoints: TrendPoint[] = [];
+    let trendPoints: ValueTrendDatum[] = [];
+    let movementPoints: MovementDatum[] = [];
     let periodLabel = "date";
     if (startDate && endDate && startDate <= endDate) {
       const daySpan = Math.ceil((endDate.getTime() - startDate.getTime()) / 86_400_000);
-      const granularity = daySpan <= 31 ? "day" : daySpan <= 180 ? "week" : "month";
+      const granularity =
+        grouping === "daily"
+          ? "day"
+          : grouping === "weekly"
+            ? "week"
+            : grouping === "monthly"
+              ? "month"
+              : daySpan <= 31
+                ? "day"
+                : daySpan <= 180
+                  ? "week"
+                  : "month";
       periodLabel =
         granularity === "day" ? "daily" : granularity === "week" ? "weekly" : "monthly";
 
@@ -2254,7 +1388,7 @@ export default function ReportsPage() {
         const key = localDayKey(bucketDate);
         const label =
           granularity === "month"
-            ? bucketDate.toLocaleDateString("en-PH", { month: "short", year: "2-digit" })
+            ? bucketDate.toLocaleDateString("en-PH", { month: "short", year: "numeric" })
             : bucketDate.toLocaleDateString("en-PH", { month: "short", day: "numeric" });
         return { key, label, date: bucketDate };
       };
@@ -2284,25 +1418,59 @@ export default function ReportsPage() {
         totalsByKey.set(bucket.key, total);
       }
 
-      const points: TrendPoint[] = [];
+      /*
+       * Stock in against stock out.
+       *
+       * The classification is the one the database enforces on write: a
+       * restock adds stock, and a checkout and a waste log both draw it down.
+       * Every movement line counts once, in one series, in one of the two.
+       */
+      const movementByKey = new Map<string, { stockIn: number; stockOut: number }>();
+      for (const { transaction, date } of datedTransactions) {
+        if (
+          transaction.type !== "restock" &&
+          transaction.type !== "checkout" &&
+          transaction.type !== "waste"
+        ) {
+          continue;
+        }
+        const bucket = bucketFor(date);
+        const total = movementByKey.get(bucket.key) ?? { stockIn: 0, stockOut: 0 };
+        for (const line of transaction.transaction_items ?? []) {
+          const quantity = Number(line.quantity);
+          if (!Number.isFinite(quantity)) continue;
+          if (transaction.type === "restock") total.stockIn += quantity;
+          else total.stockOut += quantity;
+        }
+        movementByKey.set(bucket.key, total);
+      }
+
+      const movement: MovementDatum[] = [];
+      const points: ValueTrendDatum[] = [];
       const cursor = startBucket.date;
       for (let guard = 0; guard < 2400; guard += 1) {
         const bucket = bucketFor(cursor);
         const totals = totalsByKey.get(bucket.key) ?? { revenueCents: 0, lossCents: 0 };
         points.push({ key: bucket.key, label: bucket.label, ...totals });
+        const movementTotals = movementByKey.get(bucket.key) ?? {
+          stockIn: 0,
+          stockOut: 0,
+        };
+        movement.push({ key: bucket.key, label: bucket.label, ...movementTotals });
         if (bucket.key === endBucket.key) break;
         if (granularity === "day") cursor.setDate(cursor.getDate() + 1);
         else if (granularity === "week") cursor.setDate(cursor.getDate() + 7);
         else cursor.setMonth(cursor.getMonth() + 1);
       }
       trendPoints = points;
+      movementPoints = movement;
     }
 
     const maxTransactionCents = Math.max(
       ...pricedTransactions.map((transaction) => transaction.valueCents),
       0
     );
-    const bins: HistogramBin[] = [];
+    const bins: HistogramDatum[] = [];
     if (maxTransactionCents > 0) {
       const step = Math.max(1, Math.ceil(maxTransactionCents / 5));
       for (let index = 0; index < 5; index += 1) {
@@ -2335,8 +1503,115 @@ export default function ReportsPage() {
           b.checkoutEvents + b.wasteEvents - (a.checkoutEvents + a.wasteEvents)
       );
 
-    return { trendPoints, periodLabel, bins, scatterPoints };
-  }, [filteredTransactions, itemsBySku, rangeParams.from, rangeParams.to]);
+    return { trendPoints, movementPoints, periodLabel, bins, scatterPoints };
+  }, [filteredTransactions, itemsBySku, rangeParams.from, rangeParams.to, grouping]);
+
+  /* ---------- snapshot-derived series for the charts ---------- */
+
+  // Inventory value uses actual quantities at current unit prices, so the
+  // excluded (unpriced) count has to be visible alongside the total.
+  const inventoryValue = useMemo(() => {
+    let cents = 0;
+    let unpriced = 0;
+    for (const item of shownItems) {
+      const price = item.unit_price;
+      if (price === null || price === undefined || !Number.isFinite(Number(price))) {
+        unpriced += 1;
+        continue;
+      }
+      cents += Math.round(Number(item.quantity) * Number(price) * 100);
+    }
+    return { cents, unpriced };
+  }, [shownItems]);
+
+  const statusDistribution = useMemo(() => {
+    const counts = { ok: 0, low: 0, out: 0 };
+    for (const item of shownItems) {
+      const key = stockStatus(item.quantity, item.low_stock_threshold).key;
+      if (key === "low") counts.low += 1;
+      else if (key === "out") counts.out += 1;
+      else counts.ok += 1;
+    }
+    return [
+      { key: "ok", label: "Normal stock", count: counts.ok, color: CHART_COLORS.normal },
+      { key: "low", label: "Low stock", count: counts.low, color: CHART_COLORS.low },
+      { key: "out", label: "Out of stock", count: counts.out, color: CHART_COLORS.out },
+    ];
+  }, [shownItems]);
+
+  const categoryStock = useMemo(() => {
+    const tally = new Map<string, { quantity: number; items: number }>();
+    for (const item of shownItems) {
+      const name = item.category?.name ?? "Uncategorized";
+      const current = tally.get(name) ?? { quantity: 0, items: 0 };
+      current.quantity += Number(item.quantity);
+      current.items += 1;
+      tally.set(name, current);
+    }
+    return [...tally.entries()]
+      .map(([name, totals]) => ({
+        name,
+        quantity: Math.round(totals.quantity * 100) / 100,
+        items: totals.items,
+      }))
+      .sort((a, b) => b.quantity - a.quantity || a.name.localeCompare(b.name));
+  }, [shownItems]);
+
+  const valueSlices = useMemo(
+    () => buildMoneySlices(financialSummary.revenueItems),
+    [financialSummary.revenueItems]
+  );
+  const lossSlices = useMemo(
+    () => buildMoneySlices(financialSummary.lossItems),
+    [financialSummary.lossItems]
+  );
+
+  const activitySlices = useMemo(
+    () =>
+      movement.map((entry) => ({
+        type: entry.type,
+        label: MOVEMENT_LABEL[entry.type] ?? entry.type,
+        count: entry.count,
+        qty: entry.qty,
+        color: ACTIVITY_COLORS[entry.type] ?? CHART_COLORS.primary,
+      })),
+    [movement]
+  );
+
+  const topMoverEntries = useMemo(
+    () =>
+      topMovers.map((item) => ({
+        key: item.sku,
+        name: item.name,
+        value: item.qty,
+        label: fmtQty(item.qty, itemsBySku.get(item.sku)?.unit),
+        detail: `SKU ${item.sku}`,
+      })),
+    [topMovers, itemsBySku]
+  );
+
+  const wasteByItemEntries = useMemo(
+    () =>
+      wasteByItem.map((item) => ({
+        key: item.sku,
+        name: item.name,
+        value: item.qty,
+        label: fmtQty(item.qty, itemsBySku.get(item.sku)?.unit),
+        detail: `SKU ${item.sku}`,
+      })),
+    [wasteByItem, itemsBySku]
+  );
+
+  const wasteByCategoryEntries = useMemo(
+    () =>
+      wasteByCategory.map((category) => ({
+        key: category.name,
+        name: category.name,
+        value: category.events,
+        label: `${category.events} ${category.events === 1 ? "entry" : "entries"}`,
+      })),
+    [wasteByCategory]
+  );
 
   const filterDescription = useMemo(
     () =>
@@ -2573,6 +1848,13 @@ export default function ReportsPage() {
   }
 
   function finishPriceSave(savedCount: number, pendingCount: number) {
+    /*
+     * Prices feed the server-side reconstruction, not just the client-side
+     * estimates, so saving a batch of prices refetches the inventory history
+     * once — rather than once per item saved.
+     */
+    if (savedCount > 0) loadInventoryHistory();
+
     if (pendingCount > 0) {
       setToast({
         msg: `${pendingCount} price ${pendingCount === 1 ? "change was" : "changes were"} sent for admin approval${savedCount ? `; ${savedCount} ${savedCount === 1 ? "price was" : "prices were"} updated` : ""}.`,
@@ -2629,7 +1911,297 @@ export default function ReportsPage() {
       icon: "movements",
       tone: "cocoa",
     },
+    {
+      label: "Inventory Value",
+      value: inventoryValue.cents,
+      format: "peso-cents" as const,
+      hint:
+        inventoryValue.unpriced > 0
+          ? `${inventoryValue.unpriced} item${inventoryValue.unpriced === 1 ? " has" : "s have"} no price and ${inventoryValue.unpriced === 1 ? "is" : "are"} excluded`
+          : "Quantity × current unit price",
+      icon: "value",
+      tone: "cocoa",
+    },
   ];
+
+  /* ---------- the dashboard body, shared by the page and the export preview ---------- */
+  const dashboard = (
+    <>
+      {/* Section 1 — Summary */}
+      <section aria-labelledby="reports-summary" className="space-y-3">
+        <h2 id="reports-summary" className="text-base font-bold text-cocoa-800">
+          Summary
+        </h2>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
+          {reportMetrics.map((metric) => (
+            <ReportMetricCard key={metric.label} metric={metric} />
+          ))}
+        </div>
+        <div className="grid gap-3 lg:grid-cols-2">
+          <ReportPriceInsight
+            title="Total Revenue"
+            cents={financialSummary.revenueCents}
+            missingLines={financialSummary.unpricedRevenueLines}
+            missingItems={financialSummary.unpricedRevenueItems}
+            kind="revenue"
+            onAddPrices={() => setPriceEditorOpen(true)}
+          />
+          <ReportPriceInsight
+            title="Total Waste Cost"
+            cents={financialSummary.lossCents}
+            missingLines={financialSummary.unpricedLossLines}
+            missingItems={financialSummary.unpricedLossItems}
+            kind="waste"
+            onAddPrices={() => setPriceEditorOpen(true)}
+          />
+        </div>
+      </section>
+
+      {/* Section 2 — Inventory trends */}
+      <section aria-labelledby="reports-trends" className="space-y-3">
+        <h2 id="reports-trends" className="text-base font-bold text-cocoa-800">
+          Inventory trends
+        </h2>
+        <div className="grid gap-4 xl:grid-cols-2">
+          <InventoryValueTrendChart
+            data={inventoryHistory}
+            loading={historyLoading}
+            error={historyError}
+            grouping={grouping}
+          />
+          <StockMovementChart
+            movement={chartAnalytics.movementPoints}
+            periodLabel={chartAnalytics.periodLabel}
+          />
+          <ValueTrendChart
+            points={chartAnalytics.trendPoints}
+            periodLabel={chartAnalytics.periodLabel}
+            unpricedLines={
+              financialSummary.unpricedRevenueLines + financialSummary.unpricedLossLines
+            }
+          />
+          <TransactionHistogramChart bins={chartAnalytics.bins} />
+        </div>
+      </section>
+
+      {/* Section 3 — Inventory breakdown */}
+      <section aria-labelledby="reports-breakdown" className="space-y-3">
+        <h2 id="reports-breakdown" className="text-base font-bold text-cocoa-800">
+          Inventory breakdown
+        </h2>
+        <div className="grid gap-4 xl:grid-cols-2">
+          <StockByCategoryChart categories={categoryStock} />
+          <StockStatusDonutChart status={statusDistribution} />
+          <ValueBreakdownChart
+            title="Revenue by item"
+            description="Checkout value by item. Select a slice to inspect its quantity and value."
+            slices={valueSlices}
+            totalCents={financialSummary.revenueCents}
+            emptyMessage="No priced items in this date range."
+          />
+          <ValueBreakdownChart
+            title="Lost value by item"
+            description="Waste cost by item. Select a slice to inspect its quantity and value."
+            slices={lossSlices}
+            totalCents={financialSummary.lossCents}
+            emptyMessage="No priced waste in this date range."
+          />
+        </div>
+        <TransactionActivityDonutChart activity={activitySlices} />
+      </section>
+
+      {/* Section 4 — Item performance */}
+      <section aria-labelledby="reports-performance" className="space-y-3">
+        <h2 id="reports-performance" className="text-base font-bold text-cocoa-800">
+          Item performance
+        </h2>
+        <div className="grid gap-4 lg:grid-cols-2">
+          <Card className="!p-0">
+            <div className="border-b border-cream-200 bg-cream-50 px-4 py-3">
+              <h2 className="text-sm font-bold text-cocoa-800">Waste Summary</h2>
+              <p className="mt-1 text-xs text-cocoa-400">
+                Recorded waste in the selected report.
+              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-3 p-4">
+              <Stat label="Total Waste" value={fmtQty(wasteTotal)} tone="danger" />
+              <Stat label="Waste Events" value={wasteCount} tone="warn" />
+            </div>
+          </Card>
+          <TopItemsBarChart
+            title="Waste by category"
+            description="Waste item entries by category. Select a bar to see its total quantity."
+            metric="waste entries"
+            entries={wasteByCategoryEntries}
+            color={CHART_COLORS.neutral}
+            emptyMessage="No waste recorded yet."
+            unitLabel="entries"
+            notes={
+              <>
+                Counted by waste item entries, not quantities, because the
+                quantities are in mixed units. Total quantity is in the tooltip.
+              </>
+            }
+          />
+        </div>
+        <div className="grid gap-4 xl:grid-cols-2">
+          <TopItemsBarChart
+            title="Top-moving inventory items"
+            description="Top ten items by units checked out in this date range."
+            metric="units checked out"
+            entries={topMoverEntries}
+            color={CHART_COLORS.revenue}
+            emptyMessage="No checkout activity in this date range."
+            unitLabel="units"
+            notes={
+              <>
+                Ranked by checkout units, not by how often the item was
+                checked out, and not by waste. An item checked out once with
+                ten units ranks above an item checked out ten times with one.
+              </>
+            }
+          />
+          <TopItemsBarChart
+            title="Most wasted items"
+            description="Ranked by waste quantity in this date range · mixed units."
+            metric="units wasted"
+            entries={wasteByItemEntries}
+            color={CHART_COLORS.waste}
+            emptyMessage="No waste activity in this date range."
+            unitLabel="units"
+          />
+          <MovementActivityChart
+            activity={activitySlices}
+            transactions={filteredTransactions}
+          />
+        </div>
+        <ActivityScatterChart
+          points={chartAnalytics.scatterPoints}
+          periodLabel={movementPeriodLabel}
+        />
+      </section>
+
+      <SoonestExpiries items={soonestExpiry} />
+
+      {/* On hand by item — the full snapshot, with a mobile card view below lg. */}
+      <Card className="!p-0">
+        <div className="flex items-center justify-between border-b border-cream-200 bg-cream-50 px-4 py-3">
+          <div>
+            <h2 className="text-sm font-bold text-cocoa-800">On hand by item</h2>
+            <p className="mt-1 text-[11px] text-cocoa-400">
+              Complete inventory · quantities, reorder thresholds, and stock status
+            </p>
+          </div>
+          <span className="shrink-0 text-[11px] text-cocoa-400">{shownItems.length} items</span>
+        </div>
+
+        {shownItems.length === 0 ? (
+          <Empty>{items.length === 0 ? "No items yet." : "No items in this category."}</Empty>
+        ) : (
+          <>
+            <div className="space-y-2.5 pb-3 lg:hidden">
+              {shownItems.map((item) => {
+                const status = stockStatus(item.quantity, item.low_stock_threshold);
+                const days = daysUntil(item.expiration_date);
+                return (
+                  <DataCard key={item.id}>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="font-semibold text-cocoa-800">{item.name}</div>
+                        <div className="font-mono text-xs text-cocoa-400">{item.sku}</div>
+                      </div>
+                      <BadgeTone status={status} />
+                    </div>
+                    <DataField label="On hand">{fmtQty(item.quantity, item.unit)}</DataField>
+                    <DataField label="Threshold">
+                      {fmtQty(item.low_stock_threshold, item.unit)}
+                    </DataField>
+                    <DataField label="Category">{item.category?.name ?? "—"}</DataField>
+                    <DataField label="Location">{item.location?.name ?? "—"}</DataField>
+                    <DataField label="Expiry">
+                      {item.expiration_date ? (
+                        <span className="text-xs">
+                          {fmtDate(item.expiration_date)}
+                          {days !== null && days < 0 && (
+                            <span className="text-terracotta-700"> (expired)</span>
+                          )}
+                        </span>
+                      ) : (
+                        <span className="text-cocoa-200">—</span>
+                      )}
+                    </DataField>
+                  </DataCard>
+                );
+              })}
+            </div>
+
+            <div className="hidden overflow-x-auto lg:block">
+              <table className="w-full">
+                <thead>
+                  <tr className="bg-cream-100/60">
+                    <th className="th">SKU</th>
+                    <th className="th">Item</th>
+                    <th className="th">Category</th>
+                    <th className="th">Location</th>
+                    <th className="th text-right">On hand</th>
+                    <th className="th text-right">Threshold</th>
+                    <th className="th">Expiry</th>
+                    <th className="th">Stock status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {shownItems.map((item) => {
+                    const status = stockStatus(item.quantity, item.low_stock_threshold);
+                    const days = daysUntil(item.expiration_date);
+                    return (
+                      <tr key={item.id} className="transition-colors hover:bg-cream-50">
+                        <td className="td font-mono text-xs text-cocoa-400">{item.sku}</td>
+                        <td className="td font-medium text-cocoa-800">{item.name}</td>
+                        <td className="td text-cocoa-500">{item.category?.name ?? "—"}</td>
+                        <td className="td text-cocoa-500">{item.location?.name ?? "—"}</td>
+                        <td className="td text-right tabular-nums">
+                          {fmtQty(item.quantity, item.unit)}
+                        </td>
+                        <td className="td text-right tabular-nums text-cocoa-500">
+                          {fmtQty(item.low_stock_threshold, item.unit)}
+                        </td>
+                        <td className="td whitespace-nowrap text-xs text-cocoa-500">
+                          {item.expiration_date ? (
+                            <>
+                              {fmtDate(item.expiration_date)}
+                              {days !== null && days < 0 && (
+                                <span className="text-terracotta-700"> (expired)</span>
+                              )}
+                            </>
+                          ) : (
+                            <span className="text-cocoa-200">—</span>
+                          )}
+                        </td>
+                        <td className="td">
+                          <Badge tone={status.tone} variant="tag">
+                            {status.label}
+                          </Badge>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+
+        <p className="border-t border-cream-200 bg-cream-50 px-4 py-2 text-[10px] text-cocoa-400">
+          Stock status reflects quantity only. Review expired items before use.
+        </p>
+      </Card>
+
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-cream-200 pt-3 text-[11px] text-cocoa-400">
+        <span>{filterDescription}</span>
+        <span>Stock status reflects quantity only · {businessName}</span>
+      </div>
+    </>
+  );
 
   if (!reportPreviewOpen) {
     return (
@@ -2646,7 +2218,7 @@ export default function ReportsPage() {
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <button className="btn-ghost hidden lg:inline-flex" onClick={load} disabled={loading}>
+            <button className="btn-ghost hidden lg:inline-flex" onClick={loadAll} disabled={loading}>
               {loading ? "Refreshing..." : "Reload"}
             </button>
             <button
@@ -2660,11 +2232,18 @@ export default function ReportsPage() {
             >
               Export Report
             </button>
+            <button
+              className="btn-ghost"
+              onClick={exportCsv}
+              disabled={items.length === 0 || loading}
+            >
+              Export CSV
+            </button>
           </div>
         </div>
 
         <Card>
-          <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-4">
+          <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-4 xl:grid-cols-6">
             <div>
               <label className="label" htmlFor="f-range">Date range</label>
               <select
@@ -2746,7 +2325,24 @@ export default function ReportsPage() {
                 ))}
               </select>
             </div>
-            {(rangeParams.from || rangeParams.to || staff || typeFilter || catFilter) && (
+            <div>
+              <label className="label" htmlFor="f-grouping">Grouping</label>
+              <select
+                id="f-grouping"
+                className="input w-full"
+                value={grouping}
+                onChange={(event) => setGrouping(event.target.value as Grouping)}
+              >
+                <option value="auto">Auto</option>
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+              </select>
+              <p className="mt-1 text-[11px] text-cocoa-400">
+                Grouping applies client-side; changing it costs no request.
+              </p>
+            </div>
+            {(rangeParams.from || rangeParams.to || staff || typeFilter || catFilter || grouping !== "auto") && (
               <div className="flex items-end">
                 <button
                   type="button"
@@ -2758,6 +2354,7 @@ export default function ReportsPage() {
                     setStaff("");
                     setTypeFilter("");
                     setCatFilter("");
+                    setGrouping("auto");
                   }}
                 >
                   Clear filters
@@ -2783,131 +2380,8 @@ export default function ReportsPage() {
           </div>
         )}
 
-        {loading ? <Spinner /> : (
-          <>
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-              {reportMetrics.map((metric) => (
-                <ReportMetricCard key={metric.label} metric={metric} />
-              ))}
-            </div>
+        {dashboard}
 
-            <div className="grid gap-3 xl:grid-cols-2">
-              <ReportPriceInsight
-                title="Total Revenue"
-                cents={financialSummary.revenueCents}
-                missingLines={financialSummary.unpricedRevenueLines}
-                missingItems={financialSummary.unpricedRevenueItems}
-                kind="revenue"
-                onAddPrices={() => setPriceEditorOpen(true)}
-              />
-              <ReportPriceInsight
-                title="Total Waste Cost"
-                cents={financialSummary.lossCents}
-                missingLines={financialSummary.unpricedLossLines}
-                missingItems={financialSummary.unpricedLossItems}
-                kind="waste"
-                onAddPrices={() => setPriceEditorOpen(true)}
-              />
-            </div>
-
-            <div className="grid gap-4 md:grid-cols-[1.55fr_1fr]">
-              <LineTrendChart
-                points={chartAnalytics.trendPoints}
-                periodLabel={chartAnalytics.periodLabel}
-                unpricedLines={
-                  financialSummary.unpricedRevenueLines + financialSummary.unpricedLossLines
-                }
-              />
-              <MovementActivityDonut movement={movement} />
-            </div>
-
-            <SoonestExpiries items={soonestExpiry} />
-
-            <Card className="!p-0">
-              <div className="flex items-center justify-between border-b border-cream-200 bg-cream-50 px-4 py-3">
-                <div>
-                  <h2 className="text-sm font-bold text-cocoa-800">On hand by item</h2>
-                  <p className="mt-1 text-xs text-cocoa-400">
-                    Complete inventory · quantities, reorder thresholds, and stock status
-                  </p>
-                </div>
-                <span className="text-[11px] text-cocoa-400">{shownItems.length} items</span>
-              </div>
-              {shownItems.length === 0 ? (
-                <Empty>{items.length === 0 ? "No items yet." : "No items in this category."}</Empty>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full min-w-[760px]">
-                    <thead>
-                      <tr className="bg-cream-100/60">
-                        <th className="th">SKU</th>
-                        <th className="th">Item</th>
-                        <th className="th">Category</th>
-                        <th className="th">Location</th>
-                        <th className="th text-right">On hand</th>
-                        <th className="th text-right">Threshold</th>
-                        <th className="th">Expiry</th>
-                        <th className="th">Stock status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {shownItems.map((item) => {
-                        const status = stockStatus(item.quantity, item.low_stock_threshold);
-                        const days = daysUntil(item.expiration_date);
-                        return (
-                          <tr key={item.id}>
-                            <td className="td font-mono text-[10px]">{item.sku}</td>
-                            <td className="td font-medium text-cocoa-800">{item.name}</td>
-                            <td className="td">{item.category?.name ?? "Uncategorized"}</td>
-                            <td className="td">{item.location?.name ?? "—"}</td>
-                            <td className="td text-right">{fmtQty(item.quantity, item.unit)}</td>
-                            <td className="td text-right">{fmtQty(item.low_stock_threshold, item.unit)}</td>
-                            <td className="td whitespace-nowrap">
-                              {item.expiration_date ? fmtDate(item.expiration_date) : "—"}
-                              {days !== null && days < 0 && (
-                                <span className="ml-1 text-terracotta-700">Expired</span>
-                              )}
-                            </td>
-                            <td className="td"><Badge tone={status.tone} variant="tag">{status.label}</Badge></td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-              <p className="border-t border-cream-200 bg-cream-50 px-4 py-2 text-[10px] text-cocoa-400">
-                Stock status reflects quantity only. Review expired items before use.
-              </p>
-            </Card>
-
-            <div className="grid gap-4 md:grid-cols-2">
-              <QuantityBarChart
-                title="Most wasted items"
-                description="Ranked by recorded waste quantity · mixed units"
-                entries={wasteByItem.map((item) => ({
-                  key: item.sku,
-                  name: item.name,
-                  quantity: item.qty,
-                  quantityLabel: fmtQty(item.qty, itemsBySku.get(item.sku)?.unit),
-                  detail: `SKU ${item.sku}`,
-                  events: item.count,
-                }))}
-                emptyMessage="No waste activity in this report."
-                color="#8b3a24"
-              />
-              <ActivityScatterPlot
-                points={chartAnalytics.scatterPoints}
-                periodLabel={movementPeriodLabel}
-              />
-            </div>
-
-            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-cream-200 pt-3 text-[11px] text-cocoa-400">
-              <span>{filterDescription}</span>
-              <span>Stock status reflects quantity only · {businessName}</span>
-            </div>
-          </>
-        )}
         <Toast
           message={toast?.msg ?? null}
           tone={toast?.tone}
@@ -2929,7 +2403,7 @@ export default function ReportsPage() {
           </p>
         </div>
         <div className="flex gap-2">
-          <button className="btn-ghost hidden lg:inline-flex" onClick={load}>
+          <button className="btn-ghost hidden lg:inline-flex" onClick={loadAll}>
             Reload
           </button>
           <button
@@ -3061,11 +2535,29 @@ export default function ReportsPage() {
             </select>
           </div>
 
+          <div>
+            <label className="label" htmlFor="f-grouping">
+              Grouping
+            </label>
+            <select
+              id="f-grouping"
+              className="input"
+              value={grouping}
+              onChange={(e) => setGrouping(e.target.value as Grouping)}
+            >
+              <option value="auto">Auto</option>
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
+            </select>
+          </div>
+
           {(rangeParams.from ||
             rangeParams.to ||
             staff ||
             typeFilter ||
-            catFilter) && (
+            catFilter ||
+            grouping !== "auto") && (
             <button
               className="btn-ghost"
               onClick={() => {
@@ -3075,6 +2567,7 @@ export default function ReportsPage() {
                 setStaff("");
                 setTypeFilter("");
                 setCatFilter("");
+                setGrouping("auto");
               }}
             >
               Clear filters
@@ -3100,289 +2593,7 @@ export default function ReportsPage() {
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Stat label="Items tracked" value={shownItems.length} />
-        <Stat label="Low Stock" value={low.length} tone="warn" />
-        <Stat label="Out of Stock" value={out.length} tone="danger" />
-        <Stat label="Movements in report" value={filteredTransactions.length} />
-      </div>
-
-      {loading ? (
-        <Spinner />
-      ) : (
-        <>
-          <section aria-labelledby="financial-summary-title" className="space-y-3">
-            <div>
-              <h2 id="financial-summary-title" className="text-base font-bold text-cocoa-800">
-                Revenue and loss
-              </h2>
-              <p className="mt-1 text-xs text-cocoa-400">
-                These estimates use each item&apos;s current Unit Price (stored as cost per
-                unit) for the selected date range; they are not historical sales receipts.
-              </p>
-            </div>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <Stat
-                label="Total revenue (estimate)"
-                value={formatPeso(financialSummary.revenueCents)}
-                hint="Checked-out quantity × current Unit Price"
-                tone="good"
-              />
-              <Stat
-                label="Total lost (waste cost)"
-                value={formatPeso(financialSummary.lossCents)}
-                hint="Wasted quantity × current Unit Price"
-                tone="danger"
-              />
-            </div>
-            {(financialSummary.unpricedRevenueLines > 0 ||
-              financialSummary.unpricedLossLines > 0) && (
-              <p className="rounded-xl bg-ochre-50 px-3.5 py-2.5 text-xs text-ochre-700">
-                Estimates exclude movements for items without a Unit Price
-                {financialSummary.unpricedRevenueLines > 0
-                  ? ` (${financialSummary.unpricedRevenueLines} checkout lines)`
-                  : ""}
-                {financialSummary.unpricedLossLines > 0
-                  ? ` (${financialSummary.unpricedLossLines} waste lines)`
-                  : ""}
-                .
-              </p>
-            )}
-            <div className="grid gap-4 xl:grid-cols-2">
-              <FinancialBreakdown
-                title="Revenue by item"
-                description="Checkout value by item. Select a slice to inspect its quantity and value."
-                entries={financialSummary.revenueItems}
-                totalCents={financialSummary.revenueCents}
-              />
-              <FinancialBreakdown
-                title="Lost value by item"
-                description="Waste cost by item. Select a slice to inspect its quantity and value."
-                entries={financialSummary.lossItems}
-                totalCents={financialSummary.lossCents}
-              />
-            </div>
-            <div className="grid gap-4 xl:grid-cols-2">
-              <LineTrendChart
-                points={chartAnalytics.trendPoints}
-                periodLabel={chartAnalytics.periodLabel}
-                unpricedLines={
-                  financialSummary.unpricedRevenueLines + financialSummary.unpricedLossLines
-                }
-              />
-              <TransactionHistogram bins={chartAnalytics.bins} />
-            </div>
-          </section>
-
-          <div className="grid gap-5 lg:grid-cols-2">
-            <MovementChart
-              movement={movement}
-              transactions={filteredTransactions}
-            />
-
-            <QuantityBarChart
-              title="Most checked out"
-              description="Top items by quantity checked out in this report."
-              entries={topMovers.map((item) => ({
-                key: item.sku,
-                name: item.name,
-                quantity: item.qty,
-                quantityLabel: fmtQty(item.qty, itemsBySku.get(item.sku)?.unit),
-                detail: `SKU ${item.sku}`,
-                events: item.events,
-              }))}
-              emptyMessage="No checkout activity yet."
-              color="#8d6040"
-            />
-          </div>
-
-          <ActivityScatterPlot
-            points={chartAnalytics.scatterPoints}
-            periodLabel={movementPeriodLabel}
-          />
-
-          <SoonestExpiries items={soonestExpiry} />
-
-          <Card className="!p-0">
-            <div className="flex items-center justify-between border-b border-cream-200 bg-cream-50 px-4 py-2.5">
-              <h2 className="text-sm font-bold text-cocoa-800">
-                On hand by item
-              </h2>
-              <span className="text-[11px] text-cocoa-400">
-                {shownItems.length} items
-              </span>
-            </div>
-
-            {shownItems.length === 0 ? (
-              <Empty>
-                {items.length === 0 ? "No items yet." : "No items in this category."}
-              </Empty>
-            ) : (
-              <>
-                <div className="space-y-2.5 pb-3 lg:hidden">
-                  {shownItems.map((i) => {
-                    const status = stockStatus(i.quantity, i.low_stock_threshold);
-                    const d = daysUntil(i.expiration_date);
-                    return (
-                      <DataCard key={i.id}>
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="font-semibold text-cocoa-800">
-                              {i.name}
-                            </div>
-                            <div className="font-mono text-xs text-cocoa-400">
-                              {i.sku}
-                            </div>
-                          </div>
-                          <Badge tone={status.tone} variant="tag">
-                            {status.label}
-                          </Badge>
-                        </div>
-
-                        <DataField label="On hand">
-                          {fmtQty(i.quantity, i.unit)}
-                        </DataField>
-                        <DataField label="Threshold">
-                          {fmtQty(i.low_stock_threshold, i.unit)}
-                        </DataField>
-                        <DataField label="Category">
-                          {i.category?.name ?? "—"}
-                        </DataField>
-                        <DataField label="Location">
-                          {i.location?.name ?? "—"}
-                        </DataField>
-                        <DataField label="Expiry">
-                          {i.expiration_date ? (
-                            <span className="text-xs">
-                              {fmtDate(i.expiration_date)}
-                              {d !== null && d < 0 && (
-                                <span className="text-terracotta-700"> (expired)</span>
-                              )}
-                            </span>
-                          ) : (
-                            <span className="text-cocoa-200">—</span>
-                          )}
-                        </DataField>
-                      </DataCard>
-                    );
-                  })}
-                </div>
-
-                <div className="hidden overflow-x-auto lg:block">
-                <table className="w-full">
-                  <thead>
-                    <tr className="bg-cream-100/60">
-                      <th className="th">SKU</th>
-                      <th className="th">Item</th>
-                      <th className="th">Category</th>
-                      <th className="th">Location</th>
-                      <th className="th text-right">On hand</th>
-                      <th className="th text-right">Threshold</th>
-                      <th className="th">Expiry</th>
-                      <th className="th">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {shownItems.map((i) => {
-                      const status = stockStatus(i.quantity, i.low_stock_threshold);
-                      const d = daysUntil(i.expiration_date);
-                      return (
-                        <tr
-                          key={i.id}
-                          className="transition-colors hover:bg-cream-50"
-                        >
-                          <td className="td font-mono text-xs text-cocoa-400">
-                            {i.sku}
-                          </td>
-                          <td className="td font-semibold text-cocoa-800">
-                            {i.name}
-                          </td>
-                          <td className="td text-cocoa-500">
-                            {i.category?.name ?? "—"}
-                          </td>
-                          <td className="td text-cocoa-500">
-                            {i.location?.name ?? "—"}
-                          </td>
-                          <td className="td text-right tabular-nums">
-                            {fmtQty(i.quantity, i.unit)}
-                          </td>
-                          <td className="td text-right tabular-nums text-cocoa-500">
-                            {fmtQty(i.low_stock_threshold, i.unit)}
-                          </td>
-                          <td className="td whitespace-nowrap text-xs text-cocoa-500">
-                            {i.expiration_date ? (
-                              <>
-                                {fmtDate(i.expiration_date)}
-                                {d !== null && d < 0 && (
-                                  <span className="text-terracotta-700">
-                                    {" "}
-                                    (expired)
-                                  </span>
-                                )}
-                              </>
-                            ) : (
-                              <span className="text-cocoa-200">—</span>
-                            )}
-                          </td>
-                          <td className="td">
-                            <Badge tone={status.tone} variant="tag">
-                              {status.label}
-                            </Badge>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              </>
-            )}
-          </Card>
-
-          {/* ---------- waste tracking ---------- */}
-          <div className="grid gap-5 lg:grid-cols-2">
-            <div className="space-y-4">
-              <Card className="!p-0">
-                <div className="border-b border-cream-200 bg-cream-50 px-4 py-2.5">
-                  <h2 className="text-sm font-bold text-cocoa-800">Waste Summary</h2>
-                </div>
-                <div className="grid grid-cols-2 gap-3 p-4">
-                  <Stat label="Total Waste" value={fmtQty(wasteTotal)} tone="danger" />
-                  <Stat label="Waste Events" value={wasteCount} tone="warn" />
-                </div>
-              </Card>
-              <QuantityBarChart
-                title="Waste events by category"
-                description="Number of waste item entries by category. Select a category to see its total quantity."
-                entries={wasteByCategory.map((category) => ({
-                  key: category.name,
-                  name: category.name,
-                  quantity: category.events,
-                  quantityLabel: `${category.events} ${category.events === 1 ? "entry" : "entries"}`,
-                  detail: `Total quantity: ${fmtQty(category.quantity)}`,
-                  events: category.events,
-                }))}
-                emptyMessage="No waste recorded yet."
-                color="#bd8c53"
-              />
-            </div>
-            <QuantityBarChart
-              title="Most wasted items"
-              description="Top items by quantity wasted. Select an item to see its SKU and event count."
-              entries={wasteByItem.map((item) => ({
-                key: item.sku,
-                name: item.name,
-                quantity: item.qty,
-                quantityLabel: fmtQty(item.qty, itemsBySku.get(item.sku)?.unit),
-                detail: `SKU ${item.sku}`,
-                events: item.count,
-              }))}
-              emptyMessage="No waste recorded yet."
-              color="#8b3a24"
-            />
-          </div>
-        </>
-      )}
+      {dashboard}
 
       {reportPreviewOpen && (
         <div
@@ -3464,114 +2675,12 @@ export default function ReportsPage() {
                   ))}
                 </div>
 
-                <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-                  {reportMetrics.map((metric) => (
-                    <ReportMetricCard key={metric.label} metric={metric} />
-                  ))}
-                </div>
+                {dashboard}
 
-                <div className="grid gap-3 md:grid-cols-2">
-                  <ReportPriceInsight
-                    title="Total Revenue"
-                    cents={financialSummary.revenueCents}
-                    missingLines={financialSummary.unpricedRevenueLines}
-                    missingItems={financialSummary.unpricedRevenueItems}
-                    kind="revenue"
-                    onAddPrices={() => setPriceEditorOpen(true)}
-                  />
-                  <ReportPriceInsight
-                    title="Total Waste Cost"
-                    cents={financialSummary.lossCents}
-                    missingLines={financialSummary.unpricedLossLines}
-                    missingItems={financialSummary.unpricedLossItems}
-                    kind="waste"
-                    onAddPrices={() => setPriceEditorOpen(true)}
-                  />
-                </div>
-
-                <div className="grid gap-3 xl:grid-cols-2">
-                  <LineTrendChart
-                    points={chartAnalytics.trendPoints}
-                    periodLabel={chartAnalytics.periodLabel}
-                    unpricedLines={
-                      financialSummary.unpricedRevenueLines + financialSummary.unpricedLossLines
-                    }
-                  />
-                  <MovementActivityDonut movement={movement} />
-                </div>
-
-                <SoonestExpiries items={soonestExpiry} />
-
-                <Card className="!p-0">
-                  <div className="flex items-center justify-between border-b border-cream-200 bg-cream-50 px-4 py-3">
-                    <div>
-                      <h4 className="text-sm font-bold text-cocoa-800">On hand by item</h4>
-                      <p className="mt-1 text-[11px] text-cocoa-400">Complete inventory · quantities, reorder thresholds, and stock status</p>
-                    </div>
-                    <span className="text-[11px] text-cocoa-400">{shownItems.length} items</span>
-                  </div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full min-w-[760px]">
-                      <thead>
-                        <tr className="bg-cream-100/60">
-                          <th className="th">SKU</th>
-                          <th className="th">Item</th>
-                          <th className="th">Category</th>
-                          <th className="th">Location</th>
-                          <th className="th text-right">On hand</th>
-                          <th className="th text-right">Threshold</th>
-                          <th className="th">Expiry</th>
-                          <th className="th">Stock status</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {shownItems.map((item) => {
-                          const status = stockStatus(item.quantity, item.low_stock_threshold);
-                          return (
-                            <tr key={item.id}>
-                              <td className="td font-mono text-[10px]">{item.sku}</td>
-                              <td className="td font-medium text-cocoa-800">{item.name}</td>
-                              <td className="td">{item.category?.name ?? "Uncategorized"}</td>
-                              <td className="td">{item.location?.name ?? "—"}</td>
-                              <td className="td text-right">{fmtQty(item.quantity, item.unit)}</td>
-                              <td className="td text-right">{fmtQty(item.low_stock_threshold, item.unit)}</td>
-                              <td className="td whitespace-nowrap">{item.expiration_date ? fmtDate(item.expiration_date) : "—"}</td>
-                              <td className="td"><Badge tone={status.tone} variant="tag">{status.label}</Badge></td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                  <p className="border-t border-cream-200 bg-cream-50 px-4 py-2 text-[10px] text-cocoa-400">
-                    Stock status reflects quantity only. Review expired items before use.
-                  </p>
-                </Card>
-
-                <div className="grid gap-3 xl:grid-cols-2">
-                  <QuantityBarChart
-                    title="Most wasted items"
-                    description="Ranked by recorded waste quantity · mixed units"
-                    entries={wasteByItem.map((item) => ({
-                      key: item.sku,
-                      name: item.name,
-                      quantity: item.qty,
-                      quantityLabel: fmtQty(item.qty, itemsBySku.get(item.sku)?.unit),
-                      detail: `SKU ${item.sku}`,
-                      events: item.count,
-                    }))}
-                    emptyMessage="No waste activity in this report."
-                    color="#8b3a24"
-                  />
-                  <ActivityScatterPlot
-                    points={chartAnalytics.scatterPoints}
-                    periodLabel={movementPeriodLabel}
-                  />
-                </div>
               </div>
             </div>
 
-            <footer className="border-t border-cream-200 bg-white px-4 py-3 sm:px-6">
+                        <footer className="border-t border-cream-200 bg-white px-4 py-3 sm:px-6">
               {exportError && (
                 <p role="alert" className="mb-3 rounded-lg bg-terracotta-50 px-3 py-2 text-sm text-terracotta-700">
                   {exportError}

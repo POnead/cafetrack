@@ -322,27 +322,6 @@ textarea:focus-visible {
   box-shadow: var(--shadow-card);
 }
 
-.report-reveal.is-visible .report-trend-line {
-  stroke-dasharray: 1;
-  stroke-dashoffset: 1;
-  animation: report-trend-draw 1.15s cubic-bezier(0.22, 1, 0.36, 1) 80ms forwards;
-}
-
-.report-reveal.is-visible .report-trend-area {
-  opacity: 0;
-  animation: report-area-reveal 0.8s ease-out 300ms forwards;
-}
-
-.report-reveal.is-visible .report-trend-dot {
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: report-dot-enter 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-.report-reveal.is-visible .report-donut-slice {
-  animation: report-donut-enter 0.65s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
 .report-reveal.is-visible .report-card-enter {
   animation: report-card-enter 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
@@ -351,44 +330,6 @@ textarea:focus-visible {
   transform: scaleX(0);
   transform-origin: left center;
   animation: report-bar-grow 0.65s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-.report-reveal.is-visible .report-bar-rise {
-  transform: scaleY(0);
-  transform-origin: center bottom;
-  animation: report-bar-rise 0.65s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-@keyframes report-trend-draw {
-  to {
-    stroke-dashoffset: 0;
-  }
-}
-
-@keyframes report-dot-enter {
-  from {
-    opacity: 0;
-    transform: scale(0.25);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
-@keyframes report-area-reveal {
-  to {
-    opacity: 1;
-  }
-}
-
-@keyframes report-donut-enter {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
 }
 
 @keyframes report-card-enter {
@@ -405,12 +346,6 @@ textarea:focus-visible {
 @keyframes report-bar-grow {
   to {
     transform: scaleX(1);
-  }
-}
-
-@keyframes report-bar-rise {
-  to {
-    transform: scaleY(1);
   }
 }
 
@@ -431,36 +366,16 @@ textarea:focus-visible {
     opacity: 0;
   }
 
-  .report-reveal.is-visible .report-trend-line,
-  .report-reveal.is-visible .report-trend-area,
-  .report-reveal.is-visible .report-trend-dot,
-  .report-reveal.is-visible .report-donut-slice,
   .report-reveal.is-visible .report-card-enter,
-  .report-reveal.is-visible .report-bar-grow,
-  .report-reveal.is-visible .report-bar-rise {
+  .report-reveal.is-visible .report-bar-grow {
     animation: none;
   }
 
-  .report-reveal.is-visible .report-trend-line {
-    stroke-dashoffset: 0;
-  }
-
-  .report-reveal.is-visible .report-trend-area,
   .report-reveal.is-visible .report-card-enter {
     opacity: 1;
   }
 
-  .report-reveal.is-visible .report-trend-dot {
-    opacity: 1;
-    transform: none;
-  }
-
-  .report-reveal.is-visible .report-donut-slice {
-    opacity: 1;
-  }
-
-  .report-reveal.is-visible .report-bar-grow,
-  .report-reveal.is-visible .report-bar-rise {
+  .report-reveal.is-visible .report-bar-grow {
     transform: none;
   }
 }

@@ -4,6 +4,33 @@ export function fmtQty(n: number | string, unit?: string): string {
   return unit ? `${s} ${unit}` : s;
 }
 
+/** Peso, in full. `₱1,234.56`. */
+export function formatPeso(cents: number): string {
+  return new Intl.NumberFormat("en-PH", {
+    style: "currency",
+    currency: "PHP",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(cents / 100);
+}
+
+/**
+ * Peso, shortened for an axis. `₱12.4k`.
+ *
+ * An axis tick has room for a handful of characters, not for `₱12,345.67` —
+ * and a chart of peso values is read by its shape, not by its exact tick
+ * text. The exact figure is in the tooltip.
+ */
+export function formatPesoCompact(cents: number): string {
+  const pesos = cents / 100;
+  const abs = Math.abs(pesos);
+  if (abs >= 1_000_000) return `₱${(pesos / 1_000_000).toFixed(1)}M`;
+  if (abs >= 1_000) {
+    return `₱${(pesos / 1_000).toFixed(abs >= 10_000 ? 0 : 1)}k`;
+  }
+  return `₱${Math.round(pesos).toLocaleString("en-PH")}`;
+}
+
 export function fmtDate(d: string | null | undefined): string {
   if (!d) return "—";
   return new Date(d).toLocaleDateString("en-PH", {
