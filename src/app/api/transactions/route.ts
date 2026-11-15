@@ -492,6 +492,7 @@ export const POST = handler(async (req: Request) => {
   // it before telling clients to refresh; otherwise the dashboard would refetch
   // and be handed the pre-movement numbers for up to the cache TTL.
   memoClear("analytics:");
+  memoClear("inventory:history:raw:");
 
   // Fire-and-forget: emit real-time event so connected clients update instantly.
   // We don't await this — a slow connection must not hold up the till.

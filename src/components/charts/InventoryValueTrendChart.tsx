@@ -74,6 +74,8 @@ export function InventoryValueTrendChart({
   const points = bucketed.points;
   const valuation = data?.valuation;
   const coverage = data?.coverage;
+  const requested = data?.requested;
+  const completeness = coverage?.completeness;
 
   const emptyMessage =
     valuation && valuation.itemsInScope === 0
@@ -113,12 +115,18 @@ export function InventoryValueTrendChart({
           These differences may indicate manual stock corrections.
         </p>
       )}
-      {coverage?.truncated && (
+      {coverage && completeness !== "complete" && (
         <p className="font-semibold text-ochre-700">
-          Movement history is incomplete. Only the most recent{" "}
-          {coverage.cap.toLocaleString("en-PH")} movements were scanned.
-          Historical stock levels before the earliest available movement cannot
-          be verified.
+          {completeness === "truncated"
+            ? `Movement history is incomplete. Only the most recent ${coverage.cap.toLocaleString("en-PH")} movements were scanned. Historical stock levels before the earliest available movement cannot be verified.`
+            : "Movement history could not be verified in full. The scan reached its limit and the follow-up check could not confirm whether older movements exist."}
+          {requested?.rangeShortened && requested.effectiveFrom && (
+            <span className="block text-ochre-800">
+              The requested range was shortened to start on{" "}
+              {formatDay(requested.effectiveFrom)} because movement history
+              before that date could not be verified.
+            </span>
+          )}
           {coverage.historyFrom && (
             <span className="block text-ochre-800">
               Coverage: {formatDay(coverage.historyFrom.slice(0, 10))} –{" "}
@@ -137,8 +145,10 @@ export function InventoryValueTrendChart({
       title="Inventory value over time"
       description="On-hand quantities reconstructed from recorded movements, valued at current unit prices."
       badge={
-        coverage?.truncated ? (
-          <Badge tone="amber" variant="tag">Incomplete history</Badge>
+        coverage && completeness !== "complete" ? (
+          <Badge tone="amber" variant="tag">
+            {completeness === "truncated" ? "Incomplete history" : "History unverified"}
+          </Badge>
         ) : (
           <Badge tone="slate" variant="tag" dot={false}>
             {GROUPING_LABEL[bucketed.effective]}

@@ -72,6 +72,7 @@ export const POST = handler(async (req: Request) => {
   });
   eventBus.emit(Events.ALERTS_CHANGED, { type: "recomputed", count: 0 });
   memoClear("analytics:");
+  memoClear("inventory:history:raw:");
 
   // A freshly approved item may deserve an email if it is already low or
   // near-expiry; this is the moment those alerts get raised.

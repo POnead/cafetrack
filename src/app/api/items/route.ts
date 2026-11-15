@@ -310,6 +310,7 @@ export const POST = handler(async (req: Request) => {
   // Fire-and-forget, like the transaction route: a slow subscriber must not hold
   // up the person who is trying to save an ingredient.
   memoClear("analytics:");
+  memoClear("inventory:history:raw:");
   eventBus.emit(Events.ITEMS_CHANGED, {
     action: "create",
     sku,

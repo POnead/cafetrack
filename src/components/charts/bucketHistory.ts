@@ -72,11 +72,19 @@ export function bucketHistoryPoints(
   const target: HistoryGranularity =
     grouping === "daily" ? "day" : grouping === "weekly" ? "week" : "month";
 
-  if (ORDER[granularity] <= ORDER[target]) {
-    // The server series is at least as fine as the requested grouping:
-    // regroup it, keeping each period's end value and its min/max.
+  if (ORDER[granularity] === ORDER[target]) {
+    // The requested grouping is exactly the series the server produced:
+    // pass it through. Regrouping days would bucket them by month.
+    return { points, effective: granularity };
+  }
+  if (ORDER[granularity] < ORDER[target]) {
+    // The server series is finer than the requested grouping: regroup it,
+    // keeping each period's end value and its known min/max.
     return { points: regroup(points, target as "week" | "month"), effective: target };
   }
+  // The server coarsened below the requested grouping: it cannot recover a
+  // finer series that was never returned, so the coarser one is kept and the
+  // badge says so.
   return { points, effective: granularity };
 }
 
@@ -95,11 +103,14 @@ function regroup(
   return [...buckets.values()].map((bucket) => {
     const first = bucket[0];
     const last = bucket[bucket.length - 1];
+    // Carry the known range of every included point, not just their endpoint
+    // values: a daily series regrouped to monthly has a min/max per day, and
+    // the monthly tooltip must show the lowest low and the highest high.
     let minCents = Infinity;
     let maxCents = -Infinity;
     for (const point of bucket) {
-      if (point.valueCents < minCents) minCents = point.valueCents;
-      if (point.valueCents > maxCents) maxCents = point.valueCents;
+      if (point.minCents < minCents) minCents = point.minCents;
+      if (point.maxCents > maxCents) maxCents = point.maxCents;
     }
     return {
       day: last.day,

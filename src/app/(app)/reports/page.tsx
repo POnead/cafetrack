@@ -1006,6 +1006,10 @@ export default function ReportsPage() {
   }
 
   async function loadInventoryHistory() {
+    // Mark the request in flight before anything else: a pending response must
+    // never leave last filter's chart on screen looking current, and the
+    // filter-change effect must not need to flip the flag itself.
+    setHistoryLoading(true);
     historyController.current?.abort();
     const controller = new AbortController();
     historyController.current = controller;

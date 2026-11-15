@@ -256,6 +256,56 @@ async function main() {
   );
   check("invalid history date range -> 400", res.status === 400, `got ${res.status}`);
 
+  section("inventory history cache");
+  // Prime the history scan, then prove a stock movement invalidates it rather
+  // than waiting out the 15-second TTL.
+  res = await call("GET", "/api/inventory-history");
+  const primedMovements = res.data?.coverage?.movementsScanned;
+  const primedPriced = res.data?.valuation?.pricedItems;
+  check(
+    "GET /api/inventory-history primes the scan",
+    res.status === 200 && typeof primedMovements === "number" && typeof primedPriced === "number",
+    `movementsScanned ${primedMovements} pricedItems ${primedPriced}`
+  );
+
+  res = await call("POST", "/api/transactions", {
+    type: "restock",
+    password: ADMIN.password,
+    note: "cache invalidation check",
+    items: [{ sku: newItem?.sku, qty: 1 }],
+  });
+  check(
+    "cache-check restock -> 201",
+    res.status === 201,
+    `after=${res.data?.result?.items?.[0]?.after}`
+  );
+
+  res = await call("GET", "/api/inventory-history");
+  check(
+    "a successful stock movement invalidated the inventory history scan",
+    res.status === 200 &&
+      res.data?.coverage?.movementsScanned === primedMovements + 1,
+    `before ${primedMovements} after ${res.data?.coverage?.movementsScanned}`
+  );
+
+  // newItem carries no price yet, so setting one must move the priced-item
+  // count. If the PATCH did not invalidate the scan, the stale cache would
+  // report the old count.
+  res = await call("PATCH", `/api/items/${newItem?.id}`, { unit_price: 111 });
+  check(
+    "price patch for cache check -> 200",
+    res.status === 200 && Number(res.data?.item?.unit_price) === 111,
+    `got ${res.status} ${res.data?.item?.unit_price ?? ""}`
+  );
+
+  res = await call("GET", "/api/inventory-history");
+  check(
+    "a successful price update invalidated the inventory history scan",
+    res.status === 200 &&
+      res.data?.valuation?.pricedItems === primedPriced + 1,
+    `before ${primedPriced} after ${res.data?.valuation?.pricedItems}`
+  );
+
   section("alerts");
   res = await call("POST", "/api/alerts");
   check("POST /api/alerts (recompute) -> 200", res.status === 200);

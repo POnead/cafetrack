@@ -381,6 +381,7 @@ export const PATCH = handler(
     eventBus.emit(Events.ITEMS_CHANGED, { action: "update", sku: data.sku });
     eventBus.emit(Events.ALERTS_CHANGED, { type: "recomputed", count: 0 });
     memoClear("analytics:");
+    memoClear("inventory:history:raw:");
 
     return ok({ item: data });
   }
@@ -484,6 +485,7 @@ export const DELETE = handler(
     eventBus.emit(Events.ITEMS_CHANGED, { action: "delete", sku: item.sku });
     eventBus.emit(Events.ALERTS_CHANGED, { type: "recomputed", count: 0 });
     memoClear("analytics:");
+    memoClear("inventory:history:raw:");
 
     return ok({ ok: true });
   }

@@ -52,6 +52,7 @@ export const POST = handler(async (req: Request) => {
   });
   eventBus.emit(Events.ALERTS_CHANGED, { type: "recomputed", count: 0 });
   memoClear("analytics:");
+  memoClear("inventory:history:raw:");
 
   return ok({
     request: data,
