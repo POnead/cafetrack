@@ -89,9 +89,9 @@ if (process.env.NODE_ENV !== "production") {
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  experimental: {
-    turbopackFileSystemCacheForDev: false,
-  },
+  // `turbopackFileSystemCacheForDev` is deliberately absent: Next 16 enables
+  // the dev filesystem cache by default, so restarts reuse the previous
+  // compilation. Setting it to false used to turn that off.
   // PGlite ships PostgreSQL compiled to WebAssembly, and pdfkit loads its font
   // metrics from `data/*.afm` on disk at runtime. Neither survives being
   // bundled: PGlite's WASM breaks, and pdfkit resolves its data directory
@@ -162,7 +162,21 @@ const nextConfig = {
       });
     }
 
-    return [{ source: "/(.*)", headers }];
+    // Static assets the app ships: the self-hosted brand artwork and the face
+    // engine weights. They change only when an admin re-runs a setup script,
+    // so a week of browser caching is safe and keeps phones on the till from
+    // re-downloading megabytes of model files on every visit.
+    const staticAssetHeaders = [
+      { key: "Cache-Control", value: "public, max-age=604800" },
+    ];
+
+    return [
+      { source: "/(.*)", headers },
+      { source: "/brand/:path*", headers: staticAssetHeaders },
+      { source: "/models/:path*", headers: staticAssetHeaders },
+      { source: "/onnx/:path*", headers: staticAssetHeaders },
+      { source: "/mediapipe/:path*", headers: staticAssetHeaders },
+    ];
   },
   // Development only — `next build` ignores it. See the note above.
   allowedDevOrigins,

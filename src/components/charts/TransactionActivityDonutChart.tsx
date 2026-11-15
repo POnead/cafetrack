@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 import { ChartCard } from "./ChartCard";
 import { ChartTooltip } from "./ChartTooltip";
-import { CHART_COLORS, formatCount } from "./theme";
+import { ACTIVITY_COLORS, CHART_COLORS, formatCount } from "./theme";
 import type { ActivitySlice } from "./types";
 
 /**
@@ -130,10 +130,3 @@ export function TransactionActivityDonutChart({
     </ChartCard>
   );
 }
-
-/** The colour a kind of movement is drawn in. */
-export const ACTIVITY_COLORS: Record<string, string> = {
-  checkout: CHART_COLORS.revenue,
-  restock: CHART_COLORS.normal,
-  waste: CHART_COLORS.stockOut,
-};

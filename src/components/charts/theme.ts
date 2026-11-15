@@ -59,6 +59,13 @@ export function formatCount(value: number): string {
   return Math.round(value).toLocaleString("en-PH");
 }
 
+/** The colour a kind of movement is drawn in. */
+export const ACTIVITY_COLORS: Record<string, string> = {
+  checkout: CHART_COLORS.revenue,
+  restock: CHART_COLORS.normal,
+  waste: CHART_COLORS.stockOut,
+};
+
 /**
  * A count or an amount with its unit, for a tooltip row.
  *

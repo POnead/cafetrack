@@ -41,6 +41,25 @@ export const metadata: Metadata = {
   description: "CafeTrack inventory operations for cafe teams",
 };
 
+/*
+ * Every page in this app is dynamic.
+ *
+ * The proxy stamps a per-request CSP nonce into Next's inline bootstrap
+ * scripts (next.config.mjs deliberately keeps the policy in proxy.ts). A
+ * page prerendered at build time cannot carry a per-request nonce — its
+ * scripts are stamped at build time, or not at all — so the browser refuses
+ * to run any of them and the page ships a shell of dead controls. /login was
+ * prerendered and its sign-in form never hydrated: fully rendered, entirely
+ * unusable. A dynamic render stamps the nonce at request time and the scripts
+ * run. The (app) layout reached the same conclusion for the same reason;
+ * this makes it the rule for every route, including /login, /verify and
+ * /_not-found. On a LAN install the cost of a server render is nothing.
+ *
+ * CAFETRACK_CSP_LEGACY=1 remains the escape hatch for a deployment that must
+ * keep a browser alive without nonce support.
+ */
+export const dynamic = "force-dynamic";
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html

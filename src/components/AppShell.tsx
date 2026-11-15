@@ -82,9 +82,12 @@ export function AppShell({
     }
   }, [user.role]);
 
+  // Mount, window focus, and an explicit settings-updated event — not every
+  // navigation. The two requests behind this were firing on every page change,
+  // which is the same data the till almost never *needs* twice in a step.
   useEffect(() => {
     void loadAdminWarnings();
-  }, [loadAdminWarnings, pathname]);
+  }, [loadAdminWarnings]);
 
   useEffect(() => {
     if (user.role !== "admin") return;

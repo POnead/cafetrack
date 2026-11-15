@@ -91,7 +91,6 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [checkingSession, setCheckingSession] = useState(true);
   const [recoveryRequestBusy, setRecoveryRequestBusy] = useState(false);
   const [sessionConflict, setSessionConflict] = useState(false);
   const [conflictRedirecting, setConflictRedirecting] = useState(false);
@@ -111,21 +110,22 @@ export default function LoginPage() {
   const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
   const [resendSeconds, setResendSeconds] = useState(0);
 
+  // A signed-in person reaching the sign-in screen is bounced to the dashboard.
+  // The check runs quietly in the background instead of gating the form behind
+  // a round trip: most visitors to this page are not signed in, and making
+  // them wait on a network call just to see the fields is slower than the
+  // odd flash of a form that is about to be replaced.
   useEffect(() => {
     let active = true;
     void fetch("/api/auth/me?session_check=1&login_check=1", { cache: "no-store" })
-      .then(async (response) => {
-        const data = await response.json();
-        if (!active) return;
-        if (response.ok && data.authenticated === true) {
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        if (active && data?.authenticated === true) {
           router.replace("/dashboard");
-        } else {
-          setCheckingSession(false);
         }
       })
       .catch(() => {
         // Login remains available when the session preflight cannot reach the server.
-        if (active) setCheckingSession(false);
       });
 
     return () => {
@@ -391,20 +391,6 @@ export default function LoginPage() {
     }
   }
 
-  if (checkingSession) {
-    return (
-      <main className="grid min-h-dvh place-items-center bg-[#f6f1e8]">
-        <p role="status" className="flex items-center gap-3 text-sm font-medium text-cocoa-700">
-          <span
-            aria-hidden="true"
-            className="h-4 w-4 animate-spin rounded-full border-2 border-cocoa-300 border-t-cocoa-800"
-          />
-          Checking your session…
-        </p>
-      </main>
-    );
-  }
-
   return (
     <main className="min-h-dvh bg-[#f6f1e8] lg:grid lg:h-dvh lg:grid-cols-2 lg:overflow-hidden">
       <section className="relative z-0 hidden min-h-0 flex-col overflow-hidden bg-[#241811] px-9 py-8 text-cream-50 [@media(max-height:700px)]:py-4 lg:flex xl:px-14 xl:py-10 2xl:px-20">
@@ -440,7 +426,7 @@ export default function LoginPage() {
               className="pointer-events-none absolute inset-x-8 bottom-8 h-3/4 rounded-full bg-[#c89554]/10 blur-3xl"
             />
             <Image
-              src="/brand/merrylane-cafe-login.png"
+              src="/brand/merrylane-cafe-login.webp"
               alt="Illustration of the Merrylane Cafe dining room"
               width={874}
               height={597}

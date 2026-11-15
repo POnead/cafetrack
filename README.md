@@ -105,6 +105,19 @@ fallback when a label is damaged.
 [cafetrack] open on a phone/tablet at http://192.168.1.7:3100
 ```
 
+> **`npm run dev` is for development.** It compiles each route on first visit and
+> serves unminified JavaScript, which makes the app noticeably slower — especially
+> on a phone over Wi-Fi. For everyday use (including from other devices in the
+> café), run the production build instead:
+>
+> ```bash
+> npm run build
+> npm start          # serves the same app on :3100, port pinned in package.json
+> ```
+>
+> Re-run `npm run build` after pulling updates. Use `npm run dev` only when you
+> are changing the code.
+
 The phone has to be on the **same Wi-Fi** as this machine. Then browse to that
 address — or to `http://mypc.local:3100`, which survives the router handing out
 a different address.

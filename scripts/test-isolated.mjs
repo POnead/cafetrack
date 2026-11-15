@@ -44,6 +44,10 @@ if (PORT === 3100) {
 const SUITES = [
   ["test:inventory-history", "_ts-node.mjs", "_inventory-history-tests.mjs"],
   ["test:day-boundaries", "_ts-node.mjs", "_day-boundary-tests.mjs"],
+  ["test:export-caps", "_ts-node.mjs", "_export-cap-tests.mjs"],
+  ["test:pagination", "_ts-node.mjs", "_catalogue-pagination-tests.mjs"],
+  ["test:report-preview", "_ts-node.mjs", "_report-preview-tests.mjs"],
+  ["test:report-preview-e2e", "_report-preview-e2e.mjs"],
   ["test:edge", "_edge-tests.mjs"],
   ["test:id", "_id-verification-tests.mjs"],
   ["test:angles", "_face-angles-tests.mjs"],

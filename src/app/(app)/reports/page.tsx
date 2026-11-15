@@ -21,30 +21,70 @@ import {
   useDialogFocusTrap,
 } from "@/components/ui";
 import { fmtQty, fmtDate, daysUntil, toCsv, formatPeso } from "@/lib/format";
+import { exportCompletenessLabel } from "@/lib/export-completeness";
+import { createCatalogueLoader } from "@/lib/catalogue-pagination";
 import { stockStatus } from "@/lib/status";
 import { TRANSACTION_NOTE_SCHEMA_WARNING } from "@/lib/transaction-note-schema";
 import { usePullToRefresh } from "@/lib/use-pull-to-refresh";
+import dynamic from "next/dynamic";
 import {
   localDayBoundsIso,
   resolvedTimeZone,
 } from "@/lib/zoned-time";
-import { InventoryValueTrendChart } from "@/components/charts/InventoryValueTrendChart";
-import { StockMovementChart } from "@/components/charts/StockMovementChart";
-import { ValueTrendChart } from "@/components/charts/ValueTrendChart";
-import { TransactionHistogramChart } from "@/components/charts/TransactionHistogramChart";
-import { StockByCategoryChart } from "@/components/charts/StockByCategoryChart";
-import {
-  StockStatusDonutChart,
-} from "@/components/charts/StockStatusDonutChart";
-import { TopItemsBarChart } from "@/components/charts/TopItemsBarChart";
-import { ValueBreakdownChart } from "@/components/charts/ValueBreakdownChart";
-import {
-  TransactionActivityDonutChart,
-  ACTIVITY_COLORS,
-} from "@/components/charts/TransactionActivityDonutChart";
-import { MovementActivityChart } from "@/components/charts/MovementActivityChart";
-import { ActivityScatterChart } from "@/components/charts/ActivityScatterChart";
-import { CHART_COLORS } from "@/components/charts/theme";
+import { CHART_COLORS, ACTIVITY_COLORS } from "@/components/charts/theme";
+
+/*
+ * The charts are loaded on demand rather than shipped with the page.
+ *
+ * They all sit on recharts, which is several hundred kilobytes of JavaScript,
+ * and the page renders long before a chart is scrolled into view — printing
+ * a report or changing the date range should not wait on a charting library.
+ * Each one is its own chunk, fetched the first time it mounts.
+ */
+const InventoryValueTrendChart = dynamic(
+  () => import("@/components/charts/InventoryValueTrendChart").then((m) => m.InventoryValueTrendChart),
+  { ssr: false },
+);
+const StockMovementChart = dynamic(
+  () => import("@/components/charts/StockMovementChart").then((m) => m.StockMovementChart),
+  { ssr: false },
+);
+const ValueTrendChart = dynamic(
+  () => import("@/components/charts/ValueTrendChart").then((m) => m.ValueTrendChart),
+  { ssr: false },
+);
+const TransactionHistogramChart = dynamic(
+  () => import("@/components/charts/TransactionHistogramChart").then((m) => m.TransactionHistogramChart),
+  { ssr: false },
+);
+const StockByCategoryChart = dynamic(
+  () => import("@/components/charts/StockByCategoryChart").then((m) => m.StockByCategoryChart),
+  { ssr: false },
+);
+const StockStatusDonutChart = dynamic(
+  () => import("@/components/charts/StockStatusDonutChart").then((m) => m.StockStatusDonutChart),
+  { ssr: false },
+);
+const TopItemsBarChart = dynamic(
+  () => import("@/components/charts/TopItemsBarChart").then((m) => m.TopItemsBarChart),
+  { ssr: false },
+);
+const ValueBreakdownChart = dynamic(
+  () => import("@/components/charts/ValueBreakdownChart").then((m) => m.ValueBreakdownChart),
+  { ssr: false },
+);
+const TransactionActivityDonutChart = dynamic(
+  () => import("@/components/charts/TransactionActivityDonutChart").then((m) => m.TransactionActivityDonutChart),
+  { ssr: false },
+);
+const MovementActivityChart = dynamic(
+  () => import("@/components/charts/MovementActivityChart").then((m) => m.MovementActivityChart),
+  { ssr: false },
+);
+const ActivityScatterChart = dynamic(
+  () => import("@/components/charts/ActivityScatterChart").then((m) => m.ActivityScatterChart),
+  { ssr: false },
+);
 import type {
   MovementDatum,
   HistogramDatum,
@@ -905,6 +945,7 @@ export default function ReportsPage() {
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [itemsError, setItemsError] = useState<string | null>(null);
   const [transactionNotesAvailable, setTransactionNotesAvailable] = useState(true);
   const [toast, setToast] = useState<{
     msg: string;
@@ -936,8 +977,6 @@ export default function ReportsPage() {
   const loadController = useRef<AbortController | null>(null);
   const historySequence = useRef(0);
   const historyController = useRef<AbortController | null>(null);
-  const itemsSequence = useRef(0);
-  const itemsController = useRef<AbortController | null>(null);
   const previewPanelRef = useRef<HTMLElement | null>(null);
   useDialogFocusTrap(previewPanelRef, reportPreviewOpen);
   const columnsTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -1029,121 +1068,45 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
    *
    * One `/api/items` call truncates at the API's default limit, so every
    * previous version of this page quietly computed the inventory report from
-   * part of the catalogue. The loop pages with `limit=500` until the API
+   * part of the catalogue. The loader pages with `limit=500` until the API
    * says there is no more, and refuses to render a partial catalogue as if it
    * were the full one:
    *
    *   - an empty page while `has_more` is true aborts;
-   *   - inconsistent pagination metadata (wrong `returned`, an offset that
-   *     does not advance, or `has_more` past the reported total) aborts;
-   *   - a page cap bounds the loop even if the API were to contradict
-   *     itself forever.
+   *   - `returned`, `limit`, `offset` and `total` must be genuine JSON
+   *     integers (`has_more` a genuine boolean), `returned` must equal the
+   *     items array it describes, and the metadata must agree with itself
+   *     and with the requested page — anything else aborts;
+   *   - a catalogue still reporting another page after 40 pages aborts.
    *
-   * On any inconsistency, or a failed page, the catalogue is emptied and the
-   * error is shown — the KPIs, charts, expiries and the On-hand table all
-   * read from `items`, so none of them can present a fraction as the whole.
+   * The loader itself lives in @/lib/catalogue-pagination and is independent
+   * of React. On any inconsistency, or a failed page, the catalogue is
+   * emptied and the error is shown — the KPIs, charts, expiries and the
+   * On-hand table all read from `items`, so none of them can present a
+   * fraction as the whole.
    */
-  const ITEM_PAGE_SIZE = 500;
-  const MAX_ITEM_PAGES = 40;
-
-  async function loadItems() {
-    itemsController.current?.abort();
-    const controller = new AbortController();
-    itemsController.current = controller;
-    const requestId = ++itemsSequence.current;
-    setItemsLoading(true);
-    try {
-      const collected: Item[] = [];
-      let offset = 0;
-      let complete = false;
-      let seenTotal: number | null = null;
-
-      for (let page = 0; page < MAX_ITEM_PAGES; page += 1) {
-        if (requestId !== itemsSequence.current) return;
-
-        const response = await fetch(
-          `/api/items?limit=${ITEM_PAGE_SIZE}&offset=${offset}`,
-          { signal: controller.signal }
+  const [catalogueLoader] = useState(() =>
+    createCatalogueLoader<Item>({
+      onStart: () => setItemsLoading(true),
+      onSuccess: (loaded) => {
+        setItems(loaded);
+        // A dedicated slot: the transactions loader's success path clears
+        // the shared `error` state, and it must not be able to erase this.
+        setItemsError(null);
+      },
+      onError: () => {
+        // Never render a partial catalogue as the full report.
+        setItems([]);
+        setItemsError(
+          "Could not load the full item catalogue. The inventory report is shown empty rather than incomplete."
         );
-        const data = await response.json().catch(() => ({}));
-        if (requestId !== itemsSequence.current) return;
-        if (!response.ok || data.error) {
-          throw new Error(data.error || "Could not load the inventory");
-        }
+      },
+      onDone: () => setItemsLoading(false),
+    })
+  );
 
-        const pageItems: Item[] = Array.isArray(data.items) ? data.items : [];
-        const returned = Number(data.returned ?? pageItems.length);
-        const respOffset = Number(data.offset);
-        const respLimit = Number(data.limit);
-        const total = Number(data.total);
-        const hasMore = Boolean(data.has_more);
-
-        // Strict metadata validation: never silently accept contradictory
-        // pagination metadata.
-        if (!Number.isFinite(returned) || returned !== pageItems.length) {
-          throw new Error("The item catalogue response is inconsistent");
-        }
-        if (returned > ITEM_PAGE_SIZE) {
-          throw new Error("The item catalogue response is inconsistent");
-        }
-        if (!Number.isFinite(respOffset) || respOffset !== offset) {
-          throw new Error("The item catalogue response offset is incorrect");
-        }
-        if (!Number.isFinite(respLimit) || respLimit !== ITEM_PAGE_SIZE) {
-          throw new Error("The item catalogue response limit is incorrect");
-        }
-        if (!Number.isFinite(total) || total < 0) {
-          throw new Error("The item catalogue total is invalid");
-        }
-        if (offset + returned > total) {
-          throw new Error("The item catalogue pagination metadata is inconsistent");
-        }
-        if (hasMore && offset + returned >= total) {
-          throw new Error("The item catalogue pagination metadata is inconsistent");
-        }
-        if (!hasMore && offset + returned < total) {
-          throw new Error("The item catalogue pagination metadata is inconsistent");
-        }
-        if (hasMore && pageItems.length === 0) {
-          throw new Error("The item catalogue pagination stalled");
-        }
-        if (seenTotal !== null && total !== seenTotal) {
-          throw new Error("The item catalogue pagination metadata is inconsistent");
-        }
-        if (seenTotal === null) seenTotal = total;
-
-        const nextOffset = offset + returned;
-        if (hasMore && !(nextOffset > offset)) {
-          throw new Error("The item catalogue pagination did not advance");
-        }
-
-        collected.push(...pageItems);
-
-        if (!hasMore) {
-          complete = true;
-          break;
-        }
-        offset = nextOffset;
-      }
-
-      if (requestId !== itemsSequence.current) return;
-      if (!complete) {
-        throw new Error("The item catalogue pagination exceeded the 40-page maximum");
-      }
-      setItems(collected);
-      setError(null);
-    } catch (e) {
-      if (controller.signal.aborted) return;
-      if (requestId !== itemsSequence.current) return;
-      // Never render a partial catalogue as the full report.
-      setItems([]);
-      setError("Could not load the full item catalogue. The inventory report is shown empty rather than incomplete.");
-    } finally {
-      if (requestId === itemsSequence.current) {
-        if (itemsController.current === controller) itemsController.current = null;
-        setItemsLoading(false);
-      }
-    }
+  function loadItems() {
+    catalogueLoader.load();
   }
 
   // Advisory reads — a failure here leaves sensible defaults, not an alert.
@@ -2647,6 +2610,11 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
 
   const alerts = (
     <>
+      {itemsError && (
+        <div role="alert" className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
+          {itemsError}
+        </div>
+      )}
       {error && (
         <div role="alert" className="rounded-xl bg-terracotta-50 px-3.5 py-2.5 text-sm text-terracotta-700">
           {error}
@@ -3494,9 +3462,9 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
                       <p>
                         Catalogue items:{" "}
                         <strong>
-                          {reportPreviewCompleteness.completeness.items === "complete"
-                            ? "Complete"
-                            : "Truncated"}
+                          {exportCompletenessLabel(
+                            reportPreviewCompleteness.completeness.items
+                          )}
                         </strong>{" "}
                         ({reportPreviewCompleteness.completeness.itemsScanned.toLocaleString("en-PH")} scanned of cap{" "}
                         {reportPreviewCompleteness.completeness.itemCap.toLocaleString("en-PH")})
@@ -3504,9 +3472,9 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
                       <p>
                         Transactions:{" "}
                         <strong>
-                          {reportPreviewCompleteness.completeness.movements === "complete"
-                            ? "Complete"
-                            : "Truncated"}
+                          {exportCompletenessLabel(
+                            reportPreviewCompleteness.completeness.movements
+                          )}
                         </strong>{" "}
                         ({reportPreviewCompleteness.completeness.movementsScanned.toLocaleString("en-PH")} scanned of cap{" "}
                         {reportPreviewCompleteness.completeness.movementCap.toLocaleString("en-PH")})

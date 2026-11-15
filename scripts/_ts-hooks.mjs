@@ -25,9 +25,23 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
+const STUB = new URL("./_next-server-stub.mjs", import.meta.url).href;
+
+/*
+ * Bare specifiers Next resolves through its bundler and Node cannot follow.
+ * Mapped to one test stub that throws if actually called. Only these exact
+ * names — never a general next/* glob.
+ */
+const NEXT_STUBS = new Map([
+  ["next/headers", STUB],
+  ["next/server", STUB],
+]);
+
 const EXTENSIONS = [".ts", ".tsx", ".mts", ".js", ".mjs"];
 
 export async function resolve(specifier, context, nextResolve) {
+  const stub = NEXT_STUBS.get(specifier);
+  if (stub) return { url: stub, shortCircuit: true };
   try {
     return await nextResolve(specifier, context);
   } catch (cause) {
