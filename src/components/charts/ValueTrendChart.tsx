@@ -12,7 +12,7 @@ import {
 } from "recharts";
 import { ChartCard, ChartLegend } from "./ChartCard";
 import { ChartTooltip } from "./ChartTooltip";
-import { CHART_COLORS } from "./theme";
+import { CHART_COLORS, CHART_SERIES_MOTION } from "./theme";
 import { formatPeso } from "@/lib/format";
 import type { ValueTrendDatum } from "./types";
 
@@ -138,7 +138,7 @@ export function ValueTrendChart({
             fillOpacity={0.14}
             dot={false}
             activeDot={{ r: 4 }}
-            isAnimationActive={false}
+            {...CHART_SERIES_MOTION}
           />
           <Line
             type="monotone"
@@ -148,7 +148,7 @@ export function ValueTrendChart({
             strokeWidth={2}
             dot={false}
             activeDot={{ r: 4 }}
-            isAnimationActive={false}
+            {...CHART_SERIES_MOTION}
           />
         </ComposedChart>
       </ResponsiveContainer>

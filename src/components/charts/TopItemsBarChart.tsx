@@ -12,7 +12,7 @@ import {
 import { ChartCard } from "./ChartCard";
 import { ChartTooltip } from "./ChartTooltip";
 import { useIsNarrow } from "./use-narrow";
-import { CHART_COLORS, formatQuantity, truncateLabel } from "./theme";
+import { CHART_COLORS, formatQuantity, truncateLabel, CHART_SERIES_MOTION } from "./theme";
 import type { BarDatum } from "./types";
 
 /** The props a two-line axis tick receives from Recharts. */
@@ -165,7 +165,7 @@ export function TopItemsBarChart({
             fill={color}
             radius={[0, 4, 4, 0]}
             maxBarSize={narrow ? 16 : 22}
-            isAnimationActive={false}
+            {...CHART_SERIES_MOTION}
           />
         </BarChart>
       </ResponsiveContainer>

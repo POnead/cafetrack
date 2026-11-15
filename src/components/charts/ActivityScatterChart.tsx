@@ -13,7 +13,7 @@ import {
 } from "recharts";
 import { ChartCard } from "./ChartCard";
 import { ChartTooltip } from "./ChartTooltip";
-import { CHART_COLORS } from "./theme";
+import { CHART_COLORS, CHART_SERIES_MOTION } from "./theme";
 import type { ScatterDatum } from "./types";
 
 /**
@@ -134,7 +134,7 @@ export function ActivityScatterChart({
             data={points}
             name="Item"
             fill={CHART_COLORS.revenue}
-            isAnimationActive={false}
+            {...CHART_SERIES_MOTION}
             shape={(props) => {
               const point = props.payload as ScatterDatum | undefined;
               const wasteLeads =

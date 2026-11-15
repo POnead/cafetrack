@@ -53,31 +53,24 @@ const FEATURES: Feature[] = [
 ];
 
 /** How long each slide shows before the carousel advances automatically. */
-const AUTO_ADVANCE_MS = 6000;
+const AUTO_ADVANCE_MS = 5000;
 
 export default function FeatureCarousel() {
   const [index, setIndex] = useState(0);
   const [paused, setPaused] = useState(false);
-  const [reducedMotion, setReducedMotion] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const touchStartX = useRef(0);
   const count = FEATURES.length;
 
-  useEffect(() => {
-    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
-    setReducedMotion(mq.matches);
-    const handler = () => setReducedMotion(mq.matches);
-    mq.addEventListener("change", handler);
-    return () => mq.removeEventListener("change", handler);
-  }, []);
-
   const next = useCallback(() => setIndex((i) => (i + 1) % count), [count]);
   const prev = useCallback(() => setIndex((i) => (i - 1 + count) % count), [count]);
 
-  // Autoplay: advances every few seconds unless the user interacts or
-  // prefers reduced motion, and pauses when the tab is hidden.
+  // Autoplay: advances every few seconds, and only pauses when the tab is
+  // hidden. It runs regardless of the OS's reduced-motion preference: this
+  // machine runs with animations disabled, which used to freeze the copy in
+  // place forever — the operator asked for the slide to always move.
   useEffect(() => {
-    if (reducedMotion || paused) {
+    if (paused) {
       if (timerRef.current) {
         clearInterval(timerRef.current);
         timerRef.current = null;
@@ -89,7 +82,7 @@ export default function FeatureCarousel() {
       clearInterval(timerRef.current!);
       timerRef.current = null;
     };
-  }, [next, paused, reducedMotion]);
+  }, [next, paused]);
 
   useEffect(() => {
     const onVisibility = () => setPaused(document.visibilityState === "hidden");
@@ -110,8 +103,6 @@ export default function FeatureCarousel() {
     [prev, next]
   );
 
-  const slide = FEATURES[index];
-
   return (
     <section
       aria-label="CafeTrack core features"
@@ -120,28 +111,47 @@ export default function FeatureCarousel() {
       onTouchStart={handleTouchStart}
       onTouchEnd={handleTouchEnd}
     >
-      <div
-        key={slide.id}
-        className={`h-full overflow-hidden ${reducedMotion ? "" : "feature-copy-slide-in"}`}
-      >
-        <h1
-          className="max-w-lg font-serif text-4xl font-medium leading-[1.05] tracking-tight text-cream-50 xl:text-5xl"
-          aria-live="polite"
-          aria-atomic="true"
-        >
-          {slide.headline[0]}
-          <br />
-          <span className="italic text-cream-400">{slide.headline[1]}</span>
-        </h1>
-        <p
-          className="line-clamp-2 max-w-md text-sm leading-6 text-cream-100/60"
-          aria-live="polite"
-          aria-atomic="true"
-        >
-          {slide.body}
-        </p>
+      {/*
+        The leaving and the arriving slide both stay mounted during a change,
+        so the copy can crossfade instead of cutting — the previous version
+        unmounted the old text outright, which is why the transition read as
+        "nothing happening". Only the active slide is reachable by pointer or
+        screen reader; the wrapper carries the live region.
+      */}
+      <div className="relative h-full" aria-live="polite" aria-atomic="true">
+        {FEATURES.map((feature, slideIndex) => {
+          const active = slideIndex === index;
+          return (
+            <div
+              key={feature.id}
+              aria-hidden={!active}
+              className={`feature-slide absolute inset-0 h-full overflow-hidden transition-[opacity,transform,filter] duration-500 ease-out ${
+                active
+                  ? "translate-x-0 opacity-100 blur-0"
+                  : "pointer-events-none translate-x-4 opacity-0 blur-sm"
+              }`}
+            >
+              <FeatureCopy feature={feature} />
+            </div>
+          );
+        })}
       </div>
-
     </section>
+  );
+}
+
+/** The headline and supporting copy for one slide. */
+function FeatureCopy({ feature }: { feature: Feature }) {
+  return (
+    <>
+      <h1 className="max-w-lg font-serif text-4xl font-medium leading-[1.05] tracking-tight text-cream-50 xl:text-5xl">
+        {feature.headline[0]}
+        <br />
+        <span className="italic text-cream-400">{feature.headline[1]}</span>
+      </h1>
+      <p className="line-clamp-2 max-w-md text-sm leading-6 text-cream-100/60">
+        {feature.body}
+      </p>
+    </>
   );
 }

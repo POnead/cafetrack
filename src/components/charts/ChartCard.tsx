@@ -1,7 +1,47 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Card, Empty, Spinner } from "@/components/ui";
+
+/**
+ * Flip to true the first time the element enters the viewport. Charts mount
+ * their SVG only then, which skips every off-screen animation — recharts
+ * animates on mount, so mounting late means the bars and slices draw exactly
+ * when you arrive at them, and a busy tab change no longer starts ten
+ * chart engines at once. Fires once: the chart stays mounted afterwards.
+ *
+ * The ref is a callback, not a useRef, because the observed element only
+ * exists once a chart leaves its loading state — a plain ref reads null on
+ * the mount where data is still arriving and never attaches at all.
+ */
+function useChartInView<T extends HTMLElement>() {
+  const [element, setElement] = useState<T | null>(null);
+  const [inView, setInView] = useState(false);
+
+  useEffect(() => {
+    if (!element) return;
+
+    if (!("IntersectionObserver" in window)) {
+      setInView(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry.isIntersecting) return;
+        setInView(true);
+        observer.disconnect();
+      },
+      // A little head start so the draw is already under way as the card
+      // scrolls into view, not after it lands.
+      { rootMargin: "150px 0px 150px 0px", threshold: 0 },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [element]);
+
+  return { ref: setElement, inView };
+}
 
 /**
  * The shell every chart on the reports page sits in.
@@ -22,6 +62,7 @@ export function ChartCard({
   emptyMessage = "There is nothing to chart yet.",
   footer,
   notes,
+  bare = false,
   children,
 }: {
   title: string;
@@ -42,10 +83,18 @@ export function ChartCard({
   footer?: ReactNode;
   /** The disclosure strip under the chart. */
   notes?: ReactNode;
+  /**
+   * Render without the outer card. Used when the chart sits inside another
+   * card (the Waste Summary panel) where a second border would be noise —
+   * the sections are identical, only the wrapping <Card> is omitted.
+   */
+  bare?: boolean;
   children: ReactNode;
 }) {
-  return (
-    <Card className="!p-0">
+  const { ref: inViewRef, inView } = useChartInView<HTMLDivElement>();
+
+  const body = (
+    <>
       <div className="border-b border-cream-200 bg-cream-50 px-4 py-3">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -77,7 +126,9 @@ export function ChartCard({
             <Empty>{emptyMessage}</Empty>
           </div>
         ) : (
-          <div style={{ height }}>{children}</div>
+          <div ref={inViewRef} style={{ height }} aria-hidden={!inView}>
+            {inView ? children : null}
+          </div>
         )}
       </div>
 
@@ -90,7 +141,15 @@ export function ChartCard({
           {notes}
         </div>
       )}
-    </Card>
+    </>
+  );
+
+  // `report-card-enter` plays the entrance animation once the Reports page's
+  // reveal wrapper flips it visible — see globals.css and ReportReveal.
+  return bare ? (
+    <div className="report-card-enter">{body}</div>
+  ) : (
+    <Card className="!p-0 report-card-enter">{body}</Card>
   );
 }
 

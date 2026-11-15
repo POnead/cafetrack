@@ -13,7 +13,7 @@ import {
 } from "recharts";
 import { ChartCard, ChartLegend } from "./ChartCard";
 import { ChartTooltip } from "./ChartTooltip";
-import { CHART_COLORS, formatCount } from "./theme";
+import { CHART_COLORS, formatCount, CHART_SERIES_MOTION } from "./theme";
 import type { ActivitySlice } from "./types";
 
 const MOVEMENT_ORDER = ["checkout", "restock", "waste"] as const;
@@ -172,7 +172,7 @@ export function MovementActivityChart({
             name="Transactions"
             radius={[4, 4, 0, 0]}
             maxBarSize={72}
-            isAnimationActive={false}
+            {...CHART_SERIES_MOTION}
             onClick={(_data, index) => {
               const row = rows[index];
               if (row) setSelectedType(row.type);

@@ -85,11 +85,16 @@ const ActivityScatterChart = dynamic(
   () => import("@/components/charts/ActivityScatterChart").then((m) => m.ActivityScatterChart),
   { ssr: false },
 );
+const WasteEventsChart = dynamic(
+  () => import("@/components/charts/WasteEventsChart").then((m) => m.WasteEventsChart),
+  { ssr: false },
+);
 import type {
   MovementDatum,
   HistogramDatum,
   ValueTrendDatum,
   MoneySlice,
+  WasteEventDatum,
 } from "@/components/charts/types";
 import type { InventoryHistory } from "@/lib/inventory-history";
 import type { Grouping } from "@/components/charts/bucketHistory";
@@ -1602,6 +1607,7 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
 
     let trendPoints: ValueTrendDatum[] = [];
     let movementPoints: MovementDatum[] = [];
+    let wastePoints: WasteEventDatum[] = [];
     let periodLabel = "date";
     if (startDate && endDate && startDate <= endDate) {
       const daySpan = Math.ceil((endDate.getTime() - startDate.getTime()) / 86_400_000);
@@ -1667,6 +1673,15 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
        * restock adds stock, and a checkout and a waste log both draw it down.
        * Every movement line counts once, in one series, in one of the two.
        */
+      /*
+       * Waste records per bucket — not item lines — matching the Waste
+       * Events KPI. This walks the same filteredTransactions the rest of the
+       * report reads, so the selected category filter applies: a transaction
+       * with no line in the selected category has already been dropped
+       * upstream, and one that matches stays in its created_at bucket,
+       * exactly like the movement and value charts.
+       */
+      const wasteByKey = new Map<string, number>();
       const movementByKey = new Map<string, { stockIn: number; stockOut: number }>();
       for (const { transaction, date } of datedTransactions) {
         if (
@@ -1677,6 +1692,9 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
           continue;
         }
         const bucket = bucketFor(date);
+        if (transaction.type === "waste") {
+          wasteByKey.set(bucket.key, (wasteByKey.get(bucket.key) ?? 0) + 1);
+        }
         const total = movementByKey.get(bucket.key) ?? { stockIn: 0, stockOut: 0 };
         for (const line of transaction.transaction_items ?? []) {
           const quantity = Number(line.quantity);
@@ -1689,6 +1707,7 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
 
       const movement: MovementDatum[] = [];
       const points: ValueTrendDatum[] = [];
+      const waste: WasteEventDatum[] = [];
       const cursor = startBucket.date;
       for (let guard = 0; guard < 2400; guard += 1) {
         const bucket = bucketFor(cursor);
@@ -1699,6 +1718,11 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
           stockOut: 0,
         };
         movement.push({ key: bucket.key, label: bucket.label, ...movementTotals });
+        waste.push({
+          key: bucket.key,
+          label: bucket.label,
+          events: wasteByKey.get(bucket.key) ?? 0,
+        });
         if (bucket.key === endBucket.key) break;
         if (granularity === "day") cursor.setDate(cursor.getDate() + 1);
         else if (granularity === "week") cursor.setDate(cursor.getDate() + 7);
@@ -1706,6 +1730,7 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
       }
       trendPoints = points;
       movementPoints = movement;
+      wastePoints = waste;
     }
 
     const maxTransactionCents = Math.max(
@@ -1745,7 +1770,7 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
           b.checkoutEvents + b.wasteEvents - (a.checkoutEvents + a.wasteEvents)
       );
 
-    return { trendPoints, movementPoints, periodLabel, bins, scatterPoints };
+    return { trendPoints, movementPoints, periodLabel, bins, scatterPoints, wastePoints };
   }, [filteredTransactions, itemsBySku, rangeParams.from, rangeParams.to, grouping]);
 
   /* ---------- snapshot-derived series for the charts ---------- */
@@ -2817,13 +2842,15 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
         </div>
       </div>
 
-      <InventoryValueTrendChart
-        data={inventoryHistory}
-        loading={historyLoading}
-        error={historyError}
-        grouping={grouping}
-        onGroupingChange={setGrouping}
-      />
+      <ReportReveal>
+        <InventoryValueTrendChart
+          data={inventoryHistory}
+          loading={historyLoading}
+          error={historyError}
+          grouping={grouping}
+          onGroupingChange={setGrouping}
+        />
+      </ReportReveal>
     </section>
   );
 
@@ -2835,8 +2862,12 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
       className="space-y-3"
     >
       <div className="grid gap-4 xl:grid-cols-2">
-        <StockByCategoryChart categories={categoryStock} />
-        <StockStatusDonutChart status={statusDistribution} />
+        <ReportReveal>
+          <StockByCategoryChart categories={categoryStock} />
+        </ReportReveal>
+        <ReportReveal>
+          <StockStatusDonutChart status={statusDistribution} />
+        </ReportReveal>
       </div>
 
       <SoonestExpiries items={soonestExpiryFull} />
@@ -3247,24 +3278,32 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
       </div>
 
       <div className="grid gap-4 xl:grid-cols-2">
-        <StockMovementChart
-          movement={chartAnalytics.movementPoints}
-          periodLabel={chartAnalytics.periodLabel}
-        />
-        <ValueTrendChart
-          points={chartAnalytics.trendPoints}
-          periodLabel={chartAnalytics.periodLabel}
-          unpricedLines={
-            financialSummary.unpricedRevenueLines + financialSummary.unpricedLossLines
-          }
-        />
+        <ReportReveal>
+          <StockMovementChart
+            movement={chartAnalytics.movementPoints}
+            periodLabel={chartAnalytics.periodLabel}
+          />
+        </ReportReveal>
+        <ReportReveal>
+          <ValueTrendChart
+            points={chartAnalytics.trendPoints}
+            periodLabel={chartAnalytics.periodLabel}
+            unpricedLines={
+              financialSummary.unpricedRevenueLines + financialSummary.unpricedLossLines
+            }
+          />
+        </ReportReveal>
       </div>
 
-      <TransactionActivityDonutChart activity={activitySlices} />
-      <MovementActivityChart
-        activity={activitySlices}
-        transactions={filteredTransactions}
-      />
+      <ReportReveal>
+        <TransactionActivityDonutChart activity={activitySlices} />
+      </ReportReveal>
+      <ReportReveal>
+        <MovementActivityChart
+          activity={activitySlices}
+          transactions={filteredTransactions}
+        />
+      </ReportReveal>
 
       <details
         /* Preview shows the complete report — the collapsible stays open
@@ -3278,7 +3317,9 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
           Advanced analysis
         </summary>
         <div className="border-t border-cream-200 p-3">
-          <TransactionHistogramChart bins={chartAnalytics.bins} />
+          <ReportReveal>
+            <TransactionHistogramChart bins={chartAnalytics.bins} />
+          </ReportReveal>
         </div>
       </details>
     </section>
@@ -3292,75 +3333,96 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
       className="space-y-4"
     >
       <div className="grid gap-4 lg:grid-cols-2">
-        <Card className="!p-0">
-          <div className="border-b border-cream-200 bg-cream-50 px-4 py-3">
-            <h2 className="text-sm font-bold text-cocoa-800">Waste Summary</h2>
-            <p className="mt-1 text-xs text-cocoa-400">
-              Recorded waste in the selected report.
-            </p>
-          </div>
-          <div className="grid grid-cols-2 gap-3 p-4">
-            <Stat label="Total Waste" value={fmtQty(wasteTotal)} tone="danger" />
-            <Stat label="Waste Events" value={wasteCount} tone="warn" />
-          </div>
-        </Card>
-        <TopItemsBarChart
-          title="Waste by category"
-          description="Waste item entries by category. Select a bar to see its total quantity."
-          metric="waste entries"
-          entries={wasteByCategoryEntries}
-          color={CHART_COLORS.neutral}
-          emptyMessage="No waste recorded yet."
-          unitLabel="entries"
-          notes={
-            <>
-              Counted by waste item entries, not quantities, because the
-              quantities are in mixed units. Total quantity is in the tooltip.
-            </>
-          }
-        />
+        <ReportReveal>
+          <Card className="!p-0 report-card-enter">
+            <div className="border-b border-cream-200 bg-cream-50 px-4 py-3">
+              <h2 className="text-sm font-bold text-cocoa-800">Waste Summary</h2>
+              <p className="mt-1 text-xs text-cocoa-400">
+                Recorded waste in the selected report.
+              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-3 p-4">
+              <Stat label="Total Waste" value={fmtQty(wasteTotal)} tone="danger" />
+              <Stat label="Waste Events" value={wasteCount} tone="warn" />
+            </div>
+            {/* Full-width trend under the KPIs: the Waste Summary card carries
+                it, matching the totals above it. */}
+            <div className="border-t border-cream-200">
+              <WasteEventsChart
+                bare
+                points={chartAnalytics.wastePoints}
+                periodLabel={chartAnalytics.periodLabel}
+              />
+            </div>
+          </Card>
+        </ReportReveal>
+        <ReportReveal>
+          <TopItemsBarChart
+            title="Waste by category"
+            description="Waste item entries by category. Select a bar to see its total quantity."
+            metric="waste entries"
+            entries={wasteByCategoryEntries}
+            color={CHART_COLORS.neutral}
+            emptyMessage="No waste recorded yet."
+            unitLabel="entries"
+            notes={
+              <>
+                Counted by waste item entries, not quantities, because the
+                quantities are in mixed units. Total quantity is in the tooltip.
+              </>
+            }
+          />
+        </ReportReveal>
       </div>
 
       <div className="grid gap-4 xl:grid-cols-2">
-        <TopItemsBarChart
-          title="Top-moving inventory items"
-          description="Top ten items by units checked out in this date range."
-          metric="units checked out"
-          entries={topMoverEntries}
-          color={CHART_COLORS.revenue}
-          emptyMessage="No checkout activity in this date range."
-          unitLabel="units"
-          notes={
-            <>
-              Ranked by checkout units, not by how often the item was
-              checked out, and not by waste. An item checked out once with
-              ten units ranks above an item checked out ten times with one.
-            </>
-          }
-        />
-        <TopItemsBarChart
-          title="Most wasted items"
-          description="Ranked by waste quantity in this date range · mixed units."
-          metric="units wasted"
-          entries={wasteByItemEntries}
-          color={CHART_COLORS.waste}
-          emptyMessage="No waste activity in this date range."
-          unitLabel="units"
-        />
-        <ValueBreakdownChart
-          title="Revenue by item"
-          description="Checkout value by item. Select a slice to inspect its quantity and value."
-          slices={valueSlices}
-          totalCents={financialSummary.revenueCents}
-          emptyMessage="No priced items in this date range."
-        />
-        <ValueBreakdownChart
-          title="Lost value by item"
-          description="Waste cost by item. Select a slice to inspect its quantity and value."
-          slices={lossSlices}
-          totalCents={financialSummary.lossCents}
-          emptyMessage="No priced waste in this date range."
-        />
+        <ReportReveal>
+          <TopItemsBarChart
+            title="Top-moving inventory items"
+            description="Top ten items by units checked out in this date range."
+            metric="units checked out"
+            entries={topMoverEntries}
+            color={CHART_COLORS.revenue}
+            emptyMessage="No checkout activity in this date range."
+            unitLabel="units"
+            notes={
+              <>
+                Ranked by checkout units, not by how often the item was
+                checked out, and not by waste. An item checked out once with
+                ten units ranks above an item checked out ten times with one.
+              </>
+            }
+          />
+        </ReportReveal>
+        <ReportReveal>
+          <TopItemsBarChart
+            title="Most wasted items"
+            description="Ranked by waste quantity in this date range · mixed units."
+            metric="units wasted"
+            entries={wasteByItemEntries}
+            color={CHART_COLORS.waste}
+            emptyMessage="No waste activity in this date range."
+            unitLabel="units"
+          />
+        </ReportReveal>
+        <ReportReveal>
+          <ValueBreakdownChart
+            title="Revenue by item"
+            description="Checkout value by item. Select a slice to inspect its quantity and value."
+            slices={valueSlices}
+            totalCents={financialSummary.revenueCents}
+            emptyMessage="No priced items in this date range."
+          />
+        </ReportReveal>
+        <ReportReveal>
+          <ValueBreakdownChart
+            title="Lost value by item"
+            description="Waste cost by item. Select a slice to inspect its quantity and value."
+            slices={lossSlices}
+            totalCents={financialSummary.lossCents}
+            emptyMessage="No priced waste in this date range."
+          />
+        </ReportReveal>
       </div>
 
       <details
@@ -3375,10 +3437,12 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
           Advanced analysis
         </summary>
         <div className="border-t border-cream-200 p-3">
-          <ActivityScatterChart
-            points={chartAnalytics.scatterPoints}
-            periodLabel={movementPeriodLabel}
-          />
+          <ReportReveal>
+            <ActivityScatterChart
+              points={chartAnalytics.scatterPoints}
+              periodLabel={movementPeriodLabel}
+            />
+          </ReportReveal>
         </div>
       </details>
     </section>

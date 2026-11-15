@@ -39,6 +39,17 @@ export const CHART_COLORS = {
 } as const;
 
 /**
+ * Charts draw instantly, and their entrance is the CSS in globals.css
+ * (.chart rise/grow animations). recharts' own animation interpolates SVG
+ * coordinates through React on every animation frame — cheap on paper,
+ * janky on the machine this runs on. The CSS version runs on the
+ * compositor and costs no JS per frame.
+ */
+export const CHART_SERIES_MOTION = {
+  isAnimationActive: false,
+} as const;
+
+/**
  * The warm palette used where one total is split across many parts and the
  * parts have to be told apart. Kept in the same order the reports page has
  * always used so the slices do not jump between versions.

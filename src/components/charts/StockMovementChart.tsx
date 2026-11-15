@@ -12,7 +12,7 @@ import {
 import { ChartCard, ChartLegend } from "./ChartCard";
 import { ChartTooltip } from "./ChartTooltip";
 import { useIsNarrow } from "./use-narrow";
-import { CHART_COLORS, formatQuantity } from "./theme";
+import { CHART_COLORS, formatQuantity, CHART_SERIES_MOTION } from "./theme";
 import type { MovementDatum } from "./types";
 
 /**
@@ -116,7 +116,7 @@ export function StockMovementChart({
             fill={CHART_COLORS.normal}
             radius={[4, 4, 0, 0]}
             maxBarSize={28}
-            isAnimationActive={false}
+            {...CHART_SERIES_MOTION}
           />
           <Bar
             dataKey="stockOut"
@@ -124,7 +124,7 @@ export function StockMovementChart({
             fill={CHART_COLORS.stockOut}
             radius={[4, 4, 0, 0]}
             maxBarSize={28}
-            isAnimationActive={false}
+            {...CHART_SERIES_MOTION}
           />
         </BarChart>
       </ResponsiveContainer>

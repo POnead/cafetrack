@@ -12,7 +12,7 @@ import {
 import { ChartCard, ChartLegend } from "./ChartCard";
 import { ChartTooltip } from "./ChartTooltip";
 import { useIsNarrow } from "./use-narrow";
-import { CHART_COLORS, formatCount } from "./theme";
+import { CHART_COLORS, formatCount, CHART_SERIES_MOTION } from "./theme";
 import type { HistogramDatum } from "./types";
 
 /**
@@ -99,7 +99,7 @@ export function TransactionHistogramChart({
             fill={CHART_COLORS.revenue}
             radius={[4, 4, 0, 0]}
             maxBarSize={26}
-            isAnimationActive={false}
+            {...CHART_SERIES_MOTION}
           />
           <Bar
             dataKey="wasteCount"
@@ -107,7 +107,7 @@ export function TransactionHistogramChart({
             fill={CHART_COLORS.waste}
             radius={[4, 4, 0, 0]}
             maxBarSize={26}
-            isAnimationActive={false}
+            {...CHART_SERIES_MOTION}
           />
         </BarChart>
       </ResponsiveContainer>

@@ -101,3 +101,11 @@ export type ActivitySlice = {
   qty: number;
   color: string;
 };
+
+/** Waste transactions in one period. */
+export type WasteEventDatum = {
+  key: string;
+  label: string;
+  /** How many waste records were logged in this bucket. */
+  events: number;
+};

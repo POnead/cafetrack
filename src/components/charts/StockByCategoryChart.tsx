@@ -12,7 +12,7 @@ import {
 import { ChartCard } from "./ChartCard";
 import { ChartTooltip } from "./ChartTooltip";
 import { useIsNarrow } from "./use-narrow";
-import { CHART_COLORS, formatQuantity, truncateLabel } from "./theme";
+import { CHART_COLORS, formatQuantity, truncateLabel, CHART_SERIES_MOTION } from "./theme";
 import type { CategoryDatum } from "./types";
 
 /**
@@ -93,7 +93,7 @@ export function StockByCategoryChart({
             fill={CHART_COLORS.primary}
             radius={[0, 4, 4, 0]}
             maxBarSize={narrow ? 16 : 22}
-            isAnimationActive={false}
+            {...CHART_SERIES_MOTION}
           />
         </BarChart>
       </ResponsiveContainer>

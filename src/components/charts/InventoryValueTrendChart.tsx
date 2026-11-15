@@ -14,7 +14,7 @@ import { Badge } from "@/components/ui";
 import { ChartCard } from "./ChartCard";
 import { ChartTooltip } from "./ChartTooltip";
 import { bucketHistoryPoints, type Grouping } from "./bucketHistory";
-import { CHART_COLORS } from "./theme";
+import { CHART_COLORS, CHART_SERIES_MOTION } from "./theme";
 import { formatPeso, formatPesoCompact } from "@/lib/format";
 import type { HistoryGranularity, InventoryHistory } from "@/lib/inventory-history";
 
@@ -280,7 +280,7 @@ export function InventoryValueTrendChart({
             fillOpacity={0.14}
             dot={false}
             activeDot={{ r: 4 }}
-            isAnimationActive={false}
+            {...CHART_SERIES_MOTION}
           />
         </AreaChart>
       </ResponsiveContainer>

@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 import { ChartCard } from "./ChartCard";
 import { ChartTooltip } from "./ChartTooltip";
-import { ACTIVITY_COLORS, CHART_COLORS, formatCount } from "./theme";
+import { ACTIVITY_COLORS, CHART_COLORS, formatCount, CHART_SERIES_MOTION } from "./theme";
 import type { ActivitySlice } from "./types";
 
 /**
@@ -61,7 +61,7 @@ export function TransactionActivityDonutChart({
                 endAngle={-270}
                 stroke="#FFFFFF"
                 strokeWidth={2}
-                isAnimationActive={false}
+                {...CHART_SERIES_MOTION}
                 onClick={(data) => setSelectedType(String(data.payload?.type ?? ""))}
               >
                 {activity.map((entry) => (

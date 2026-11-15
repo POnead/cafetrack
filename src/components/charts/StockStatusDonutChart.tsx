@@ -3,7 +3,7 @@
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 import { ChartCard, ChartLegend } from "./ChartCard";
 import { ChartTooltip } from "./ChartTooltip";
-import { CHART_COLORS, formatCount } from "./theme";
+import { CHART_COLORS, formatCount, CHART_SERIES_MOTION } from "./theme";
 import type { StatusDatum } from "./types";
 
 /**
@@ -65,7 +65,7 @@ export function StockStatusDonutChart({
             endAngle={-270}
             stroke="#FFFFFF"
             strokeWidth={2}
-            isAnimationActive={false}
+            {...CHART_SERIES_MOTION}
           >
             {status.map((entry) => (
               <Cell
