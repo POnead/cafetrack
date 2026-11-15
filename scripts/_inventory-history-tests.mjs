@@ -238,6 +238,33 @@ function makeLedger(transactions, linesPerTxn, startAt) {
   return out;
 }
 
+/**
+ * A ledger whose rows are deliberately broken, in the ways the real ledger
+ * could be broken by a bad import: quantities that are not numbers at all.
+ * Rows carry ids and timestamps like ordinary rows — the scan must read them,
+ * spend its budget on them, and keep them out of the reconstruction.
+ */
+function makeInvalidLedger(transactions, linesPerTxn, isInvalid, startAt) {
+  const out = [];
+  let at = startAt ?? Date.parse("2026-11-01T00:00:00.000Z");
+  let lineIndex = 0;
+  for (let i = 0; i < transactions; i += 1) {
+    const lines = [];
+    for (let j = 0; j < linesPerTxn; j += 1) {
+      const bad = isInvalid(lineIndex);
+      lineIndex += 1;
+      lines.push({
+        sku: "AAA",
+        qty_before: bad ? "garbage" : 100 + j,
+        qty_after: bad ? "not-a-number" : 99 + j,
+      });
+    }
+    out.push({ created_at: new Date(at).toISOString(), lines });
+    at -= 60_000;
+  }
+  return out;
+}
+
 console.log("\nscan — multiple movement lines");
 {
   const ledger = makeLedger(3, 4, Date.parse("2026-11-01T00:00:00.000Z"));
@@ -352,7 +379,160 @@ console.log("\nscan — probe sees a short page and stops");
 }
 
 /* ------------------------------------------------------------------ */
-/* buildHistoryFromScan — baselines and the truncated clamp             */
+/* scan — invalid rows still consume the cap                            */
+/* ------------------------------------------------------------------ */
+
+console.log("\nscan — invalid rows still consume the cap");
+{
+  // Every row broken: the scan may read exactly 50,000 of them and no more.
+  const ledger = makeInvalidLedger(600, 100, () => true);
+  const scan = await scanLedger(makeSource(ledger));
+  check(
+    "more rows than the cap cannot cause more than the cap to be scanned",
+    scan.movementsScanned === SCAN_CAP,
+    `${scan.movementsScanned} rows`
+  );
+  check(
+    "invalid rows beyond the cap are reported truncated",
+    scan.completeness === "truncated" && scan.truncated === true,
+    `completeness ${scan.completeness}`
+  );
+  check(
+    "no invalid row is used for reconstruction",
+    scan.movements.length === 0
+  );
+}
+{
+  // Mixed ledger, half the rows broken: only the valid half may reach the
+  // reconstruction, but every row read still spends budget.
+  const ledger = makeInvalidLedger(300, 200, (i) => i % 2 === 0);
+  // 300 × 200 = 60,000 rows, half of them unusable.
+  const scan = await scanLedger(makeSource(ledger));
+  check(
+    "a mixed ledger still caps at 50,000 rows",
+    scan.movementsScanned === SCAN_CAP,
+    `${scan.movementsScanned} rows`
+  );
+  const usable = scan.movements.length;
+  check(
+    "only valid rows entered the timeline",
+    usable === 25_000,
+    `${usable} valid rows of the first 50,000`
+  );
+  check(
+    "an overflowing mixed ledger reports truncated",
+    scan.completeness === "truncated" && scan.truncated === true,
+    `completeness ${scan.completeness}`
+  );
+}
+{
+  // An all-invalid ledger that ends exactly on the cap: the whole ledger
+  // fits, so the scan is complete even though not one row was usable.
+  const ledger = makeInvalidLedger(500, 100, () => true);
+  const scan = await scanLedger(makeSource(ledger));
+  check(
+    "exactly the cap in invalid rows, ledger ends: complete",
+    scan.movementsScanned === SCAN_CAP &&
+      scan.completeness === "complete" &&
+      scan.truncated === false,
+    `completeness ${scan.completeness}`
+  );
+  check(
+    "none of the 50,000 invalid rows entered the timeline",
+    scan.movements.length === 0
+  );
+}
+
+console.log("\nscan — invalid rows at the cap boundary");
+{
+  // Exactly 50,000 valid rows, then one broken row: the probe reports the
+  // ledger definitively overflows the cap.
+  const full = makeLedger(500, 100, Date.parse("2026-11-01T00:00:00.000Z"));
+  const extra = [
+    {
+      created_at: new Date(Date.parse("2026-10-01T00:00:00.000Z")).toISOString(),
+      lines: [{ sku: "AAA", qty_before: "garbage", qty_after: "also garbage" }],
+    },
+  ];
+  const scan = await scanLedger(makeSource([...full, ...extra]));
+  check(
+    "a broken row past the cap is detected by the probe",
+    scan.completeness === "truncated" &&
+      scan.movementsScanned === SCAN_CAP &&
+      scan.truncated === true,
+    `completeness ${scan.completeness}`
+  );
+}
+{
+  // Exactly 50,000 rows again, this time the 50,000th is broken and the
+  // ledger ends right there.
+  const ledger = makeInvalidLedger(500, 100, (i) => i === 49_999);
+  const scan = await scanLedger(makeSource(ledger));
+  check(
+    "an invalid row ending exactly on the cap still reports complete",
+    scan.movementsScanned === SCAN_CAP &&
+      scan.completeness === "complete" &&
+      scan.truncated === false &&
+      scan.movements.length === SCAN_CAP - 1,
+    `completeness ${scan.completeness}, usable ${scan.movements.length}`
+  );
+}
+{
+  // A ledger that is ONLY invalid rows of exactly 50,000 rows: every row
+  // spends budget, the ledger ends, and the scan is complete — not one
+  // usable row, yet nothing was missed either.
+  const ledger = makeInvalidLedger(250, 200, () => true);
+  const scan = await scanLedger(makeSource(ledger));
+  check(
+    "an all-invalid ledger of exactly 50,000 rows spends the whole budget and ends",
+    scan.movementsScanned === SCAN_CAP &&
+      scan.movements.length === 0 &&
+      scan.completeness === "complete",
+    `completeness ${scan.completeness}`
+  );
+}
+
+console.log("\nreconstruction — invalid rows are not inputs");
+{
+  // The two scans differ only in broken rows; the series must be identical.
+  const at = Date.parse("2026-11-02T00:00:00.000Z");
+  const valid = {
+    sku: "AAA",
+    at,
+    qtyBefore: 50,
+    qtyAfter: 42,
+  };
+  const baseScan = {
+    items: [
+      { sku: "AAA", name: "AAA", quantity: 100, unitPrice: 100, categoryId: null },
+    ],
+    movements: [valid],
+    transactionsScanned: 1,
+    movementsScanned: 2,
+    historyFrom: new Date(at).toISOString(),
+    historyTo: new Date(at).toISOString(),
+    truncated: false,
+    completeness: "complete",
+  };
+  const result = buildHistoryFromScan(baseScan, {
+    from: "2026-10-20",
+    to: "2026-11-05",
+    category: null,
+  });
+  const byDay = new Map(result.points.map((p) => [p.day, p.valueCents]));
+  check(
+    "reconstruction is built from the valid row alone",
+    byDay.get("2026-11-05") === 42 * 100 * 100,
+    `got ${byDay.get("2026-11-05")}`
+  );
+  check(
+    "no point reflects a broken row",
+    result.points.every((p) => Number.isFinite(p.valueCents))
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* reconstruction — baselines and the truncated clamp                   */
 /* ------------------------------------------------------------------ */
 
 function scanOf(overrides) {

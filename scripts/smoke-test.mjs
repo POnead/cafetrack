@@ -434,6 +434,141 @@ async function main() {
   res = await call("GET", "/api/items");
   check("staff can still read items", res.status === 200);
 
+  section("inventory history cache — remaining write paths");
+  // Every successful stock or catalogue write must invalidate the raw history
+  // scan. Each write below is followed by a history read; a stale cache would
+  // show the pre-write count, so each delta is a hard assertion, not a wait.
+  const staffCookie = cookie;
+  const stamp = Date.now().toString(36);
+
+  // --- item creation (admin) ---
+  cookie = adminCookie;
+  res = await call("GET", "/api/inventory-history");
+  const beforeCreate = res.data?.valuation?.itemsInScope;
+  res = await call("POST", "/api/items", {
+    name: `Cache Create Item ${stamp}`,
+    category_id: null,
+    location_id: null,
+    physical_form: "solid",
+    unit: "pcs",
+    quantity: 4,
+    low_stock_threshold: 1,
+    expiration_date: null,
+  });
+  const createdItem = res.data?.item;
+  check(
+    "cache-check item created -> 201",
+    res.status === 201 && typeof createdItem?.id === "string",
+    `got ${res.status}`
+  );
+  res = await call("GET", "/api/inventory-history");
+  check(
+    "item creation invalidated the inventory history scan",
+    res.status === 200 && res.data?.valuation?.itemsInScope === beforeCreate + 1,
+    `before ${beforeCreate} after ${res.data?.valuation?.itemsInScope}`
+  );
+
+  // --- item deletion (admin) ---
+  res = await call("DELETE", `/api/items/${createdItem?.id}`);
+  check("cache-check item deleted -> 200", res.status === 200, `got ${res.status}`);
+  res = await call("GET", "/api/inventory-history");
+  check(
+    "item deletion invalidated the inventory history scan",
+    res.status === 200 && res.data?.valuation?.itemsInScope === beforeCreate,
+    `before ${beforeCreate} after ${res.data?.valuation?.itemsInScope}`
+  );
+
+  // --- item approval (staff submits, admin approves) ---
+  cookie = staffCookie;
+  res = await call("POST", "/api/items", {
+    name: `Cache Approve Item ${stamp}`,
+    category_id: null,
+    location_id: null,
+    physical_form: "solid",
+    unit: "pcs",
+    quantity: 3,
+    low_stock_threshold: 1,
+    expiration_date: null,
+  });
+  const pendingItem = res.data?.item;
+  check(
+    "staff item submission -> 201 pending",
+    res.status === 201 &&
+      res.data?.pending_approval === true &&
+      typeof pendingItem?.id === "string",
+    `got ${res.status} ${res.data?.error ?? ""}`
+  );
+  res = await call("GET", "/api/inventory-history");
+  const beforeApprove = res.data?.valuation?.itemsInScope;
+  cookie = adminCookie;
+  res = await call("POST", "/api/items/review", {
+    id: pendingItem?.id,
+    decision: "approve",
+  });
+  check(
+    "pending item approved -> 200",
+    res.status === 200,
+    `got ${res.status} ${res.data?.error ?? ""}`
+  );
+  res = await call("GET", "/api/inventory-history");
+  check(
+    "item approval invalidated the inventory history scan",
+    res.status === 200 && res.data?.valuation?.itemsInScope === beforeApprove + 1,
+    `before ${beforeApprove} after ${res.data?.valuation?.itemsInScope}`
+  );
+
+  // --- approved change request (staff proposes a price, admin approves) ---
+  res = await call("POST", "/api/items", {
+    name: `Cache Price Item ${stamp}`,
+    category_id: null,
+    location_id: null,
+    physical_form: "solid",
+    unit: "pcs",
+    quantity: 2,
+    low_stock_threshold: 1,
+    expiration_date: null,
+  });
+  const unpricedItem = res.data?.item;
+  check(
+    "cache-check unpriced item created -> 201",
+    res.status === 201 && typeof unpricedItem?.id === "string",
+    `got ${res.status}`
+  );
+  res = await call("GET", "/api/inventory-history");
+  const beforePrice = res.data?.valuation?.pricedItems;
+  cookie = staffCookie;
+  res = await call("PATCH", `/api/items/${unpricedItem?.id}`, { unit_price: 55 });
+  const requestId = res.data?.request?.id;
+  check(
+    "staff price proposal -> 201 pending change request",
+    res.status === 201 &&
+      res.data?.pending_change === true &&
+      typeof requestId === "string",
+    `got ${res.status} ${res.data?.error ?? ""}`
+  );
+  cookie = adminCookie;
+  res = await call("POST", "/api/change-requests/review", {
+    id: requestId,
+    decision: "approve",
+  });
+  check(
+    "change request approved -> 200",
+    res.status === 200,
+    `got ${res.status} ${res.data?.error ?? ""}`
+  );
+  res = await call("GET", "/api/inventory-history");
+  check(
+    "approved change request invalidated the inventory history scan",
+    res.status === 200 && res.data?.valuation?.pricedItems === beforePrice + 1,
+    `before ${beforePrice} after ${res.data?.valuation?.pricedItems}`
+  );
+
+  // --- clean up the catalogue entries this section created ---
+  res = await call("DELETE", `/api/items/${pendingItem?.id}`);
+  check("approved cache-check item deleted -> 200", res.status === 200, `got ${res.status}`);
+  res = await call("DELETE", `/api/items/${unpricedItem?.id}`);
+  check("priced cache-check item deleted -> 200", res.status === 200, `got ${res.status}`);
+
   section("clean up");
   cookie = adminCookie;
   res = await call("GET", "/api/auth/me");

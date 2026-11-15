@@ -315,6 +315,9 @@ export async function scanLedger(source: LedgerSource): Promise<RawScan> {
             stopped = true;
             break;
           }
+          // Every row read consumes the budget, even one whose quantities
+          // cannot be used — the cap is about rows, not about validity.
+          scannedLines += 1;
           const qtyBefore = Number(line.qty_before);
           const qtyAfter = Number(line.qty_after);
           if (!Number.isFinite(qtyBefore) || !Number.isFinite(qtyAfter)) continue;
@@ -324,7 +327,6 @@ export async function scanLedger(source: LedgerSource): Promise<RawScan> {
             qtyBefore,
             qtyAfter,
           });
-          scannedLines += 1;
         }
         if (!stopped) transactionsScanned += 1;
         if (stopped) break;
@@ -333,11 +335,14 @@ export async function scanLedger(source: LedgerSource): Promise<RawScan> {
 
       for (const line of linesOf(transaction)) {
         if (scannedLines >= SCAN_CAP) {
-          // There is at least one more line recorded beyond the cap: the
-          // history definitively does not reach the 50,000-line mark.
+          // There is at least one more row recorded beyond the cap: the
+          // history definitively does not reach the 50,000-row mark.
           stopped = true;
           break;
         }
+        // Every row read consumes the budget, even one whose quantities
+        // cannot be used — the cap is about rows, not about validity.
+        scannedLines += 1;
         const qtyBefore = Number(line.qty_before);
         const qtyAfter = Number(line.qty_after);
         if (!Number.isFinite(qtyBefore) || !Number.isFinite(qtyAfter)) continue;
@@ -347,7 +352,6 @@ export async function scanLedger(source: LedgerSource): Promise<RawScan> {
           qtyBefore,
           qtyAfter,
         });
-        scannedLines += 1;
         if (earliest === null || at < earliest) earliest = at;
         if (latest === null || at > latest) latest = at;
       }
