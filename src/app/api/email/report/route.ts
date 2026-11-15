@@ -3,7 +3,11 @@ import { requireAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { queueDirectEmail, dispatchSoon } from "@/lib/email";
 import { buildStockReportPdf } from "@/lib/report-pdf";
-import { buildStockReportData, parseStockReportFilters } from "@/lib/stock-report-data";
+import {
+  buildStockReportData,
+  parseStockReportFilters,
+  StockReportFilterError,
+} from "@/lib/stock-report-data";
 
 export const runtime = "nodejs";
 
@@ -22,7 +26,13 @@ export const POST = handler(async (req: Request) => {
     return fail("That does not look like an email address");
   }
 
-  const report = await buildStockReportData(parseStockReportFilters(body));
+  let report;
+  try {
+    report = await buildStockReportData(parseStockReportFilters(body));
+  } catch (error) {
+    if (error instanceof StockReportFilterError) return fail(error.message, 400);
+    throw error;
+  }
   const pdf = await buildStockReportPdf(report);
   const date = new Date();
   const filename = `cafetrack-report-${date.toISOString().slice(0, 10)}.pdf`;

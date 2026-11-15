@@ -122,6 +122,19 @@ export type PdfReport = {
   waste: { sku: string; name: string; qty: string; count: number }[];
   movementLines: PdfMovementLine[];
   warnings: string[];
+  /**
+   * Completeness of the capped sections. "truncated" or "unknown" means the
+   * PDF must not be read as a complete catalogue or a complete movement
+   * ledger — `warnings` carries the matching disclosure.
+   */
+  completeness: {
+    items: "complete" | "truncated" | "unknown";
+    movements: "complete" | "truncated" | "unknown";
+    itemsScanned: number;
+    movementsScanned: number;
+    itemCap: number;
+    movementCap: number;
+  };
 };
 
 /**

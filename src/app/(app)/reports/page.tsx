@@ -18,6 +18,7 @@ import {
   DataCard,
   DataField,
   Modal,
+  useDialogFocusTrap,
 } from "@/components/ui";
 import { fmtQty, fmtDate, daysUntil, toCsv, formatPeso } from "@/lib/format";
 import { stockStatus } from "@/lib/status";
@@ -923,6 +924,10 @@ export default function ReportsPage() {
   const historySequence = useRef(0);
   const historyController = useRef<AbortController | null>(null);
   const itemsController = useRef<AbortController | null>(null);
+  const previewPanelRef = useRef<HTMLElement | null>(null);
+  useDialogFocusTrap(previewPanelRef, reportPreviewOpen);
+  const columnsTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const columnsPanelRef = useRef<HTMLDivElement | null>(null);
 
   // Used as the heading on the printed/PDF report. Defaults to the product
   // name so the export still works if the settings read fails.
@@ -1005,21 +1010,88 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
    * the report.
    */
 
+  /**
+   * Load the complete active catalogue, page by page.
+   *
+   * One `/api/items` call truncates at the API's default limit, so every
+   * previous version of this page quietly computed the inventory report from
+   * part of the catalogue. The loop pages with `limit=500` until the API
+   * says there is no more, and refuses to render a partial catalogue as if it
+   * were the full one:
+   *
+   *   - an empty page while `has_more` is true aborts;
+   *   - inconsistent pagination metadata (wrong `returned`, an offset that
+   *     does not advance, or `has_more` past the reported total) aborts;
+   *   - a page cap bounds the loop even if the API were to contradict
+   *     itself forever.
+   *
+   * On any inconsistency, or a failed page, the catalogue is emptied and the
+   * error is shown — the KPIs, charts, expiries and the On-hand table all
+   * read from `items`, so none of them can present a fraction as the whole.
+   */
+  const ITEM_PAGE_SIZE = 500;
+  const MAX_ITEM_PAGES = 40;
+
   async function loadItems() {
     itemsController.current?.abort();
     const controller = new AbortController();
     itemsController.current = controller;
     try {
-      const response = await fetch("/api/items", { signal: controller.signal });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || data.error) {
-        throw new Error(data.error || "Could not load the inventory");
+      const collected: Item[] = [];
+      let offset = 0;
+      let complete = false;
+
+      for (let page = 0; page < MAX_ITEM_PAGES; page += 1) {
+        const response = await fetch(
+          `/api/items?limit=${ITEM_PAGE_SIZE}&offset=${offset}`,
+          { signal: controller.signal }
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data.error) {
+          throw new Error(data.error || "Could not load the inventory");
+        }
+
+        const pageItems: Item[] = Array.isArray(data.items) ? data.items : [];
+        const returned = Number(data.returned ?? pageItems.length);
+        const total = Number(data.total ?? returned);
+        const hasMore = Boolean(data.has_more);
+
+        if (returned !== pageItems.length || returned > ITEM_PAGE_SIZE) {
+          throw new Error("The item catalogue response is inconsistent");
+        }
+        const nextOffset = offset + pageItems.length;
+        if (hasMore) {
+          if (pageItems.length === 0) {
+            throw new Error("The item catalogue pagination stalled");
+          }
+          if (Number.isFinite(total) && nextOffset > total) {
+            throw new Error("The item catalogue pagination metadata is inconsistent");
+          }
+        }
+
+        collected.push(...pageItems);
+
+        if (!hasMore) {
+          complete = true;
+          break;
+        }
+        offset = nextOffset;
       }
-      setItems(data.items ?? []);
+
+      if (!complete) {
+        throw new Error("The item catalogue could not be loaded completely");
+      }
+      setItems(collected);
       setError(null);
     } catch (e) {
       if (controller.signal.aborted) return;
-      setError(e instanceof Error ? e.message : "Could not load the inventory");
+      // Never render a partial catalogue as the full report.
+      setItems([]);
+      setError(
+        e instanceof Error
+          ? `${e.message}. The inventory report is shown empty rather than incomplete.`
+          : "Could not load the inventory. The inventory report is shown empty rather than incomplete."
+      );
     } finally {
       if (itemsController.current === controller) itemsController.current = null;
       setItemsLoading(false);
@@ -1871,6 +1943,32 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
     catFilter,
   ]);
 
+  /*
+   * The Columns popover: focus moves into it on open, Escape closes it and
+   * returns focus to the trigger, clicking outside closes it. Native
+   * checkboxes carry their own keyboard behavior — Tab/Space — so the
+   * popover needs no roving-tabindex machinery.
+   */
+  useEffect(() => {
+    if (!columnsMenuOpen) return;
+    columnsPanelRef.current
+      ?.querySelector<HTMLElement>("input, button")
+      ?.focus();
+
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      /*
+       * If a modal dialog is open it is on top of the popover, so Escape
+       * belongs to it — leave the popover open and let the modal close.
+       */
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      setColumnsMenuOpen(false);
+      columnsTriggerRef.current?.focus();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [columnsMenuOpen]);
+
   function toggleOnHandColumn(column: OnHandOptionalColumn) {
     setTableColumns((current) => {
       const next = { ...current, [column]: !current[column] };
@@ -2701,13 +2799,13 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
           </div>
           <div className="flex items-center gap-2">
             <label className="sr-only" htmlFor="onhand-search">
-              Search items by name or SKU
+              Search items by name, SKU, category or location
             </label>
             <input
               id="onhand-search"
               className="input w-44 sm:w-56"
               type="search"
-              placeholder="Search item or SKU…"
+              placeholder="Search name, SKU, category or location…"
               value={tableQuery}
               onChange={(event) => setTableQuery(event.target.value)}
             />
@@ -2715,10 +2813,12 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
             {/* column visibility — tablet and up */}
             <div className="relative hidden md:block">
               <button
+                ref={columnsTriggerRef}
                 type="button"
                 className="btn-ghost inline-flex items-center gap-1.5"
                 aria-expanded={columnsMenuOpen}
-                aria-haspopup="menu"
+                aria-haspopup="dialog"
+                aria-controls="onhand-columns-popover"
                 onClick={() => setColumnsMenuOpen((open) => !open)}
               >
                 Columns
@@ -2738,49 +2838,47 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
                     onClick={() => setColumnsMenuOpen(false)}
                   />
                   <div
-                    role="menu"
-                    aria-label="Toggle columns"
-                    className="absolute right-0 z-30 mt-2 w-56 overflow-hidden rounded-xl border border-cream-200 bg-white py-1 shadow-warm"
+                    ref={columnsPanelRef}
+                    id="onhand-columns-popover"
+                    role="dialog"
+                    aria-modal="false"
+                    aria-label="Toggle optional columns"
+                    className="absolute right-0 z-30 mt-2 w-56 max-w-[calc(100vw-2rem)] rounded-xl border border-cream-200 bg-white py-1 shadow-warm"
                   >
                     <p className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-cocoa-400">
                       Optional columns
                     </p>
-                    {(
-                      [
-                        ["category", "Category"],
-                        ["threshold", "Threshold"],
-                        ["location", "Location"],
-                        ["expiry", "Expiry"],
-                      ] as [OnHandOptionalColumn, string][]
-                    ).map(([column, label]) => (
-                      <button
-                        key={column}
-                        role="menuitemcheckbox"
-                        type="button"
-                        aria-checked={tableColumns[column]}
-                        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-cocoa-700 hover:bg-cream-50"
-                        onClick={() => toggleOnHandColumn(column)}
-                      >
-                        <span
-                          aria-hidden="true"
-                          className={`inline-flex h-3.5 w-3.5 items-center justify-center rounded border text-[10px] leading-none ${
-                            tableColumns[column]
-                              ? "border-cocoa-800 bg-cocoa-800 text-white"
-                              : "border-cream-300 bg-white text-transparent"
-                          }`}
+                    <fieldset className="m-0 border-0 p-0">
+                      <legend className="sr-only">Optional columns</legend>
+                      {(
+                        [
+                          ["category", "Category"],
+                          ["threshold", "Threshold"],
+                          ["location", "Location"],
+                          ["expiry", "Expiry"],
+                        ] as [OnHandOptionalColumn, string][]
+                      ).map(([column, label]) => (
+                        <label
+                          key={column}
+                          htmlFor={`onhand-col-${column}`}
+                          className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-xs text-cocoa-700 hover:bg-cream-50"
                         >
-                          ✓
-                        </span>
-                        {label}
-                      </button>
-                    ))}
+                          <input
+                            id={`onhand-col-${column}`}
+                            type="checkbox"
+                            className="h-4 w-4 accent-cocoa-800"
+                            checked={tableColumns[column]}
+                            onChange={() => toggleOnHandColumn(column)}
+                          />
+                          {label}
+                        </label>
+                      ))}
+                    </fieldset>
                     <button
-                      role="menuitem"
                       type="button"
                       className="block w-full border-t border-cream-100 px-3 py-2 text-left text-xs font-medium text-cocoa-500 hover:bg-cream-50"
                       onClick={() => {
                         setTableColumns({ ...DEFAULT_ONHAND_COLUMNS });
-                        setColumnsMenuOpen(false);
                       }}
                     >
                       Reset columns
@@ -3264,7 +3362,7 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
 
       {reportPreviewOpen && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-2 sm:p-5"
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-2 sm:p-5"
           onMouseDown={(event) => {
             if (event.target === event.currentTarget && !emailSending) {
               setReportPreviewOpen(false);
@@ -3273,10 +3371,12 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
           }}
         >
           <section
+            ref={previewPanelRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby="report-preview-title"
-            className="flex max-h-[96vh] w-full max-w-7xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
+            tabIndex={-1}
+            className="flex max-h-[96vh] w-full max-w-7xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl outline-none"
           >
             <header className="flex items-center justify-between gap-4 border-b border-cream-200 px-4 py-3 sm:px-6">
               <div>
@@ -3285,6 +3385,11 @@ const [activeTab, setActiveTab] = useState<ReportsTab>("overview");
                 </h2>
                 <p className="text-xs text-cocoa-400">
                   Preview of the current filtered stock dashboard
+                </p>
+                <p className="mt-0.5 text-[10px] leading-4 text-cocoa-400">
+                  Matching rows are included up to the report safety caps
+                  (by default 10,000 items / 5,000 transactions). If a cap
+                  truncates the report, the PDF says so on its cover.
                 </p>
               </div>
               <button

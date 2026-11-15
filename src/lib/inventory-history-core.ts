@@ -63,6 +63,24 @@ export type HistoryPoint = {
 
 export type HistoryCompleteness = "complete" | "truncated" | "unknown";
 
+/**
+ * Which limit, if any, bound the scan.
+ *
+ *   - "ledger-ended": the ledger ended inside the budget — nothing was
+ *     stopped;
+ *   - "movement-lines": the movement-line budget bound the walk, or the
+ *     bounded probe found a line past it;
+ *   - "transaction-rows": the transaction-row budget bound the walk, or the
+ *     bounded probe found a row past it.
+ *
+ * When `completeness` is "unknown" this names the budget that was reached
+ * without its question being decided — never a guess about which one.
+ */
+export type HistoryStopReason =
+  | "ledger-ended"
+  | "movement-lines"
+  | "transaction-rows";
+
 export type HistoryCoverage = {
   /** Earliest movement actually scanned (ISO timestamp), or null if none. */
   historyFrom: string | null;
@@ -72,10 +90,21 @@ export type HistoryCoverage = {
   movementsScanned: number;
   /** Transactions read out of the ledger. */
   transactionsScanned: number;
-  /** The scan cap that was applied. */
+  /** The movement-line cap that was applied. */
   cap: number;
+  /** The transaction-row cap that was applied. */
+  transactionCap: number;
   /** True when more history was known to exist than the cap allows. */
   truncated: boolean;
+  /**
+   * Why the scan stopped.
+   *
+   * With `completeness: "complete"`, "ledger-ended" means the ledger
+   * verifiably ended inside the budget. Otherwise this names the budget that
+   * was reached — "movement-lines" or "transaction-rows" — which is what the
+   * incomplete-history warning needs to say.
+   */
+  stopReason: HistoryStopReason;
   /**
    * Whether the scan saw the whole ledger.
    *
@@ -218,6 +247,7 @@ export type RawScan = {
   historyTo: string | null;
   truncated: boolean;
   completeness: HistoryCompleteness;
+  stopReason: HistoryStopReason;
 };
 
 /** A transaction row as the scan reads it. */
@@ -321,6 +351,7 @@ export async function scanLedger(source: LedgerSource): Promise<RawScan> {
   let earliest: number | null = null;
   let latest: number | null = null;
   let completeness: HistoryCompleteness | null = null;
+  let stopReason: HistoryStopReason | null = null;
 
   while (
     scannedLines < SCAN_CAP &&
@@ -331,6 +362,7 @@ export async function scanLedger(source: LedgerSource): Promise<RawScan> {
     if (page.length === 0) {
       // The ledger ended inside the cap: nothing was missed.
       completeness = "complete";
+      stopReason = "ledger-ended";
       break;
     }
 
@@ -415,15 +447,18 @@ export async function scanLedger(source: LedgerSource): Promise<RawScan> {
         source,
         offset + examinedOnThisPage
       );
+      stopReason = "transaction-rows";
       break;
     }
 
     if (stopped) {
       completeness = "truncated";
+      stopReason = "movement-lines";
       break;
     }
     if (page.length < PAGE_SIZE) {
       completeness = "complete";
+      stopReason = "ledger-ended";
       break;
     }
     offset += page.length;
@@ -433,9 +468,13 @@ export async function scanLedger(source: LedgerSource): Promise<RawScan> {
     /*
      * The loop left on a page boundary — every fetched line was taken and
      * there was no line left to refuse, or the transaction budget was
-     * exhausted exactly as a page completed. Whether anything exists past
-     * that point is precisely what the probe is for.
+     * exhausted exactly as a page completed. The budget that bound the walk
+     * is whichever ran out; the probe decides the completeness answer.
      */
+    stopReason =
+      transactionsScanned >= MAX_TRANSACTION_ROWS
+        ? "transaction-rows"
+        : "movement-lines";
     completeness = await probeForNextLine(source, offset);
   }
 
@@ -452,6 +491,7 @@ export async function scanLedger(source: LedgerSource): Promise<RawScan> {
     historyTo: latest === null ? null : new Date(latest).toISOString(),
     truncated: completeness === "truncated",
     completeness,
+    stopReason: stopReason ?? "ledger-ended",
   };
 }
 
@@ -805,8 +845,10 @@ export function buildHistoryFromScan(
       movementsScanned: scan.movementsScanned,
       transactionsScanned: scan.transactionsScanned,
       cap: SCAN_CAP,
+      transactionCap: MAX_TRANSACTION_ROWS,
       truncated: scan.truncated,
       completeness: scan.completeness,
+      stopReason: scan.stopReason,
     },
     valuation: {
       itemsInScope: scoped.length,

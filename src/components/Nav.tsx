@@ -287,7 +287,9 @@ export function Nav({
           </button>
         </div>
 
-        <nav className="sidebar-nav min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-3 py-2 lg:overflow-hidden">
+        {/* Always scrollable: at short viewport heights or increased zoom the
+            groups must remain reachable — nothing may clip at the fold. */}
+        <nav className="sidebar-nav min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-3 py-2">
           {groups.map((group) => (
             <div key={group.title} className="mb-2">
               <div className="px-3 pb-1 pt-1 text-[10px] font-bold uppercase tracking-[0.16em] text-cream-300/40">

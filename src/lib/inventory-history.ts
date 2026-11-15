@@ -50,6 +50,7 @@ export type {
   HistoryGranularity,
   HistoryPoint,
   HistoryCompleteness,
+  HistoryStopReason,
   HistoryCoverage,
   HistoryValuation,
   InventoryHistory,

@@ -32,6 +32,54 @@ const MOVEMENT_LABEL: Record<string, string> = {
   waste: "Logged as waste",
 };
 
+/**
+ * A filter the caller got wrong. A distinct type so the routes can answer
+ * 400 rather than silently substituting something the caller did not ask for.
+ */
+export class StockReportFilterError extends Error {}
+
+/*
+ * Safety caps on the export builders.
+ *
+ * A report must not read the whole world into memory on an ordinary request.
+ * These caps bound both builders; exceeding them truncates honestly and the
+ * report says so. The caps are positive integers and may be lowered for
+ * tests via CAFETRACK_EXPORT_ITEM_CAP / CAFETRACK_EXPORT_MOVEMENT_CAP —
+ * never removed, never raised past the documented maxima.
+ */
+export const DEFAULT_ITEM_EXPORT_CAP = 10_000;
+export const DEFAULT_MOVEMENT_EXPORT_CAP = 5_000;
+const MAX_EXPORT_CAP = 100_000;
+
+function exportCap(
+  name: "CAFETRACK_EXPORT_ITEM_CAP" | "CAFETRACK_EXPORT_MOVEMENT_CAP",
+  fallback: number
+): number {
+  const raw = (process.env[name] ?? "").trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  // Zero, negative, non-finite, non-integer and implausibly large values all
+  // fall back to the documented default — configuration cannot remove the
+  // safety limits.
+  if (
+    !Number.isFinite(parsed) ||
+    !Number.isInteger(parsed) ||
+    parsed < 1 ||
+    parsed > MAX_EXPORT_CAP
+  ) {
+    return fallback;
+  }
+  return parsed;
+}
+
+export function itemExportCap(): number {
+  return exportCap("CAFETRACK_EXPORT_ITEM_CAP", DEFAULT_ITEM_EXPORT_CAP);
+}
+
+export function movementExportCap(): number {
+  return exportCap("CAFETRACK_EXPORT_MOVEMENT_CAP", DEFAULT_MOVEMENT_EXPORT_CAP);
+}
+
 export function parseStockReportFilters(input: unknown): StockReportFilters {
   const outer = (input ?? {}) as Record<string, unknown>;
   const body =
@@ -45,33 +93,63 @@ export function parseStockReportFilters(input: unknown): StockReportFilters {
       ? body.type
       : "";
 
+  /*
+   * The timezone must be a zone Intl recognises. Invalid or missing input
+   * does NOT fall back to UTC silently — a wrong report in the wrong zone is
+   * worse than a 400 that names the problem.
+   */
+  const tzRaw =
+    typeof body.tz === "string" && body.tz.trim() ? body.tz.trim() : "";
+  if (tzRaw && !isValidTimeZone(tzRaw)) {
+    throw new StockReportFilterError("That timezone is not recognised");
+  }
+
   return {
     from: day(body.from),
     to: day(body.to),
     staff: typeof body.staff === "string" ? body.staff.trim() : "",
     type: movementType,
     categoryId: typeof body.category_id === "string" ? body.category_id.trim() : "",
-    tz: isValidTimeZone(body.tz) ? body.tz : "",
+    tz: tzRaw,
   };
 }
 
-export async function buildStockReportData(filters: StockReportFilters): Promise<PdfReport> {
-  const [itemRows, movementResult] = await Promise.all([
-    db()
-      .from("items")
-      .select(
-        `sku, name, unit, quantity, low_stock_threshold, expiration_date,
-         category:categories(id, name),
-         location:locations(id, name)`
-      )
-      .eq("item_status", "active")
-      .order("name", { ascending: true })
-      .limit(500),
-    fetchMovements(filters),
-  ]);
+/** Whether a capped section is known-complete, known-truncated, or unverified. */
+export type ExportCompleteness = "complete" | "truncated" | "unknown";
 
-  if (itemRows.error) throw new Error(itemRows.error.message);
+export async function buildStockReportData(
+  filters: StockReportFilters
+): Promise<PdfReport> {
+  const itemCap = itemExportCap();
+  const movementCap = movementExportCap();
+  const [itemFetch, movementResult] = await Promise.all([
+    fetchItems(itemCap),
+    fetchMovements(filters, movementCap),
+  ]);
   const movements = movementResult.transactions;
+
+  const itemCompleteness = itemFetch.completeness;
+  const movementCompleteness = movementResult.movementsCompleteness;
+
+  const completenessWarnings: string[] = [];
+  if (itemCompleteness === "truncated") {
+    completenessWarnings.push(
+      `The report includes the first ${itemCap.toLocaleString("en-PH")} catalogue items (ordered by name). Additional items exist and were not included.`
+    );
+  } else if (itemCompleteness === "unknown") {
+    completenessWarnings.push(
+      `The report includes the first ${itemCap.toLocaleString("en-PH")} catalogue items (ordered by name); whether more exist could not be verified.`
+    );
+  }
+  if (movementCompleteness === "truncated") {
+    completenessWarnings.push(
+      `The report includes the ${movementCap.toLocaleString("en-PH")} newest matching transactions. Additional transactions exist and were not included.`
+    );
+  } else if (movementCompleteness === "unknown") {
+    completenessWarnings.push(
+      `The report includes the ${movementCap.toLocaleString("en-PH")} newest matching transactions; whether more exist could not be verified.`
+    );
+  }
 
   const categoryName = filters.categoryId
     ? (await db()
@@ -91,7 +169,7 @@ export async function buildStockReportData(filters: StockReportFilters): Promise
     staffName = staffResult.data?.full_name ?? filters.staff;
   }
 
-  const allItems = (itemRows.data ?? []) as any[];
+  const allItems = (itemFetch.rows ?? []) as any[];
   const items = categoryName
     ? allItems.filter((item) => item.category?.name === categoryName)
     : allItems;
@@ -157,16 +235,28 @@ export async function buildStockReportData(filters: StockReportFilters): Promise
     return { label: MOVEMENT_LABEL[type], count: rows.length, qty: fmtQty(qty) };
   });
 
+  const warnings = [
+    ...(movementResult.transactionNotesAvailable ? [] : [TRANSACTION_NOTE_SCHEMA_WARNING]),
+    ...completenessWarnings,
+  ];
+
   return {
     businessName: await businessName(),
     generated: new Date().toLocaleString("en-PH", {
       dateStyle: "medium",
       timeStyle: "short",
+      timeZone: filters.tz || "UTC",
     }),
     filterDescription: describeFilters(filters, categoryName, staffName),
-    warnings: movementResult.transactionNotesAvailable
-      ? []
-      : [TRANSACTION_NOTE_SCHEMA_WARNING],
+    warnings,
+    completeness: {
+      items: itemCompleteness,
+      movements: movementCompleteness,
+      itemsScanned: items.length,
+      movementsScanned: movements.length,
+      itemCap,
+      movementCap,
+    },
     tiles: [
       { label: "Items tracked", value: items.length },
       {
@@ -224,17 +314,114 @@ export async function buildStockReportData(filters: StockReportFilters): Promise
   };
 }
 
-async function fetchMovements(
-  filters: StockReportFilters
-): Promise<{ transactions: any[]; transactionNotesAvailable: boolean }> {
+/*
+ * The shared shape of the bounded paging loops the export builders use:
+ * read pages newest-first, stop AT the cap, and when the cap lands exactly
+ * on a page boundary ask whether one more matching row exists — so the
+ * builder can say "additional records exist" honestly. It never reports an
+ * exact count of omitted rows unless one was counted.
+ */
+
+async function hasAnyMatchingTransactionRow(
+  filters: StockReportFilters,
+  offset: number
+): Promise<ExportCompleteness> {
+  let query = db()
+    .from("transactions")
+    .select("id")
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: true })
+    .range(offset, offset);
+
+  if (filters.type) query = query.eq("type", filters.type);
+  const zone = filters.tz || "UTC";
+  if (filters.from) {
+    const bounds = localDayBoundsIso(filters.from, zone);
+    if (bounds) query = query.gte("created_at", bounds.fromAt);
+  }
+  if (filters.to) {
+    const bounds = localDayBoundsIso(filters.to, zone);
+    if (bounds) query = query.lt("created_at", bounds.before);
+  }
+  if (filters.staff) {
+    query = /^[0-9a-f-]{36}$/i.test(filters.staff)
+      ? query.eq("actor_id", filters.staff)
+      : query.eq("actor_name", filters.staff);
+  }
+
+  const result = await query;
+  if (result.error) return "unknown"; // cannot verify: disclose as unverified
+  return (result.data?.length ?? 0) > 0 ? "truncated" : "complete";
+}
+
+async function hasAnyMoreItems(offset: number): Promise<ExportCompleteness> {
+  const result = await db()
+    .from("items")
+    .select("id")
+    .eq("item_status", "active")
+    .range(offset, offset);
+
+  if (result.error) return "unknown"; // cannot verify: disclose as unverified
+  return (result.data?.length ?? 0) > 0 ? "truncated" : "complete";
+}
+
+async function fetchItems(
+  cap: number
+): Promise<{ rows: any[]; completeness: ExportCompleteness }> {
   const all: any[] = [];
   const pageSize = 500;
-  const cap = 5000;
+  let offset = 0;
+
+  while (all.length < cap) {
+    const take = Math.min(pageSize, cap - all.length);
+    const itemResult = await db()
+      .from("items")
+      .select(
+        `sku, name, unit, quantity, low_stock_threshold, expiration_date,
+         category:categories(id, name),
+         location:locations(id, name)`
+      )
+      .eq("item_status", "active")
+      .order("name", { ascending: true })
+      // A stable second key: equal names may come back in any order between
+      // two requests, which would reshuffle pages and could show one row twice.
+      .order("sku", { ascending: true })
+      .range(offset, offset + take - 1);
+
+    if (itemResult.error) throw new Error(itemResult.error.message);
+
+    const page = (itemResult.data ?? []) as any[];
+    if (page.length === 0) break;
+    all.push(...page);
+    offset += page.length;
+    if (page.length < take) break; // the catalogue ended
+  }
+
+  const completeness =
+    all.length >= cap ? await hasAnyMoreItems(offset) : "complete";
+
+  return { rows: all, completeness };
+}
+
+async function fetchMovements(
+  filters: StockReportFilters,
+  cap: number
+): Promise<{
+  transactions: any[];
+  transactionNotesAvailable: boolean;
+  movementsCompleteness: ExportCompleteness;
+}> {
+  const all: any[] = [];
+  const pageSize = 500;
   let offset = 0;
   let transactionNoteAvailable = true;
   let itemNoteAvailable = true;
 
   while (all.length < cap) {
+    // Stop AT the cap: read at most the remaining budget this iteration. A
+    // short read means the ledger ended — not the cap; only an exactly-full
+    // last iteration leaves `all.length === cap`, when the probe decides.
+    const take = Math.min(pageSize, cap - all.length);
     const selections: { transactionNote: boolean; itemNote: boolean }[] = [
       { transactionNote: transactionNoteAvailable, itemNote: itemNoteAvailable },
       { transactionNote: false, itemNote: itemNoteAvailable },
@@ -258,7 +445,7 @@ async function fetchMovements(
         )
         .order("created_at", { ascending: false })
         .order("id", { ascending: true })
-        .range(offset, offset + pageSize - 1);
+        .range(offset, offset + take - 1);
 
       if (filters.type) query = query.eq("type", filters.type);
       const zone = filters.tz || "UTC";
@@ -295,18 +482,24 @@ async function fetchMovements(
 
     const page = (data ?? []) as any[];
     all.push(...page);
-    if (page.length < pageSize) {
+    offset += page.length;
+    if (page.length < take) {
+      // The ledger ended inside the remaining budget — a short read is the
+      // end of the matching ledger, never the cap boundary.
       return {
         transactions: all,
         transactionNotesAvailable: transactionNoteAvailable && itemNoteAvailable,
+        movementsCompleteness: "complete" as ExportCompleteness,
       };
     }
-    offset += page.length;
   }
 
+  // The cap landed exactly at a page boundary: ask whether one more matching
+  // row exists, and disclose uncertainty honestly if the probe cannot tell.
   return {
     transactions: all,
     transactionNotesAvailable: transactionNoteAvailable && itemNoteAvailable,
+    movementsCompleteness: await hasAnyMatchingTransactionRow(filters, offset),
   };
 }
 

@@ -161,8 +161,12 @@ export function InventoryValueTrendChart({
       {coverage && completeness !== "complete" && (
         <p className="font-semibold text-ochre-700">
           {completeness === "truncated"
-            ? `Movement history is incomplete. Only the most recent ${coverage.cap.toLocaleString("en-PH")} movements were scanned. Historical stock levels before the earliest available movement cannot be verified.`
-            : "Movement history could not be verified in full. The scan reached its limit and the follow-up check could not confirm whether older movements exist."}
+            ? coverage.stopReason === "transaction-rows"
+              ? `Movement history is incomplete. The scan reached the limit of ${coverage.transactionCap.toLocaleString("en-PH")} transactions, so earlier movements were not read. Historical stock levels before the earliest available movement cannot be verified.`
+              : `Movement history is incomplete. Only the most recent ${coverage.cap.toLocaleString("en-PH")} movements were scanned. Historical stock levels before the earliest available movement cannot be verified.`
+            : coverage.stopReason === "transaction-rows"
+              ? `Movement history could not be verified in full. The scan reached its limit of ${coverage.transactionCap.toLocaleString("en-PH")} transactions and the follow-up check could not confirm whether older movements exist.`
+              : "Movement history could not be verified in full. The scan reached its limit and the follow-up check could not confirm whether older movements exist."}
           {requested?.rangeShortened && requested.effectiveFrom && (
             <span className="block text-ochre-800">
               The requested range was shortened to start on{" "}

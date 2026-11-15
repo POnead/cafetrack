@@ -508,6 +508,171 @@ console.log("\nscan — empty transactions are counted exactly once");
   );
 }
 
+function scanOfLineCapped(overrides) {
+  return scanOf({
+    completeness: "truncated",
+    truncated: true,
+    stopReason: "movement-lines",
+    movementsScanned: 50000,
+    historyFrom: new Date(Date.parse("2026-11-03T00:00:00.000Z")).toISOString(),
+    historyTo: new Date(Date.parse("2026-11-05T00:00:00.000Z")).toISOString(),
+    ...overrides,
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* scan — the stop reason travels with the scan and the coverage data */
+/* ------------------------------------------------------------------ */
+
+console.log("\nscan — the stop reason is reported with the scan");
+{
+  const ledger = makeLedger(250, 201, Date.parse("2026-11-01T00:00:00.000Z"));
+  const scan = await scanLedger(makeSource(ledger));
+  check(
+    "a line-cap truncation reports stopReason \"movement-lines\"",
+    scan.stopReason === "movement-lines",
+    scan.stopReason
+  );
+}
+{
+  const ledger = makeLedger(
+    60_000,
+    0,
+    Date.parse("2026-11-01T00:00:00.000Z")
+  );
+  const scan = await scanLedger(makeSource(ledger));
+  check(
+    "the transaction budget reports stopReason \"transaction-rows\"",
+    scan.stopReason === "transaction-rows",
+    scan.stopReason
+  );
+}
+{
+  // Exactly the transaction budget and then nothing: the ledger ends and the
+  // probe confirms it, while the budget that stopped the walk is named.
+  const ledger = makeLedger(
+    MAX_TRANSACTION_ROWS,
+    0,
+    Date.parse("2026-11-01T00:00:00.000Z")
+  );
+  const scan = await scanLedger(makeSource(ledger));
+  check(
+    "an exact-budget ledger that ends reports transaction-rows and complete",
+    scan.stopReason === "transaction-rows" && scan.completeness === "complete",
+    `${scan.stopReason}/${scan.completeness}`
+  );
+}
+{
+  const empty = makeLedger(
+    MAX_TRANSACTION_ROWS,
+    0,
+    Date.parse("2026-11-01T00:00:00.000Z")
+  );
+  const withLine = {
+    created_at: new Date(Date.parse("2026-10-01T00:00:00.000Z")).toISOString(),
+    lines: [{ sku: "AAA", qty_before: 1, qty_after: 2 }],
+  };
+  const scan = await scanLedger(makeSource([...empty, withLine]));
+  check(
+    "a line found past the transaction budget is truncated / transaction-rows",
+    scan.stopReason === "transaction-rows" &&
+      scan.completeness === "truncated" &&
+      scan.truncated === true,
+    `${scan.stopReason}/${scan.completeness}`
+  );
+}
+{
+  // Line cap, exact page boundary, one more line beyond: the probe reports
+  // truncation and the reason is the movement-line budget.
+  const full = makeLedger(500, 100, Date.parse("2026-11-01T00:00:00.000Z"));
+  const withExtra = [
+    ...full,
+    {
+      created_at: new Date(Date.parse("2026-10-01T00:00:00.000Z")).toISOString(),
+      lines: [{ sku: "AAA", qty_before: 1, qty_after: 2 }],
+    },
+  ];
+  const scan = await scanLedger(makeSource(withExtra));
+  check(
+    "a line found past the line-cap boundary is truncated / movement-lines",
+    scan.stopReason === "movement-lines" &&
+      scan.completeness === "truncated",
+    `${scan.stopReason}/${scan.completeness}`
+  );
+}
+{
+  // Line cap, exact page boundary, probe cannot decide: unknown, and the
+  // reason stays the movement-line budget.
+  const full = makeLedger(500, 100, Date.parse("2026-11-01T00:00:00.000Z"));
+  const noise = Array.from({ length: 2000 }, (_, i) => ({
+    created_at: new Date(Date.parse("2026-09-01T00:00:00.000Z") - i * 60_000).toISOString(),
+    lines: [],
+  }));
+  const beyond = {
+    created_at: new Date(Date.parse("2026-08-01T00:00:00.000Z")).toISOString(),
+    lines: [{ sku: "AAA", qty_before: 1, qty_after: 2 }],
+  };
+  const scan = await scanLedger(makeSource([...full, ...noise, beyond]));
+  check(
+    "an undecidable probe reports unknown / movement-lines",
+    scan.stopReason === "movement-lines" &&
+      scan.completeness === "unknown" &&
+      scan.truncated === false,
+    `${scan.stopReason}/${scan.completeness}`
+  );
+}
+{
+  const ledger = makeLedger(3, 4, Date.parse("2026-11-01T00:00:00.000Z"));
+  const scan = await scanLedger(makeSource(ledger));
+  check(
+    "an ordinary complete ledger reports ledger-ended",
+    scan.stopReason === "ledger-ended" && scan.completeness === "complete",
+    scan.stopReason
+  );
+}
+{
+  // Reconstruction: a transaction-cap truncation clamps exactly like a
+  // movement-line one — reason is metadata, not a different computation.
+  const result = buildHistoryFromScan(
+    scanOf({
+      completeness: "truncated",
+      truncated: true,
+      stopReason: "transaction-rows",
+      movementsScanned: 50000,
+      historyFrom: new Date(Date.parse("2026-11-03T00:00:00.000Z")).toISOString(),
+      historyTo: new Date(Date.parse("2026-11-05T00:00:00.000Z")).toISOString(),
+    }),
+    { from: "2026-01-01", to: "2026-11-10", category: null }
+  );
+  check(
+    "transaction-cap truncation clamps the range exactly like line-cap truncation",
+    result.requested.effectiveFrom === "2026-11-03" &&
+      result.requested.rangeShortened === true &&
+      result.requested.from === "2026-01-01",
+    `effectiveFrom ${result.requested.effectiveFrom}`
+  );
+  check(
+    "coverage exposes the transaction stop reason and cap",
+    result.coverage.stopReason === "transaction-rows" &&
+      result.coverage.transactionCap === 50000 &&
+      result.coverage.cap === 50000,
+    JSON.stringify(result.coverage.stopReason)
+  );
+}
+{
+  const result = buildHistoryFromScan(
+    scanOfLineCapped({}),
+    { from: "2026-01-01", to: "2026-11-10", category: null }
+  );
+  check(
+    "coverage exposes the movement-line stop reason",
+    result.coverage.stopReason === "movement-lines" &&
+      result.coverage.cap === 50000 &&
+      result.coverage.truncated === true,
+    JSON.stringify([result.coverage.stopReason, result.coverage.truncated])
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* scan — invalid rows still consume the cap                            */
 /* ------------------------------------------------------------------ */
@@ -680,6 +845,7 @@ function scanOf(overrides) {
     historyTo: new Date(Date.parse("2026-11-05T00:00:00.000Z")).toISOString(),
     truncated: false,
     completeness: "complete",
+    stopReason: "ledger-ended",
     ...overrides,
   };
 }

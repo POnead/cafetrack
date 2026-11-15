@@ -1,7 +1,13 @@
 "use client";
 
 import { createPortal } from "react-dom";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
 
 /* ------------------------------------------------------------------ */
 /* Card                                                               */
@@ -214,6 +220,70 @@ export function Spinner({ label = "Loading..." }: { label?: string }) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Focus containment for modal dialogs                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Focus containment for a modal dialog panel.
+ *
+ * Focus lands inside the panel on activation and wraps with Tab/Shift+Tab
+ * until it closes, when focus returns to whatever was focused before. Without
+ * this, keyboard users can tab behind the dialog into the page underneath.
+ */
+export function useDialogFocusTrap(
+  panelRef: RefObject<HTMLElement | null>,
+  active: boolean
+) {
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!active) return;
+    restoreFocusRef.current = document.activeElement as HTMLElement | null;
+    const panel = panelRef.current;
+    if (!panel) return;
+
+    const focusable = () =>
+      Array.from(
+        panel.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )
+      ).filter((element) => element.offsetParent !== null);
+
+    const items = focusable();
+    (items[0] ?? panel).focus();
+
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const current = focusable();
+      if (current.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const first = current[0];
+      const last = current[current.length - 1];
+      const focusActive = document.activeElement as HTMLElement | null;
+      const inside = focusActive !== null && panel.contains(focusActive);
+      if (event.shiftKey) {
+        if (!inside || focusActive === first) {
+          event.preventDefault();
+          last.focus();
+        }
+      } else if (!inside || focusActive === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("keydown", onKey, true);
+      restoreFocusRef.current?.focus?.();
+      restoreFocusRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active]);
+}
+
+/* ------------------------------------------------------------------ */
 /* Modal                                                              */
 /* ------------------------------------------------------------------ */
 
@@ -237,7 +307,10 @@ export function Modal({
   tone?: "default" | "warning" | "danger";
 }) {
   const contentRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const [mounted, setMounted] = useState(false);
+
+  useDialogFocusTrap(panelRef, open && mounted);
 
   useEffect(() => {
     setMounted(true);
@@ -265,12 +338,14 @@ export function Modal({
   }[tone];
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-cocoa-900/55 p-4 backdrop-blur-[3px]">
+    <div className="fixed inset-0 z-[80] flex items-start justify-center overflow-y-auto bg-cocoa-900/55 p-4 backdrop-blur-[3px]">
       <div
+        ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="modal-title"
-        className={`relative my-auto flex max-h-[calc(100dvh-2rem)] w-full ${width} flex-col overflow-hidden rounded-[24px] border border-cream-200 bg-white shadow-[0_24px_70px_rgba(61,43,31,0.24)]`}
+        tabIndex={-1}
+        className={`relative my-auto flex max-h-[calc(100dvh-2rem)] w-full ${width} flex-col overflow-hidden rounded-[24px] border border-cream-200 bg-white shadow-[0_24px_70px_rgba(61,43,31,0.24)] outline-none`}
       >
         <div className={`h-1 w-full ${accent}`} />
         <div className="relative flex shrink-0 items-center justify-between border-b border-cream-200 bg-cream-50 px-5 py-4">
